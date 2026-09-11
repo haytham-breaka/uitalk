@@ -1,0 +1,285 @@
+// The page tools, defined once and independent of any agent SDK.
+//
+// A handler here knows nothing about which agent is calling it: it takes arguments,
+// asks the page, and returns MCP content blocks. That is what lets the same
+// definitions serve both the built-in Claude session and a standalone MCP server
+// any other client can connect to.
+
+export const text = (value) => ({
+  content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
+});
+
+export const failed = (err) => ({
+  content: [{ type: "text", text: `The page could not answer: ${err.message}` }],
+  isError: true,
+});
+
+/**
+ * @param {(method: string, params?: unknown, timeout?: number) => Promise<any>} callPage
+ * @param {(method: string, message: string) => void} report
+ * @param {((path: string, needles: string[]) => any) | null} findInHtml
+ */
+export function toolDefinitions(callPage, report = () => {}, findInHtml = null) {
+  const ask = async (method, params) => {
+    try {
+      return text(await callPage(method, params));
+    } catch (err) {
+      report(method, err.message);
+      return failed(err);
+    }
+  };
+
+  return [
+    {
+      name: "read_selection",
+      readOnly: true,
+      always: true,
+      description:
+        "Read the user's current element selection. Returns each selected element in the order " +
+        "it was picked (ref 1, 2, 3...) with its identifiers, geometry and box metrics, plus the " +
+        "layout context of their nearest common ancestor, the pixel deltas between them, and the " +
+        "viewport they are laid out in — which may be a simulated device size rather than the " +
+        "browser window. Read this before proposing any change, and before answering any " +
+        "question about position, alignment or spacing.",
+      schema: {},
+      run: () => ask("readSelection"),
+    },
+    {
+      name: "capture",
+      readOnly: true,
+      always: true,
+      description:
+        "Screenshot the current selection (or the page) and return it as an image, with an " +
+        "inventory of the elements inside the shot whose coordinates are relative to the " +
+        "image's top-left corner. A still frame cannot show motion: use frames for a strip, and " +
+        "delay to catch a state that exists only briefly. Call it again after a change to check " +
+        "the result. It never waits for the network — what had not arrived is named in the " +
+        "warnings.",
+      schema: {
+        ref: { type: "number", description: "Selection ref to capture" },
+        region: {
+          type: "object",
+          description: "A viewport rectangle in CSS pixels, instead of an element",
+          properties: { left: { type: "number" }, top: { type: "number" },
+                        right: { type: "number" }, bottom: { type: "number" } },
+        },
+        inventory: { type: "boolean", description: "Include the element inventory (default true)" },
+        delay: { type: "number", description: "Milliseconds to wait before the shutter, up to 15000" },
+        frames: { type: "number", description: "Take a strip of up to 16 frames so motion is visible" },
+        every: { type: "number", description: "Milliseconds between frames (default 300)" },
+      },
+      run: async (args) => {
+        try {
+          const budget = 20000 + (args.delay ?? 0) + (args.frames ?? 1) * (args.every ?? 300);
+          const shot = await callPage("capture", args, budget);
+          const strip = shot.frames ?? [{ png: shot.png, at: 0 }];
+          const content = [];
+          for (const [i, f] of strip.entries()) {
+            if (strip.length > 1) {
+              content.push({ type: "text", text: `Frame ${i + 1} of ${strip.length}, +${f.at}ms` });
+            }
+            content.push({ type: "image", data: f.png, mimeType: "image/png" });
+          }
+          if (shot.inventory) {
+            content.push({
+              type: "text",
+              text:
+                `Capture ${shot.width}x${shot.height}px at dpr ${shot.dpr}` +
+                (shot.region ? ` of the region ${JSON.stringify(shot.region)}` : "") +
+                `. Coordinates below are relative to the image's top-left corner.\n` +
+                JSON.stringify(shot.inventory, null, 2),
+            });
+          }
+          for (const w of shot.warnings ?? []) content.push({ type: "text", text: `Note: ${w}` });
+          return { content };
+        } catch (err) {
+          report("capture", err.message);
+          return failed(err);
+        }
+      },
+    },
+    {
+      name: "capture_breakpoints",
+      readOnly: true,
+      description:
+        "The same element at several viewport widths, one image per width. This captures an " +
+        "element, not a rectangle, because a rectangle means something different at every " +
+        "width. Needs the split-screen shell, which owns the resizable frame.",
+      schema: {
+        ref: { type: "number", description: "Selection ref of the element to follow" },
+        selector: { type: "string", description: "A CSS selector, when nothing is selected" },
+        widths: { type: "array", items: { type: "number" },
+                  description: "Viewport widths in CSS pixels. Default 390, 768, 1440" },
+      },
+      run: async (args) => {
+        try {
+          const out = await callPage("captureBreakpoints", args, 60000);
+          const content = [];
+          for (const f of out.frames ?? []) {
+            content.push({ type: "text", text: `At ${f.label}` });
+            content.push({ type: "image", data: f.png, mimeType: "image/png" });
+          }
+          for (const note of out.notes ?? []) content.push({ type: "text", text: note });
+          if (!content.length) content.push({ type: "text", text: "nothing could be captured at those widths" });
+          return { content };
+        } catch (err) {
+          report("capture_breakpoints", err.message);
+          return failed(err);
+        }
+      },
+    },
+    {
+      name: "wait_for",
+      readOnly: true,
+      description:
+        "Wait until the page is ready to look at, instead of guessing with a delay. Give a CSS " +
+        "selector or some text; set gone:true to wait for it to disappear, which is how you wait " +
+        "out a spinner. Returns as soon as the condition holds, with how long it waited.",
+      schema: {
+        selector: { type: "string", description: "A CSS selector to wait for" },
+        text: { type: "string", description: "Text to wait for anywhere in the page" },
+        gone: { type: "boolean", description: "Wait for it to disappear rather than appear" },
+        timeout: { type: "number", description: "Give up after this many milliseconds (default 10000)" },
+      },
+      run: async (args) => {
+        try {
+          return text(await callPage("waitFor", args, (args.timeout ?? 10000) + 5000));
+        } catch (err) {
+          report("wait_for", err.message);
+          return failed(err);
+        }
+      },
+    },
+    {
+      name: "locate_source",
+      readOnly: true,
+      always: true,
+      description:
+        "Where an element came from in the codebase. Dev builds carry this: React and Svelte " +
+        "record the file and line of each element, Vue records the component's file. Failing " +
+        "that, the bridge searches the HTML it actually served. The reply names which of those " +
+        "answered — treat 'served-html' or 'none' as a lead to confirm, not a location to edit " +
+        "blind. Use this before hunting with grep.",
+      schema: {
+        ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
+        selector: { type: "string", description: "A CSS selector, when nothing is selected" },
+      },
+      run: async (args) => {
+        try {
+          const found = await callPage("locateSource", args);
+          if (found.tier !== "none" || !findInHtml) return text(found);
+          const id = found.element ?? {};
+          const guess = findInHtml(found.page?.path ?? "/", [
+            id.id && `id="${id.id}"`,
+            id.testId && `data-testid="${id.testId}"`,
+            id.aria && `aria-label="${id.aria}"`,
+            id.text,
+            id.classes?.[0] && `class="${id.classes[0]}`,
+          ]);
+          return text({ ...found, servedHtml: guess, tier: guess.found ? "served-html" : "none" });
+        } catch (err) {
+          report("locate_source", err.message);
+          return failed(err);
+        }
+      },
+    },
+    {
+      name: "describe_styles",
+      readOnly: true,
+      always: true,
+      description:
+        "Which CSS rules actually style an element, in cascade order, with the stylesheet each " +
+        "came from and which rule wins each property. Computed values say what a property ended " +
+        "up as, never what set it — the difference between editing the right line and editing " +
+        "one that loses the cascade. Call this before writing CSS to source.",
+      schema: {
+        ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
+        selector: { type: "string", description: "A CSS selector, when nothing is selected" },
+        properties: { type: "array", items: { type: "string" },
+                      description: "Narrow to these CSS properties" },
+      },
+      run: (args) => ask("describeStyles", args),
+    },
+    {
+      name: "scan_region",
+      readOnly: true,
+      description:
+        "List the visually significant elements inside a rectangle of the viewport, with their " +
+        "identifiers and boxes. Use this when a capture raises a question about something you " +
+        "cannot identify, instead of asking for a bigger screenshot.",
+      schema: {
+        x: { type: "number", description: "Left edge in CSS pixels" },
+        y: { type: "number", description: "Top edge in CSS pixels" },
+        w: { type: "number", description: "Width in CSS pixels" },
+        h: { type: "number", description: "Height in CSS pixels" },
+      },
+      required: ["x", "y", "w", "h"],
+      run: (args) => ask("scanRegion", args),
+    },
+    {
+      name: "try_style",
+      always: true,
+      description:
+        "Preview CSS on an element, named either by selection ref or by CSS selector. Applied " +
+        "through a preview stylesheet above the page's own; nothing is written to disk and a " +
+        "reload clears it. Show the user a change before they approve it. Do not use !important.",
+      schema: {
+        ref: { type: "number", description: "Selection ref" },
+        selector: { type: "string", description: "A CSS selector, when nothing is selected" },
+        declarations: { type: "string", description: "CSS declarations without braces" },
+        also: { type: "string", description: "Optional extra full CSS rules" },
+      },
+      required: ["declarations"],
+      run: (args) => ask("tryStyle", args),
+    },
+    {
+      name: "try_markup",
+      description:
+        "Preview replacement markup for a selected element's subtree. The original is kept in " +
+        "memory and restored on reset. A framework re-render discards this preview, so prefer " +
+        "try_style where a style change can express the same thing.",
+      schema: {
+        ref: { type: "number", description: "Selection ref to replace" },
+        html: { type: "string", description: "Replacement outerHTML" },
+      },
+      required: ["ref", "html"],
+      run: (args) => ask("tryMarkup", args),
+    },
+    {
+      name: "show_options",
+      always: true,
+      description:
+        "Mount several alternatives for the user to flip between and pick one. Target by ref or " +
+        "by CSS selector. Up to ten. The user's choice arrives as a new message from them, so " +
+        "finish your turn after calling this and wait — unless your client cannot receive one, " +
+        "in which case call await_choice next.",
+      schema: {
+        ref: { type: "number", description: "Selection ref the options apply to" },
+        selector: { type: "string", description: "A CSS selector, when nothing is selected" },
+        options: {
+          type: "array",
+          description: "Between 2 and 10 alternatives",
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", description: "Short label naming what it does differently" },
+              declarations: { type: "string", description: "CSS declarations without braces" },
+              also: { type: "string", description: "Optional extra full CSS rules" },
+            },
+            required: ["label", "declarations"],
+          },
+        },
+      },
+      required: ["options"],
+      run: (args) => ask("showOptions", args),
+    },
+    {
+      name: "reset_preview",
+      description:
+        "Discard the entire preview layer: drop all preview stylesheets, unmount any options, " +
+        "and restore any replaced markup. The page returns to exactly its own styling.",
+      schema: {},
+      run: () => ask("resetPreview"),
+    },
+  ];
+}

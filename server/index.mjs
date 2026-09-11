@@ -1,0 +1,934 @@
+// uitalk server.
+//
+// Holds one long-lived agent session whose input is a push-driven async
+// generator: a message from the page resolves a parked promise and reaches the
+// agent immediately. Nothing polls. The same socket carries request/response
+// calls in the other direction, so the agent's tools can read and preview
+// against the live page.
+//
+// Three things can be on the other end of that session, chosen by the `agent`
+// setting. `builtin` is Claude Code on the user's own subscription. `adapter` is
+// any model they hold a key for, driven over its HTTP API (./adapter.mjs).
+// `off` is nobody: the page tools are driven by an MCP client instead
+// (./mcp.mjs), so the panel's chat and context controls stand aside rather than
+// pretending to work. Everything below that is not the session itself — the
+// proxy, the tools, selection, capture, undo — is the same in all three.
+
+import { createServer } from "node:http";
+import { readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { WebSocketServer } from "ws";
+import { createAdapter } from "./adapter.mjs";
+import { createProxy, proxyUpgrade } from "./proxy.mjs";
+import * as registry from "./registry.mjs";
+import * as settings from "./settings.mjs";
+import * as snapshots from "./snapshots.mjs";
+
+// A fixed port would stop the second bridge from ever starting. An explicit
+// UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
+const FIXED_PORT = process.env.UITALK_PORT ? Number(process.env.UITALK_PORT) : null;
+const PORT_RANGE = Array.from({ length: 40 }, (_, i) => 8400 + i);
+let port = FIXED_PORT ?? PORT_RANGE[0];
+const PROJECT = process.env.UITALK_PROJECT ?? process.cwd();
+const RPC_TIMEOUT = Number(process.env.UITALK_RPC_TIMEOUT ?? 5000);
+const APP_HOST = process.env.UITALK_APP_HOST ?? "127.0.0.1";
+const APP_PORT = Number(process.env.UITALK_APP_PORT ?? 5173);
+const SOCKET_PATH = "/__uitalk/socket";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const log = (...a) => console.log(`[uitalk]`, ...a);
+
+let config = settings.load(PROJECT);
+
+// The injected client, served as one file so the page needs a single tag.
+//
+// It is read from disk when it has changed rather than once at startup: otherwise a
+// long-running bridge keeps serving the bundle it booted with, so updating the
+// plugin — or editing the client — would appear to do nothing until someone thought
+// to restart the bridge. The build stamp travels with it so a page that loaded an
+// older one says so instead of looking like a live bug.
+const CLIENT_FILES = ["api.js", "raster.js", "native.js", "shell.js", "ui.js"]
+  .map((f) => join(here, "..", "client", f));
+const SERVER_FILES = ["index.mjs", "page-tools.mjs", "tool-defs.mjs", "proxy.mjs",
+                      "settings.mjs", "registry.mjs", "snapshots.mjs"]
+  .map((f) => join(here, f));
+
+const stamp = (files) =>
+  files.map((f) => { try { return statSync(f).mtimeMs; } catch { return 0; } }).join(":");
+
+let clientCache = { key: "", body: "", build: "" };
+
+function readClient() {
+  const key = stamp(CLIENT_FILES);
+  if (key === clientCache.key) return clientCache;
+  const source = CLIENT_FILES.map((f) => readFileSync(f, "utf8")).join("\n;\n");
+  const build = createHash("sha1").update(source).digest("hex").slice(0, 8);
+  if (clientCache.build && clientCache.build !== build) {
+    log(`client rebuilt: ${clientCache.build} -> ${build} (reload any open page)`);
+    toPanel({ kind: "client_updated", build });
+  }
+  clientCache = { key, body: `globalThis.__UITALK_BUILD__ = ${JSON.stringify(build)};\n${source}`, build };
+  return clientCache;
+}
+
+// The bridge's own code cannot be swapped under a running process, so changes to it
+// are reported rather than applied — silently serving old behaviour is how an
+// already-fixed bug gets chased twice.
+const SERVER_STAMP = stamp(SERVER_FILES);
+
+function checkServerFreshness() {
+  if (stamp(SERVER_FILES) === SERVER_STAMP) return;
+  log("the bridge's own code has changed on disk — restart it to pick that up");
+  toPanel({ kind: "bridge_stale" });
+}
+
+// ---------------------------------------------------------------- transport
+
+// The last HTML served per path, so an element can be located even when the page
+// carries no framework metadata. Capped: this is a lookup aid, not a cache.
+const servedHtml = new Map();
+
+const appProxy = createProxy({
+  target: { host: APP_HOST, port: APP_PORT },
+  onHtml: (url, html) => {
+    const path = url.split("?")[0];
+    servedHtml.set(path, html);
+    while (servedHtml.size > 12) servedHtml.delete(servedHtml.keys().next().value);
+  },
+});
+
+/** Find a needle in the HTML we served for a path, reporting line and column. */
+function findInServedHtml(path, needles) {
+  const html = servedHtml.get(path) ?? servedHtml.get(path.replace(/\/$/, "")) ?? null;
+  if (!html) return { found: false, reason: `nothing served for ${path} yet` };
+
+  const lines = html.split("\n");
+  for (const needle of needles.filter(Boolean)) {
+    for (const [i, line] of lines.entries()) {
+      const col = line.indexOf(needle);
+      if (col !== -1) {
+        return {
+          found: true,
+          line: i + 1,
+          column: col + 1,
+          matched: needle,
+          excerpt: lines[i].trim().slice(0, 160),
+        };
+      }
+    }
+  }
+  return { found: false, reason: `none of ${needles.length} identifiers appear in the served HTML` };
+}
+
+const http = createServer((req, res) => {
+  // "The panel is not showing" is usually a request that never arrived: the tab is on
+  // the dev server's own port, or a cached HTML response carries no script tag. Seeing
+  // the requests settles it in one reload.
+  if (process.env.UITALK_DEBUG) log(`${req.method} ${req.url}`);
+
+  if (req.url === "/__uitalk/health") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        ok: true, pid: process.pid, port, clients: clients.size,
+        project: PROJECT, app: `${APP_HOST}:${APP_PORT}`, build: readClient().build,
+      }),
+    );
+    return;
+  }
+  if (req.url === "/__uitalk/client.js") {
+    const { body } = readClient();
+    checkServerFreshness();
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" });
+    res.end(body);
+    return;
+  }
+  // The split-screen shell: the app in a resizable frame, the panel beside it.
+  if (req.url === "/__uitalk/shell" || req.url.startsWith("/__uitalk/shell#")) {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end(
+      `<!doctype html><html data-uitalk-shell="1"><head><meta charset="utf-8">` +
+        `<title>uitalk</title></head><body>` +
+        `<script>window.__UITALK_SHELL__ = true;</script>` +
+        `<script src="/__uitalk/client.js"></script>` +
+        `</body></html>`,
+    );
+    return;
+  }
+
+  if (req.url === "/__uitalk/bookmarklet") {
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    res.end(
+      `javascript:(function(){var s=document.createElement('script');` +
+        `s.src='http://127.0.0.1:${PORT}/__uitalk/client.js';document.documentElement.appendChild(s);})()`,
+    );
+    return;
+  }
+  appProxy(req, res);
+});
+
+// Our socket is claimed by path; everything else upgrading (HMR) is piped to the app.
+const wss = new WebSocketServer({ noServer: true });
+const forwardUpgrade = proxyUpgrade({ target: { host: APP_HOST, port: APP_PORT } });
+
+http.on("upgrade", (req, socket, head) => {
+  if (req.url === SOCKET_PATH) {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+    return;
+  }
+  forwardUpgrade(req, socket, head);
+});
+
+const clients = new Set();
+
+function toPanel(frame) {
+  const json = JSON.stringify(frame);
+  for (const ws of clients) {
+    if (ws.readyState === ws.OPEN) ws.send(json);
+  }
+}
+
+// ------------------------------------------------------- page RPC (out-bound)
+
+let rpcSeq = 0;
+const pending = new Map();
+
+// Several tabs can be pointed at the bridge at once. Sending to whichever socket
+// happened to be first sent requests to a background tab, where rAF is paused and
+// the selection is somebody else's — so route to the page the user last used.
+let activePage = null;
+
+// Not every socket is a page. A standalone MCP server connects here too, on behalf
+// of an editor that is not Claude Code; it must never be mistaken for a page to send
+// requests to, and it needs to hear about approvals a page cannot push to it.
+const agents = new Set();
+
+function markActive(ws) {
+  if (!agents.has(ws)) activePage = ws;
+}
+
+function currentPage() {
+  if (activePage && activePage.readyState === activePage.OPEN && !agents.has(activePage)) return activePage;
+  const open = [...clients].filter((ws) => ws.readyState === ws.OPEN && !agents.has(ws));
+  return open.at(-1) ?? null; // most recently connected
+}
+
+const toAgents = (frame) => {
+  const json = JSON.stringify(frame);
+  for (const ws of agents) if (ws.readyState === ws.OPEN) ws.send(json);
+};
+
+function callPage(method, params = {}, timeoutMs = RPC_TIMEOUT) {
+  const page = currentPage();
+  if (!page) return Promise.reject(new Error("no page is connected"));
+
+  const id = ++rpcSeq;
+  page.send(JSON.stringify({ kind: "rpc", id, method, params }));
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pending.delete(id)) reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    pending.set(id, { resolve, reject, timer });
+  });
+}
+
+function settleRpc({ id, result, error }) {
+  const entry = pending.get(id);
+  if (!entry) return;
+  pending.delete(id);
+  clearTimeout(entry.timer);
+  if (error) entry.reject(new Error(error));
+  else entry.resolve(result);
+}
+
+// ------------------------------------------------- agent inbox (in-bound push)
+
+// Set once the session starts. The panel's chat, compaction and New-session
+// controls all go through this, so they behave the same whichever mode is running
+// and report honestly when the answer is "nobody is listening".
+let session = null;
+
+const AGENT_MODES = { builtin: "the built-in Claude session", adapter: "your own model", off: "an MCP client" };
+
+let wake = null;
+const backlog = [];
+
+function pushToAgent(content) {
+  if (session?.mode === "adapter") return session.send(content);
+  if (config.agent === "off") {
+    // Nothing can be pushed to an MCP client, and silently swallowing the message
+    // would look like an agent that never answers.
+    toPanel({
+      kind: "agent_absent",
+      text:
+        "uitalk is running without a built-in agent, so there is nobody here to read that. " +
+        "Ask in the editor that is connected over MCP — it has the page tools.",
+    });
+    return;
+  }
+  const msg = { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+  if (wake) {
+    const resume = wake;
+    wake = null;
+    resume(msg);
+  } else {
+    backlog.push(msg);
+  }
+}
+
+async function* inbox() {
+  for (;;) {
+    if (backlog.length) {
+      yield backlog.shift();
+      continue;
+    }
+    yield await new Promise((resolve) => {
+      wake = resolve;
+    });
+  }
+}
+
+// --------------------------------------------------------------- frame router
+
+wss.on("connection", (ws) => {
+  clients.add(ws);
+  log(`page connected (${clients.size} open)`);
+  ws.send(
+    JSON.stringify({
+      kind: "ready",
+      project: PROJECT,
+      port,
+      build: readClient().build,
+      settings: config,
+      fields: settings.FIELDS,
+      agent: { mode: config.agent, label: session?.label ?? null, of: AGENT_MODES[config.agent] },
+      context: { tokens: context.tokens, percent: context.percent, limit: config.contextTokens },
+    }),
+  );
+  if (transcript.length) ws.send(JSON.stringify({ kind: "replay", entries: transcript }));
+
+  ws.on("message", (raw) => {
+    let frame;
+    try {
+      frame = JSON.parse(raw.toString());
+    } catch {
+      return log("dropped a frame that was not JSON");
+    }
+
+    // Anything the user did in a page makes it the active one.
+    if (frame.kind !== "rpc_result") markActive(ws);
+
+    switch (frame.kind) {
+      case "rpc_result":
+        return settleRpc(frame);
+
+      case "hello":
+      case "focus": {
+        if (frame.role === "agent") {
+          agents.add(ws);
+          log(`an external agent attached (${agents.size} connected)`);
+          return;
+        }
+        const others = [...clients].filter((c) => c !== ws && c.readyState === c.OPEN).length;
+        toPanel({ kind: "pages", total: others + 1, activeUrl: frame.url });
+        return;
+      }
+
+      case "chat": {
+        if (process.env.UITALK_DEBUG === "3") {
+          const built = buildUserContent(frame);
+          const shown = typeof built === "string"
+            ? built
+            : built.map((b) => (b.type === "image" ? `<image ${b.source.data.length} b64 chars>` : b.text)).join("\n");
+          log(`--- what the agent receives ---\n${shown}\n--- end ---`);
+        }
+        const n = frame.shots?.length ?? (frame.png ? 1 : 0);
+        const note = [
+          n ? `${n} screenshot${n === 1 ? "" : "s"}` : null,
+          frame.selectionCount ? `${frame.selectionCount} element(s) selected` : null,
+        ].filter(Boolean).join(", ");
+        record("me", note ? `${frame.text}\n[sent with ${note}]` : frame.text);
+      }
+        return pushToAgent(buildUserContent(frame));
+
+      case "settings": {
+        const { settings: next, written, rejected } = settings.save(PROJECT, frame.patch);
+        config = next;
+        log(`settings saved to ${written}${rejected.length ? ` (${rejected.join("; ")})` : ""}`);
+        toPanel({ kind: "settings", settings: config, written, rejected });
+        return;
+      }
+
+      case "revert": {
+        void (async () => {
+          if (!lastChange?.snap) {
+            toPanel({ kind: "reverted", ok: false, text: "there is nothing to go back to" });
+            return;
+          }
+          try {
+            const out = await snapshots.revertTo(PROJECT, lastChange.snap);
+            log(`reverted ${out.reverted.length} file(s) to before "${lastChange.label}"`);
+            toPanel({ kind: "reverted", ok: true, files: out.reverted, note: out.note, label: lastChange.label });
+            notifyAgents(
+              `The user reverted the last change ("${lastChange.label}"). These files went back to ` +
+                `how they were before it: ${out.reverted.join(", ") || "(none changed)"}. ` +
+                `Do not re-apply it unless asked.`,
+            );
+            pushToAgent(
+              `I reverted the last change ("${lastChange.label}") in the working tree. ` +
+                `These files went back to how they were before you edited them: ` +
+                `${out.reverted.join(", ") || "(none changed)"}. Do not re-apply it unless I ask.`,
+            );
+            lastChange = null;
+          } catch (err) {
+            toPanel({ kind: "reverted", ok: false, text: err.message });
+          }
+        })();
+        return;
+      }
+
+      // An external agent asks the bridge to put a question to the page, because it
+      // has no socket of its own to the page and no way to be pushed to.
+      case "call": {
+        callPage(frame.method, frame.params, frame.timeout ?? RPC_TIMEOUT).then(
+          (result) => ws.send(JSON.stringify({ kind: "call_result", id: frame.id, result })),
+          (err) => ws.send(JSON.stringify({ kind: "call_result", id: frame.id, error: err.message })),
+        );
+        return;
+      }
+
+      case "compact_now":
+        return void compact("requested from the panel");
+
+      case "clear":
+        return void clearSession();
+
+      case "approval":
+        record("me", `approved: ${frame.label}`);
+        toAgents(frame); // an external agent cannot be sent a message; it waits for this
+        void (async () => {
+          lastChange = { snap: await snapshots.snapshot(PROJECT, frame.label), label: frame.label };
+          toPanel({ kind: "revertable", available: Boolean(lastChange.snap), label: frame.label });
+        })();
+        return pushToAgent(
+          `The user approved option "${frame.label}" for element ${frame.ref}.\n\n` +
+            `Approved declarations:\n${frame.declarations}\n` +
+            (frame.also ? `Additional rules:\n${frame.also}\n` : "") +
+            `\nElement identity:\n${JSON.stringify(frame.element, null, 2)}\n` +
+            `Page: ${frame.page?.path ?? "unknown"}\n\n` +
+            `Now commit this to source. Find where this element is defined and where its ` +
+            `styles live, then make the edit the way the surrounding code would. Match the ` +
+            `project's conventions rather than pasting the preview CSS verbatim, and do not ` +
+            `carry over any data-uitalk-* attribute. Tell me which files you changed.`,
+        );
+
+      default:
+        log(`ignored frame of unknown kind: ${frame.kind}`);
+    }
+  });
+
+  ws.on("close", () => {
+    clients.delete(ws);
+    agents.delete(ws);
+    if (activePage === ws) activePage = null;
+    log(`page disconnected (${clients.size} open)`);
+  });
+  ws.on("error", (err) => log("socket error:", err.message));
+});
+
+// A chat frame may carry a screenshot the user volunteered with their message.
+function buildUserContent(frame) {
+  const v = frame.page?.viewport;
+  const screen = frame.page?.screen;
+  // The simulated screen is the one that matters when it differs from the window:
+  // a layout question is unanswerable without knowing which viewport is in force.
+  const where = screen
+    ? `${screen.preset} ${screen.width}x${screen.height} ${screen.orientation}` +
+      (screen.zoom < 1 ? ` (shown at ${Math.round(screen.zoom * 100)}%)` : "")
+    : `viewport ${v?.w}x${v?.h}`;
+  const header =
+    `[page ${frame.page?.path ?? "?"} | ${where} @${v?.dpr ?? 1}x | ` +
+    `${frame.selectionCount ?? 0} element(s) selected]`;
+  if (process.env.UITALK_DEBUG) log(`user header: ${header}`);
+
+  // One or more screenshots the user queued in the panel.
+  const shots = frame.shots ?? (frame.png ? [{ png: frame.png, label: "screenshot" }] : []);
+  if (!shots.length) return `${header}\n\n${frame.text}`;
+
+  const content = [{ type: "text", text: `${header}\n\n${frame.text}` }];
+  for (const [i, shot] of shots.entries()) {
+    // Clicks and frames share one clock, so they can be read as a single timeline.
+    const caused = shot.triggeredBy?.length
+      ? " Interaction timeline, on the same clock as the frame offsets: " +
+        shot.triggeredBy
+          .map((c) => `${c.at >= 0 ? "+" : ""}${c.at}ms clicked ${c.element?.selector ?? c.element?.tag}`)
+          .join("; ") + "."
+      : "";
+    content.push({ type: "text", text: `Screenshot ${i + 1} of ${shots.length}: ${shot.label}.${caused}` });
+    content.push({ type: "image", source: { type: "base64", media_type: "image/png", data: shot.png } });
+  }
+  return content;
+}
+
+// ------------------------------------------------- transcript replay buffer
+
+// The panel's history lives in page DOM, so a reload loses it while the agent
+// keeps remembering. The bridge outlives reloads, so it holds the display copy.
+// Finished messages only: replaying hundreds of token deltas would be absurd.
+const transcript = [];
+
+function record(role, text) {
+  if (!text) return;
+  transcript.push({ role, text, at: Date.now() });
+  while (transcript.length > config.replayLimit) transcript.shift();
+}
+
+// ------------------------------------------------------- context accounting
+
+// A step's total input IS the conversation size at that moment: the prompt the
+// API was sent. Dedup by message id, because parallel tool calls repeat it, and
+// skip subagents, whose context is their own.
+const context = { tokens: 0, percent: 0, seen: new Set(), turnsSinceCompact: 99, compacting: false };
+
+function noteUsage(event) {
+  if (event.parent_tool_use_id) return;
+  const msg = event.message;
+  if (!msg?.id || context.seen.has(msg.id)) return;
+  context.seen.add(msg.id);
+  const u = msg.usage ?? {};
+  const total =
+    (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+  if (total > context.tokens) context.tokens = total; // monotonic within a session
+  context.percent = Math.round((context.tokens / config.contextTokens) * 1000) / 10;
+  toPanel({ kind: "context", tokens: context.tokens, percent: context.percent, limit: config.contextTokens });
+}
+
+/** The same meter the SDK events drive, fed by a provider's own usage numbers. */
+function noteTokens(total) {
+  if (total > context.tokens) context.tokens = total;
+  context.percent = Math.round((context.tokens / config.contextTokens) * 1000) / 10;
+  toPanel({ kind: "context", tokens: context.tokens, percent: context.percent, limit: config.contextTokens });
+}
+
+/** Compact between turns, never inside one: mid-turn the history is still in use. */
+function maybeCompact() {
+  context.turnsSinceCompact++;
+  if (
+    config.autoCompact &&
+    !context.compacting &&
+    context.percent >= config.compactAtPercent &&
+    context.turnsSinceCompact > config.compactCooldownTurns
+  ) {
+    void compact(`context reached ${context.percent}% of ${config.contextTokens}`);
+  }
+}
+
+function resetContextMeter() {
+  context.tokens = 0;
+  context.percent = 0;
+  context.seen.clear();
+  context.turnsSinceCompact = 0;
+  toPanel({ kind: "context", tokens: 0, percent: 0, limit: config.contextTokens });
+}
+
+const SUMMARY_REQUEST =
+  "Before this session's context is recycled, write a handover note for your own next turn. " +
+  "Cover: what this app is and which files you have already opened or edited; the user's " +
+  "standing preferences and anything they rejected and why; which elements are selected and " +
+  "what we are currently working on; and any decision that would be expensive to rediscover. " +
+  "Write it as notes to yourself, not a report to the user, and keep it under 300 words.";
+
+// /compact is terminal-only: sent as a message it is read as plain English, not a
+// command. /clear is honoured, so compaction here is summarize -> clear -> reseed.
+// That is lossier than an incremental compaction, which is why the threshold is
+// worth tuning rather than setting low by reflex.
+async function compact(reason) {
+  if (context.compacting) return;
+  // With an MCP client the conversation lives in the editor, not here: there is no
+  // history to summarize and nothing the bridge could clear.
+  if (!session) {
+    const why = `there is no conversation here to compact — uitalk is running with ${AGENT_MODES[config.agent]}`;
+    log(`compaction skipped: ${why}`);
+    toPanel({ kind: "compacting", stage: "failed", reason: why });
+    return;
+  }
+  context.compacting = true;
+  log(`compacting: ${reason} (${context.tokens} tokens, ${context.percent}%)`);
+  toPanel({ kind: "compacting", stage: "summarizing", reason });
+
+  try {
+    const summary = await session.summarize(SUMMARY_REQUEST);
+    if (!summary) throw new Error("the agent returned no summary");
+
+    toPanel({ kind: "compacting", stage: "clearing" });
+    await session.clear();
+
+    resetContextMeter();
+    pushToAgent(
+      `Context was just recycled to free space. Here is your own handover note from the ` +
+        `session so far — treat it as established fact and carry on:\n\n${summary}`,
+    );
+
+    record("note", "— context compacted —");
+    toPanel({ kind: "compacted", summary });
+    log(`compacted; summary ${summary.length} chars`);
+  } catch (err) {
+    log(`compaction failed: ${err.message}`);
+    toPanel({ kind: "compacting", stage: "failed", reason: err.message });
+  } finally {
+    context.compacting = false;
+  }
+}
+
+// A turn whose output we consume ourselves rather than showing as chat.
+let internal = null;
+
+function askAgent(text, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      internal = null;
+      reject(new Error("the agent did not finish in time"));
+    }, timeoutMs);
+    internal = {
+      buffer: "",
+      done: (value) => {
+        clearTimeout(timer);
+        internal = null;
+        resolve(value);
+      },
+    };
+    pushToAgent(text);
+  });
+}
+
+async function clearSession() {
+  // The transcript and the meter are the bridge's own, so a new session still means
+  // something when an MCP client is driving: only the agent-side clear is skipped.
+  if (session) await session.clear().catch((err) => log(`clear failed: ${err.message}`));
+  transcript.length = 0;
+  resetContextMeter();
+  lastChange = null;
+  toPanel({ kind: "cleared" });
+  notifyAgents("The user started a new session in the panel. The panel's history was cleared.");
+  log(session ? "session cleared on request" : "panel history cleared (no built-in agent)");
+}
+
+// An MCP client cannot be sent a message, so anything it needs to know is queued
+// and handed to it on its next tool result. Without this it would not learn that a
+// change it made was just reverted, and would cheerfully re-apply it.
+function notifyAgents(text) {
+  if (agents.size) toAgents({ kind: "notice", text });
+}
+
+// --------------------------------------------------------------- agent session
+
+const GUIDANCE = `
+You are connected to a web page the user is looking at right now, through the "page" tools.
+
+How to work here:
+- Call read_selection before proposing anything. The user picks elements in order, and refs
+  1, 2, 3 in their message mean those selection refs.
+- For a question about position, alignment, or spacing, read the common ancestor's layout
+  context that read_selection returns. The correct fix for "align 2 to the top of 1" depends
+  entirely on it: align-items or align-self under flex, align-self under grid, a top offset
+  under position:relative, a margin change or a restructure in static flow. Do not reach for
+  a margin when the parent is a flex or grid container.
+- A screenshot is one instant. For anything that moves — a transition, a hover, a loading
+  state — use capture's "frames" to take a strip, or "delay" to catch a moment that only
+  exists briefly. Describing motion from a single frame is guesswork.
+- The page may still be loading. capture never waits for the network: it photographs what is
+  on screen, and reports in its warnings anything that had not arrived. When you want the
+  finished state, wait_for it first — a selector to appear, or a spinner to disappear — rather
+  than sleeping and hoping.
+- Before writing CSS to source, call describe_styles. Computed values say what a property
+  ended up as; they never say which rule set it. That tool names the file, the selector already
+  in use, and what is currently winning — so the edit lands where it will actually take effect
+  rather than somewhere that loses the cascade.
+- If a change you committed did not take effect, the page will tell you so with the values that
+  drifted. Do not re-apply the same edit: call describe_styles and fix the rule that is winning.
+- Before searching the project by hand, call locate_source. Dev builds usually know the file and line an
+  element came from. Trust a "react" or "svelte" tier; treat "served-html" or "none" as a lead
+  to confirm, not a location to edit blind.
+- "Does this hold up on mobile" is capture_breakpoints, not a request for the user to resize.
+  It follows the element across widths, since a rectangle means something different at each.
+- Preview before you edit. try_style shows the user the change in their real page; it writes
+  nothing. Use capture afterwards to check the result against what you intended.
+- When the user asks for several versions, use show_options. Then end your turn. Their choice
+  arrives as a new message from them.
+- A request can arrive with a screenshot and nothing selected. Do not ask the user to go and
+  select something you can already identify: scan_region the area the screenshot came from,
+  find the element, and pass its "selector" to try_style or show_options. Ask only when the
+  screenshot is genuinely ambiguous about which element is meant.
+- Only edit source after the user approves. When you do, place the change where the project
+  already keeps that kind of thing and match its conventions. Never carry a data-uitalk-*
+  attribute into source; those are preview handles only.
+- Keep replies short. The user is looking at the page, not at text.
+`.trim();
+
+/** A tool failure is the agent's business, but the user has to see it too. */
+const reportToolFailure = (method, message) => {
+  log(`tool ${method} failed: ${message}`);
+  toPanel({ kind: "tool_error", method, text: message });
+};
+
+/** The Claude Code session: the SDK brings the loop, the file tools and the auth. */
+async function runBuiltin() {
+  let query, pageServer;
+  try {
+    ({ query } = await import("@anthropic-ai/claude-agent-sdk"));
+    // Also an SDK import: the tools have to be shaped the way it wants them.
+    const { createPageServer } = await import("./page-tools.mjs");
+    pageServer = createPageServer(callPage, reportToolFailure, findInServedHtml);
+  } catch (err) {
+    // An install that skipped optional dependencies is the likely cause, and it is
+    // recoverable without reinstalling: the other two modes need nothing extra.
+    log("the built-in agent needs @anthropic-ai/claude-agent-sdk, which is not installed.");
+    log(`  npm install @anthropic-ai/claude-agent-sdk   (or run with --agent off / --agent adapter)`);
+    toPanel({
+      kind: "agent_absent",
+      text:
+        "The built-in agent is not installed (@anthropic-ai/claude-agent-sdk). The page tools " +
+        "still work — drive them from an MCP client, or set agent to \"adapter\" to use your own key.",
+    });
+    return;
+  }
+
+  session = {
+    mode: "builtin",
+    label: "claude",
+    summarize: (request) => askAgent(request, 120000),
+    clear: () => askAgent("/clear", 60000),
+  };
+
+  log(`agent session starting, project root ${PROJECT}`);
+  try {
+    for await (const event of query({
+      prompt: inbox(),
+      options: {
+        cwd: PROJECT,
+        mcpServers: { page: pageServer },
+        allowedTools: ["mcp__page__*", "Read", "Edit", "Write", "Grep", "Glob"],
+        permissionMode: "acceptEdits",
+        appendSystemPrompt: GUIDANCE,
+        includePartialMessages: true,
+      },
+    })) {
+      relay(event);
+    }
+  } catch (err) {
+    log("agent session ended:", err.message);
+    toPanel({ kind: "error", text: err.message });
+  }
+}
+
+/** Any model the user has a key for. The loop and the file tools live in adapter.mjs. */
+function runAdapter() {
+  let adapter;
+  try {
+    adapter = createAdapter({
+      config,
+      project: PROJECT,
+      callPage,
+      report: reportToolFailure,
+      toPanel,
+      record,
+      onUsage: noteTokens,
+      onTurnEnd: maybeCompact,
+      log,
+      systemPrompt: GUIDANCE,
+    });
+  } catch (err) {
+    log(`adapter could not start: ${err.message}`);
+    toPanel({ kind: "error", text: err.message });
+    return;
+  }
+
+  // The key is read here and never by the adapter, so it stays out of a module that
+  // also talks to a third party.
+  adapter.useCredentials((provider) => settings.credential(provider));
+  const { from } = settings.credential(adapter.provider);
+  if (!from) {
+    log(`no key found for ${adapter.provider}: set UITALK_API_KEY, or write ${settings.paths.credentials}`);
+    toPanel({
+      kind: "agent_absent",
+      text: `No API key for ${adapter.provider}. Set UITALK_API_KEY in the environment, or put it in ${settings.paths.credentials}.`,
+    });
+  } else {
+    log(`key for ${adapter.provider} read from ${from}`);
+  }
+
+  session = adapter;
+  adapter.start();
+}
+
+function runSession() {
+  if (config.agent === "off") {
+    log("no built-in agent (agent: off) — drive the page from an MCP client:");
+    log(`  {"mcpServers":{"uitalk":{"command":"uitalk-mcp","env":{"UITALK_PORT":"${port}"}}}}`);
+    toPanel({
+      kind: "agent_absent",
+      text: "Driven from your editor over MCP. The tools below still work; the chat is in your editor.",
+    });
+    return;
+  }
+  if (config.agent === "adapter") return runAdapter();
+  return void runBuiltin();
+}
+
+let turnText = "";
+
+// Forward only what the panel renders, so the socket stays light.
+function relay(event) {
+  if (process.env.UITALK_DEBUG) {
+    const extra = event.type === "result" ? ` subtype=${event.subtype} turns=${event.num_turns} err=${event.is_error}` : "";
+    if (event.type !== "stream_event") log(`event ${event.type}${extra}`);
+    if (process.env.UITALK_DEBUG === "2" && (event.type === "result" || event.type === "assistant")) {
+      log(JSON.stringify(event).slice(0, 2500));
+    }
+  }
+  switch (event.type) {
+    case "system":
+      if (event.subtype === "init") toPanel({ kind: "status", text: `ready · ${event.model ?? "agent"}` });
+      return;
+
+    case "stream_event": {
+      const delta = event.event?.delta;
+      if (delta?.type !== "text_delta") return;
+      if (internal) internal.buffer += delta.text;
+      else {
+        turnText += delta.text;
+        toPanel({ kind: "delta", text: delta.text });
+      }
+      return;
+    }
+
+    case "assistant":
+      noteUsage(event);
+      if (internal) return;
+      for (const block of event.message?.content ?? []) {
+        if (block.type === "tool_use") toPanel({ kind: "tool", name: block.name });
+      }
+      return;
+
+    case "result": {
+      if (event.subtype !== "success") log(`turn ended abnormally: ${event.subtype}`);
+
+      if (internal) {
+        internal.done(internal.buffer.trim());
+        return;
+      }
+
+      record("agent", turnText.trim());
+      turnText = "";
+      toPanel({ kind: "turn_end", text: event.subtype === "success" ? undefined : event.subtype });
+      maybeCompact();
+      return;
+    }
+  }
+}
+
+// `--list` reports the other bridges instead of starting one.
+if (process.argv.includes("--list")) {
+  const running = registry.list();
+  if (!running.length) console.log("no bridges running");
+  for (const e of running) {
+    console.log(`  :${e.port} -> ${e.appHost}:${e.appPort}  pid ${e.pid}  ${e.project}`);
+  }
+  process.exit(0);
+}
+
+/** Bind is atomic, so claiming a port by attempting it is race-free. */
+function listen(candidates) {
+  const [next, ...rest] = candidates;
+  if (next === undefined) {
+    log(`no free port in ${PORT_RANGE[0]}-${PORT_RANGE.at(-1)}; set UITALK_PORT to choose one`);
+    process.exit(1);
+  }
+  port = next;
+  http.once("error", (err) => {
+    if (err.code !== "EADDRINUSE") throw err;
+    if (FIXED_PORT) {
+      log(`port ${FIXED_PORT} is taken. Leave UITALK_PORT unset to pick a free one, or run --list.`);
+      process.exit(1);
+    }
+    listen(rest);
+  });
+  http.listen(next, "127.0.0.1", ready);
+}
+
+let lastChange = null;
+let started = false;
+
+function ready() {
+  // Each retry registers another listen callback, so without this guard a
+  // successful bind after a retry would start a second agent session in the
+  // same process.
+  if (started) return;
+  started = true;
+
+  const twin = registry.servingApp(APP_HOST, APP_PORT);
+  if (twin) {
+    log(`note: bridge on :${twin.port} (pid ${twin.pid}) already fronts ${APP_HOST}:${APP_PORT}`);
+  }
+  registry.add({ pid: process.pid, port, appHost: APP_HOST, appPort: APP_PORT, project: PROJECT });
+
+  const others = registry.list().filter((e) => e.pid !== process.pid);
+  log(`proxying 127.0.0.1:${port} -> ${APP_HOST}:${APP_PORT}`);
+  log(`open http://127.0.0.1:${port} and the panel is injected for you`);
+  log(`or http://127.0.0.1:${port}/__uitalk/shell for split screen with device sizes`);
+  log(`project ${PROJECT}   client build ${readClient().build}`);
+  log(`agent: ${config.agent} — ${AGENT_MODES[config.agent] ?? "unknown mode"}`);
+  if (config.agent !== "off") {
+    log(
+      `context: compact at ${config.compactAtPercent}% of ${config.contextTokens} tokens` +
+        `${config.autoCompact ? "" : " (auto-compaction off)"}`,
+    );
+  }
+  if (others.length) log(`${others.length} other bridge(s) running: ${others.map((e) => `:${e.port}`).join(" ")}`);
+  runSession();
+}
+
+// Importing this module must not start a bridge: the tests exercise the message
+// building, transcript and context accounting without a socket or an agent.
+if (process.env.UITALK_IMPORT_ONLY !== "1") listen(FIXED_PORT ? [FIXED_PORT] : PORT_RANGE);
+
+export {
+  wss,
+  clients,
+  agents,
+  callPage,
+  settleRpc,
+  buildUserContent,
+  findInServedHtml,
+  servedHtml,
+  transcript,
+  record,
+  context,
+  noteUsage,
+  resetContextMeter,
+  relay,
+  inbox,
+  pushToAgent,
+  readClient,
+  checkServerFreshness,
+  compact,
+  clearSession,
+  notifyAgents,
+  noteTokens,
+  maybeCompact,
+  AGENT_MODES,
+};
+
+let closing = false;
+function shutdown() {
+  if (closing) return;
+  closing = true;
+  registry.remove();
+  http.close();
+  process.exit(0);
+}
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, shutdown);
+process.on("exit", () => registry.remove());

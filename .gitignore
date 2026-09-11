@@ -1,0 +1,11 @@
+.cov/
+node_modules/
+coverage/
+*.log
+.uitalk.json
+
+# Anything dropped in bin/ is ignored — except the launcher itself, which
+# package.json's `bin` points at. This has to be `bin/*`, not `bin/`: git does
+# not descend into an ignored directory, so a negation inside one never applies.
+bin/*
+!bin/uitalk

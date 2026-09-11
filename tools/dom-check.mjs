@@ -1,0 +1,419 @@
+// Runs the injected client against a synthetic DOM under jsdom, so the selection,
+// identity, geometry and preview logic can be exercised without a browser.
+// jsdom has no real layout engine, so boxes are stubbed; what is under test here
+// is the logic that reads and assembles them.
+
+import { JSDOM } from "jsdom";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+// //# sourceURL attributes the evaluated source back to its file: without it V8
+// records it as an anonymous eval, so coverage reports zero and stack traces name
+// nothing useful.
+function loadClient(win, file) {
+  const url = new URL(`../client/${file}`, import.meta.url);
+  win.eval(`${readFileSync(url, "utf8")}\n//# sourceURL=${fileURLToPath(url)}`);
+}
+
+const HTML = `<!doctype html><html><head><title>Wedjo</title></head><body>
+  <main class="coming-soon-main" style="display:flex;flex-direction:column;align-items:center;gap:24px">
+    <h1 class="coming-soon-title">Something lovely is coming</h1>
+    <form class="notify-form" style="display:flex;flex-direction:column;align-items:center;gap:12px">
+      <input class="notify-input" name="email" aria-label="Email address" />
+      <button class="notify-button" data-testid="notify-submit" type="submit">Notify me</button>
+    </form>
+  </main>
+</body></html>`;
+
+const dom = new JSDOM(HTML, { url: "http://127.0.0.1:8400/", pretendToBeVisual: true, runScripts: "outside-only" });
+const { window } = dom;
+
+// --- stubs for what jsdom lacks -------------------------------------------
+class FakeSheet {
+  constructor() { this.text = ""; }
+  replaceSync(t) { this.text = t; }
+}
+window.CSSStyleSheet = FakeSheet;
+window.document.adoptedStyleSheets = [];
+window.CSS = { escape: (v) => String(v).replace(/([^\w-])/g, "\\$1") }; // jsdom has no CSS.escape
+window.devicePixelRatio = 2;
+window.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+window.WebSocket = class { constructor() { this.readyState = 0; } send() {} close() {} };
+window.elementFromPointStub = null;
+window.document.elementFromPoint = () => window.elementFromPointStub;
+
+// jsdom returns zeroed rects; give each element a plausible box so the geometry
+// and delta logic has something real to compute over.
+const BOXES = {
+  "coming-soon-title": { left: 460, top: 400, width: 520, height: 60 },
+  "notify-input":  { left: 510, top: 520, width: 420, height: 52 },
+  "notify-button": { left: 510, top: 584, width: 420, height: 52 },
+  "notify-form":   { left: 510, top: 520, width: 420, height: 116 },
+};
+window.Element.prototype.getBoundingClientRect = function () {
+  const key = [...this.classList].find((c) => BOXES[c]);
+  const b = BOXES[key] ?? { left: 0, top: 0, width: 200, height: 40 };
+  return { ...b, right: b.left + b.width, bottom: b.top + b.height, x: b.left, y: b.top };
+};
+
+// --- load the client ------------------------------------------------------
+for (const file of ["api.js", "raster.js"]) {
+  loadClient(window, file);
+}
+const UITalk = window.UITalk;
+
+// raster.js defines the real rasterizer; it cannot run here, because it waits on
+// an <img> load that jsdom never completes for an SVG data URI. Swap in a stand-in
+// that reports what it was asked to render, so container-finding and crop geometry
+// are still testable. Order matters: this has to come after the client loads, or
+// raster.js overwrites it and capture() hangs forever.
+const realRaster = window.UITalkRaster;
+window.lastRaster = null;
+window.UITalkRaster = {
+  rasterize: async (el, opts = {}) => {
+    window.lastRaster = { el, opts };
+    const r = el.getBoundingClientRect();
+    const pad = opts.pad ?? 16;
+    const w = Math.ceil(r.width) + pad * 2, h = Math.ceil(r.height) + pad * 2;
+    const cut = opts.clip
+      ? { sw: Math.min(opts.clip.right - opts.clip.left, w), sh: Math.min(opts.clip.bottom - opts.clip.top, h) }
+      : null;
+    return { png: "stub", width: cut ? cut.sw : w, height: cut ? cut.sh : h, warnings: [] };
+  },
+};
+
+// --- exercise ------------------------------------------------------------
+const fail = [];
+const check = (name, ok, detail) => {
+  console.log(`${ok ? "  ok  " : " FAIL "} ${name}${detail ? ` — ${detail}` : ""}`);
+  if (!ok) fail.push(name);
+};
+
+check("raster.js defines a rasterizer", typeof realRaster?.rasterize === "function");
+
+const input = window.document.querySelector(".notify-input");
+const button = window.document.querySelector(".notify-button");
+const title = window.document.querySelector(".coming-soon-title");
+
+check("pick returns ref 1 then 2",
+  UITalk.pick(input)?.ref === 1 && UITalk.pick(button)?.ref === 2);
+check("stamps data-uitalk-ref", button.getAttribute("data-uitalk-ref") === "2");
+
+// --- deselection and renumbering
+UITalk.pick(title); // 1 input, 2 button, 3 title
+check("a third pick is ref 3", title.getAttribute("data-uitalk-ref") === "3");
+
+const off = UITalk.pick(button); // re-clicking a selected element drops it
+check("re-clicking deselects", off?.action === "deselected" && off.ref === 2, JSON.stringify(off));
+check("handle removed on deselect", !button.hasAttribute("data-uitalk-ref"));
+check("remaining refs renumber", title.getAttribute("data-uitalk-ref") === "2", title.getAttribute("data-uitalk-ref"));
+check("selection shrinks", UITalk.picked.length === 2 && off.total === 2);
+
+// deselecting drops a preview, because it was authored against the old numbering
+UITalk.tryStyle({ ref: 2, declarations: "color: red" });
+const off2 = UITalk.unpick(2);
+check("unpick by ref works", off2?.action === "deselected" && off2.ref === 2);
+check("deselect clears a stale preview", off2.previewCleared === true && window.document.adoptedStyleSheets.length === 0);
+check("unpick on an empty ref is a no-op", UITalk.unpick(9) === null);
+
+// back to the pair the rest of the checks expect
+UITalk.clearSelection();
+UITalk.pick(input);
+UITalk.pick(button);
+check("reselect restores 1 and 2",
+  input.getAttribute("data-uitalk-ref") === "1" && button.getAttribute("data-uitalk-ref") === "2");
+
+const sel = UITalk.readSelection();
+check("two elements selected", sel.selected === 2);
+check("page path present", sel.page.path === "/", sel.page.path);
+check("viewport + dpr present", sel.page.viewport.dpr === 2 && sel.page.viewport.w > 0);
+
+const b = sel.items[1];
+check("greppable identifiers on ref 2", b.testId === "notify-submit" && b.text === "Notify me", JSON.stringify({ testId: b.testId, text: b.text }));
+check("classes captured", b.classes.includes("notify-button"));
+check("ref selector usable", b.selector === '[data-uitalk-ref="2"]', b.selector);
+check("source selector built", /notify-button/.test(b.sourceSelector), b.sourceSelector);
+check("geometry read", b.rect.w === 420 && b.rect.h === 52, JSON.stringify(b.rect));
+
+check("ancestor is the form", sel.ancestor.classes.includes("notify-form"), sel.ancestor.selector);
+check("ancestor layout captured", sel.ancestor.layout.display === "flex" && sel.ancestor.layout.flexDirection === "column",
+  JSON.stringify(sel.ancestor.layout));
+check("delta computed", sel.deltas[0].topOffset === 64, JSON.stringify(sel.deltas[0]));
+check("ref 2 is a direct child", sel.items[1].directChildOfAncestor === true);
+
+const applied = UITalk.tryStyle({ ref: 2, declarations: "align-self: flex-start; color: red !important" });
+const sheetText = window.document.adoptedStyleSheets[0]?.text ?? "";
+check("preview rule doubles the attribute selector", sheetText.includes('[data-uitalk-ref="2"][data-uitalk-ref="2"]'), sheetText.slice(0, 70));
+check("!important is stripped", !/!important/i.test(sheetText), sheetText);
+check("tryStyle reports what it matched and how",
+  applied.applied === true && /data-uitalk-ref="2"/.test(applied.matchedBy) && applied.target?.tag === "button",
+  JSON.stringify({ matchedBy: applied.matchedBy, tag: applied.target?.tag }));
+
+const opts = UITalk.showOptions({ ref: 2, options: [
+  { label: "Pill", declarations: "border-radius: 999px" },
+  { label: "Bold", declarations: "font-weight: 800" },
+]});
+check("options mounted", opts.mounted === 2 && opts.labels[0] === "Pill");
+check("exactly one option sheet adopted", window.document.adoptedStyleSheets.filter((s) => /border-radius|font-weight/.test(s.text)).length === 1);
+UITalk.flip(1);
+check("flip switches the active option", UITalk.optionState.active === 1);
+
+// -1 is the page's own styling, in the same sequence as the variants
+check("flipping to -1 shows the original", UITalk.flip(-1) === -1 && UITalk.optionState.active === -1);
+check("showing the original adopts no variant sheet",
+  window.document.adoptedStyleSheets.filter((x) => /border-radius|font-weight/.test(x.text)).length === 0);
+check("the original is not approvable", UITalk.chosenOption() === null);
+check("stepping back from the original wraps to the last variant", UITalk.flip(-2) === 1, String(UITalk.optionState.active));
+check("stepping past the last wraps to the original", UITalk.flip(2) === -1, String(UITalk.optionState.active));
+check("jumping straight to a variant works", UITalk.flip(0) === 0 && UITalk.optionState.active === 0);
+check("and re-adopts exactly one sheet",
+  window.document.adoptedStyleSheets.filter((x) => /border-radius|font-weight/.test(x.text)).length === 1);
+UITalk.flip(1); // restore what the assertion below expects
+const chosen = UITalk.chosenOption();
+check("chosen option carries identity + page", chosen.label === "Bold" && chosen.element.testId === "notify-submit" && !!chosen.page.path);
+
+UITalk.resetPreview();
+check("reset drops every preview sheet", window.document.adoptedStyleSheets.length === 0, String(window.document.adoptedStyleSheets.length));
+
+// --- which rules actually style an element
+{
+  // a stylesheet with two competing rules and a media block
+  const style = window.document.createElement("style");
+  style.textContent = `
+    .notify-button { padding: 10px; border-radius: 4px; }
+    form.notify-form button.notify-button { padding: 14px 18px; }
+    .notify-button:hover { padding: 20px; }
+    @media (max-width: 600px) { .notify-button { border-radius: 0; } }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".notify-button" });
+  check("it reports the rules that match", out.rules.length >= 3, `${out.rules.length} rules`);
+  check("it names the stylesheet each came from",
+    out.rules.every((r) => typeof r.source === "string" && r.source.length), JSON.stringify(out.rules[0]?.source));
+  check("a more specific selector wins the property",
+    /notify-form/.test(out.winners?.padding?.from ?? ""), out.winners?.padding?.from);
+  check("and reports the winning value", out.winners?.padding?.value === "14px 18px",
+    out.winners?.padding?.value);
+  check("state rules are reported but do not win",
+    out.rules.some((r) => r.state === ":hover") && !/hover/.test(out.winners?.padding?.from ?? ""),
+    out.winners?.padding?.from);
+  check("rules inside a media block carry the condition",
+    out.rules.some((r) => (r.context ?? []).some((c) => /max-width/.test(c))),
+    JSON.stringify(out.rules.find((r) => r.context)?.context));
+
+  const narrowed = UITalk.describeStyles({ selector: ".notify-button", properties: ["border-radius"] });
+  check("it can be narrowed to properties of interest",
+    narrowed.rules.every((r) => Object.keys(r.declarations).every((k) => k === "border-radius")),
+    JSON.stringify(narrowed.rules.map((r) => Object.keys(r.declarations))));
+
+  button.setAttribute("style", "padding: 2px");
+  const withInline = UITalk.describeStyles({ selector: ".notify-button" });
+  check("an inline style is called out as beating everything",
+    withInline.inline === "padding: 2px" && /inline/.test(withInline.note ?? ""), withInline.note);
+  button.removeAttribute("style");
+  style.remove();
+}
+
+// --- capture over time: a still frame cannot show motion
+{
+  const t0 = Date.now();
+  const delayed = await UITalk.capture({ region: { left: 520, top: 530, right: 760, bottom: 600 }, inventory: false, delay: 120 });
+  check("capture can wait before the shutter", Date.now() - t0 >= 110 && !!delayed.png, `${Date.now() - t0}ms`);
+
+  const strip = await UITalk.capture({ region: { left: 520, top: 530, right: 760, bottom: 600 }, inventory: false, frames: 3, every: 60 });
+  check("frames returns a strip", Array.isArray(strip.frames) && strip.frames.length === 3,
+    `${strip.frames?.length} frames`);
+  check("each frame is timestamped", strip.frames.every((f, i) => typeof f.at === "number" && (i === 0 || f.at > 0)),
+    JSON.stringify(strip.frames.map((f) => f.at)));
+  check("the frames are spaced out", strip.frames[2].at >= 100, `last at +${strip.frames[2].at}ms`);
+  check("a strip still carries a single png for callers that want one", typeof strip.png === "string");
+  check("the inventory is not repeated for every frame", strip.inventory === undefined);
+
+  const capped = await UITalk.capture({ region: { left: 520, top: 530, right: 760, bottom: 600 }, inventory: false, frames: 99, every: 10 });
+  check("the frame count is capped", capped.frames.length <= 16, `${capped.frames.length} frames`);
+}
+
+// --- waiting for the page rather than guessing with a delay
+{
+  const soon = await UITalk.waitFor({ selector: ".notify-button", timeout: 500 });
+  check("wait_for returns at once when it is already there", soon.found === true && soon.waitedMs < 300,
+    `${soon.waitedMs}ms`);
+  check("it reports what it matched", soon.matched?.classes?.includes("notify-button"),
+    JSON.stringify(soon.matched?.classes));
+
+  const missing = await UITalk.waitFor({ selector: ".never-appears", timeout: 300 });
+  check("it gives up rather than hanging", missing.found === false && missing.timedOut === true,
+    JSON.stringify(missing));
+
+  const appears = window.document.createElement("div");
+  appears.className = "late";
+  setTimeout(() => window.document.body.appendChild(appears), 120);
+  const waited = await UITalk.waitFor({ selector: ".late", timeout: 3000 });
+  check("it resolves as soon as an element arrives", waited.found === true && waited.waitedMs >= 100,
+    `${waited.waitedMs}ms`);
+
+  appears.remove();
+  const wentAway = await UITalk.waitFor({ selector: ".late", gone: true, timeout: 500 });
+  check("it can wait for something to disappear, which is how you wait out a spinner",
+    wentAway.found === true, JSON.stringify(wentAway));
+
+  let bad = null;
+  try { await UITalk.waitFor({ timeout: 100 }); } catch (e) { bad = e.message; }
+  check("waiting for nothing in particular is refused", /selector or some text/.test(bad ?? ""), bad);
+}
+
+// --- targeting by CSS selector, for requests that arrive with only a screenshot
+UITalk.clearSelection();
+const bySel = UITalk.tryStyle({ selector: ".notify-button", declarations: "border-radius: 999px" });
+check("try_style accepts a CSS selector", bySel.applied === true, JSON.stringify(bySel.target?.classes));
+const adopted = () => window.document.adoptedStyleSheets.map((x) => x.text).join("\n");
+check("it stamps a preview handle and doubles it for specificity",
+  /\[data-uitalk-target="1"\]\[data-uitalk-target="1"\]/.test(adopted()), adopted().slice(0, 60));
+check("the element carries the handle", button.hasAttribute("data-uitalk-target"));
+check("it reports which element it matched", bySel.target?.classes?.includes("notify-button"));
+
+let bad = null;
+try { UITalk.tryStyle({ selector: ".does-not-exist", declarations: "color: red" }); } catch (e) { bad = e.message; }
+check("a selector matching nothing is refused", /matches \.does-not-exist/.test(bad ?? ""), bad);
+try { UITalk.tryStyle({ declarations: "color: red" }); } catch (e) { bad = e.message; }
+check("neither ref nor selector is refused", /either a selection ref or a CSS selector/.test(bad ?? ""), bad);
+try { UITalk.tryStyle({ ref: 7, declarations: "color: red" }); } catch (e) { bad = e.message; }
+check("a missing ref suggests the selector route", /CSS selector/.test(bad ?? ""), bad);
+
+const optsBySel = UITalk.showOptions({ selector: ".notify-button", options: [
+  { label: "Pill", declarations: "border-radius: 999px" },
+  { label: "Square", declarations: "border-radius: 0" },
+]});
+check("show_options accepts a selector", optsBySel.mounted === 2);
+const chosenBySel = UITalk.chosenOption();
+check("the approval still reports the element", chosenBySel?.element?.classes?.includes("notify-button"),
+  JSON.stringify(chosenBySel?.element?.classes));
+check("and reports no ref, since none was used", chosenBySel?.ref === null, String(chosenBySel?.ref));
+
+UITalk.resetPreview();
+check("reset strips the preview handle too", !button.hasAttribute("data-uitalk-target"));
+
+// --- preview of what a rectangle would take, without taking it
+UITalk.clearSelection();
+const preview = UITalk.previewArea({ left: 500, top: 500, right: 950, bottom: 660 });
+check("previewArea reports candidates", preview.length > 0, `${preview.length}`);
+check("previewArea selects nothing", UITalk.picked.length === 0);
+check("previewArea returns drawable boxes", typeof preview[0].rect.width === "number");
+check("previewArea marks what is already picked", preview.every((c) => c.already === false));
+
+// --- undo. The stack spans the session, so these are relative rather than absolute.
+UITalk.clearSelection();
+UITalk.pick(input);
+UITalk.pick(button);
+check("undo steps back one pick", UITalk.undo()?.total === 1 && UITalk.picked.length === 1, `${UITalk.picked.length}`);
+check("undo renumbers what is left", input.getAttribute("data-uitalk-ref") === "1" && !button.hasAttribute("data-uitalk-ref"));
+check("a second undo empties the selection", UITalk.undo()?.total === 0 && UITalk.picked.length === 0);
+
+UITalk.pick(input);
+UITalk.pick(button);
+UITalk.clearSelection();
+check("clearing is undoable", UITalk.undo()?.total === 2 && UITalk.picked.length === 2, `${UITalk.picked.length}`);
+UITalk.unpick(1);
+check("deselecting is undoable", UITalk.undo()?.total === 2, `${UITalk.picked.length}`);
+
+UITalk.clearSelection();
+const areaResult = UITalk.pickArea({ left: 500, top: 500, right: 950, bottom: 660 });
+check("an area pick is undoable",
+  areaResult.added.length > 0 && UITalk.undo()?.total === 0, `added ${areaResult.added.length}`);
+
+UITalk.clearSelection();
+UITalk.pick(input);
+UITalk.tryStyle({ ref: 1, declarations: "color: red" });
+check("undo clears a preview built on the old refs", UITalk.undo()?.previewCleared === true);
+
+// draining the stack is the only way to reach its floor, since it spans the session
+let guard = 200;
+while (UITalk.canUndo() && guard-- > 0) UITalk.undo();
+check("canUndo goes false once drained", UITalk.canUndo() === false, `guard left ${guard}`);
+check("undo past the floor is a no-op", UITalk.undo() === null);
+
+UITalk.clearSelection();
+UITalk.pick(input);
+UITalk.pick(button);
+
+// --- rubber-band selection
+UITalk.clearSelection();
+const area = UITalk.pickArea({ left: 500, top: 500, right: 950, bottom: 660 });
+check("area select picks the boxes inside", area.added.length > 0, JSON.stringify(area));
+// A rectangle is the gesture for picking several things, so resolving to a single
+// container means the user drew around the container to get at what is inside it. The
+// form is enclosed here, and its two fields are what the drag was for.
+check("a rectangle that resolves to one container steps inside it",
+  UITalk.picked.includes(input) && UITalk.picked.includes(button) &&
+  !UITalk.picked.includes(window.document.querySelector(".notify-form")),
+  UITalk.picked.map((e) => e.className).join(" | "));
+check("area refs are stamped", input.getAttribute("data-uitalk-ref") === "1");
+check("and it still never takes a descendant of something it took",
+  !UITalk.picked.some((el) => UITalk.picked.some((other) => other !== el && other.contains(el))),
+  `${UITalk.picked.length} selected, none nested`);
+
+// The container is still reachable, for when the wrapper really is the target.
+UITalk.clearSelection();
+const asContainer = UITalk.pickArea({ left: 500, top: 500, right: 950, bottom: 660 }, { container: true });
+check("holding Alt takes the container instead",
+  UITalk.picked.length === 1 && UITalk.picked[0] === window.document.querySelector(".notify-form"),
+  `${asContainer.added.length} added: ${UITalk.picked.map((e) => e.className).join(" | ")}`);
+
+// And the live highlight has to agree with what the release will take, or the preview
+// is telling the user something untrue.
+UITalk.clearSelection();
+const bandPreview = UITalk.previewArea({ left: 500, top: 500, right: 950, bottom: 660 });
+const bandContainer = UITalk.previewArea({ left: 500, top: 500, right: 950, bottom: 660 }, { container: true });
+check("the drag highlight shows the same elements the release will take",
+  bandPreview.length === 2 && bandContainer.length === 1,
+  `${bandPreview.length} highlighted, ${bandContainer.length} with Alt`);
+
+UITalk.clearSelection();
+UITalk.pickArea({ left: 500, top: 500, right: 950, bottom: 660 });
+
+const again = UITalk.pickArea({ left: 500, top: 500, right: 950, bottom: 660 });
+check("re-dragging the same area adds nothing", again.added.length === 0 && again.already > 0, JSON.stringify(again));
+
+const tiny = UITalk.pickArea({ left: 500, top: 500, right: 503, bottom: 502 });
+check("a tiny rectangle is rejected", tiny.added.length === 0 && !!tiny.note, tiny.note);
+
+const outside = UITalk.pickArea({ left: 0, top: 0, right: 40, bottom: 40 });
+check("an empty rectangle selects nothing", outside.added.length === 0);
+
+UITalk.clearSelection();
+UITalk.pick(input);
+UITalk.pick(button);
+
+// --- region capture
+window.elementFromPointStub = window.document.querySelector(".notify-input");
+const shot = await UITalk.capture({ region: { left: 520, top: 530, right: 760, bottom: 600 }, inventory: false });
+check("region capture returns the region it was asked for",
+  shot.region.x === 520 && shot.region.y === 530 && shot.region.w === 240 && shot.region.h === 70,
+  JSON.stringify(shot.region));
+check("it rasterizes a container that fully holds the region",
+  window.lastRaster.el.classList.contains("notify-form") || window.lastRaster.el === window.document.body,
+  window.lastRaster.el.className || window.lastRaster.el.tagName);
+check("the clip is passed through to the rasterizer",
+  window.lastRaster.opts.clip?.left === 520 && window.lastRaster.opts.clip?.bottom === 600,
+  JSON.stringify(window.lastRaster.opts.clip));
+check("output is cropped to the region, not the container",
+  shot.width === 240 && shot.height === 70, `${shot.width}x${shot.height}`);
+
+const clamped = await UITalk.capture({ region: { left: 700, top: 540, right: -50, bottom: 500 }, inventory: false });
+check("a backwards/offscreen rectangle is normalised",
+  clamped.region.x === 0 && clamped.region.w === 700, JSON.stringify(clamped.region));
+
+let tooSmall = null;
+try { await UITalk.capture({ region: { left: 10, top: 10, right: 13, bottom: 12 } }); }
+catch (err) { tooSmall = err.message; }
+check("a tiny region is refused", /too small/.test(tooSmall ?? ""), tooSmall);
+
+const scan = UITalk.scanRegion({ x: 500, y: 500, w: 460, h: 160 });
+check("scan_region returns elements", Array.isArray(scan.elements));
+
+UITalk.clearSelection();
+check("clear removes the handles", !button.hasAttribute("data-uitalk-ref") && UITalk.picked.length === 0);
+
+console.log(fail.length ? `\n${fail.length} failing: ${fail.join(", ")}` : "\nall checks passed");
+process.exit(fail.length ? 1 : 0);
