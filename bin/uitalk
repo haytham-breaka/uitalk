@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Launcher for the bridge. Installed either as an npm binary or as a Claude Code
+# plugin, whose bin/ directory is put on the Bash tool's PATH — so the skill can start
+# it without knowing where it lives.
+#
+#   uitalk              # start detached, print the URL, exit
+#   uitalk --dev "npm run dev"   # run the dev server detached too
+#   uitalk --app-port 3000
+#   uitalk --fg         # run in the foreground (Ctrl-C to stop)
+#   uitalk --status     # is one running for this project?
+#   uitalk --stop       # stop the one serving this project
+#   uitalk --list       # every bridge running
+#
+# Who answers the panel:
+#   uitalk                        # the built-in Claude session (default)
+#   uitalk --no-agent             # nobody: drive the page from an MCP client
+#   uitalk --agent adapter        # your own model, over its HTTP API
+#   uitalk --agent adapter --provider gemini --model gemini-2.5-pro
+#
+# The adapter reads its key from $UITALK_API_KEY, the provider's own variable
+# ($OPENAI_API_KEY, $ANTHROPIC_API_KEY, $GEMINI_API_KEY), or
+# ~/.uitalk/credentials.json. Never pass a key as an argument: it would be in
+# your shell history.
+#
+# Detached is the default on purpose. A bridge has to outlive the shell that
+# started it: started as a background job of an agent's shell it is reaped when
+# that shell goes away, which kills the session mid-edit.
+set -euo pipefail
+
+# Resolve through symlinks to find the install. npm links its bin with a *relative*
+# target, so a link must be resolved against its own directory — resolving against
+# the working directory instead breaks every npm-installed invocation.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  target="$(readlink "$self")"
+  case "$target" in
+    /*) self="$target" ;;
+    *)  self="$(cd "$(dirname "$self")" && pwd)/$target" ;;
+  esac
+done
+ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+
+HOME_DIR="${UITALK_HOME:-$HOME/.uitalk}"
+LOG_DIR="$HOME_DIR/logs"
+
+port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+CANDIDATES="5173 5174 5175 5176 3000 3001 4200 8080 8000 1313"
+
+project="$PWD"
+app_port="${UITALK_APP_PORT:-}"
+dev_cmd=""
+mode="start"
+agent="${UITALK_AGENT:-}"
+provider="${UITALK_AGENT_PROVIDER:-}"
+model="${UITALK_AGENT_MODEL:-}"
+base_url="${UITALK_AGENT_BASE_URL:-}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --app-port) app_port="$2"; shift 2 ;;
+    --dev)      dev_cmd="$2";  shift 2 ;;
+    --project)  project="$2";  shift 2 ;;
+    --agent)    agent="$2";    shift 2 ;;
+    --no-agent) agent="off";    shift ;;
+    --provider) provider="$2";  shift 2 ;;
+    --model)    model="$2";     shift 2 ;;
+    --base-url) base_url="$2";  shift 2 ;;
+    --fg)       mode="fg";     shift ;;
+    --status)   mode="status"; shift ;;
+    --stop)     mode="stop";   shift ;;
+    --list)     exec node "$ROOT/server/index.mjs" --list ;;
+    # The header block, however long it has grown: a fixed line range silently
+    # truncates the help the moment an option is documented.
+    -h|--help)  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$self"; exit 0 ;;
+    *)          echo "[uitalk] unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+case "${agent:-builtin}" in
+  builtin|adapter|off) ;;
+  *) echo "[uitalk] --agent must be builtin, adapter or off (got: $agent)" >&2; exit 2 ;;
+esac
+
+project="$(cd "$project" && pwd)"
+
+# Ask the registry what is already running for this project.
+running() {
+  node --input-type=module -e "
+    import * as registry from '$ROOT/server/registry.mjs';
+    const hit = registry.list().find((e) => e.project === '$project');
+    if (hit) console.log(\`\${hit.pid} \${hit.port} \${hit.appPort}\`);
+  " 2>/dev/null
+}
+
+dev_pidfile() { echo "$LOG_DIR/$(basename "$project")-dev.pid"; }
+
+dev_running() {
+  local f; f="$(dev_pidfile)"
+  [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null
+}
+
+stop_dev() {
+  local f; f="$(dev_pidfile)"
+  [ -f "$f" ] || return 0
+  local pid; pid="$(cat "$f")"
+  if kill -0 "$pid" 2>/dev/null; then
+    # setsid made it a process-group leader, so the whole tree goes with it:
+    # npm spawns the real server as a child and killing only npm would orphan it.
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+    echo "[uitalk] stopped the dev server (pid $pid)"
+  fi
+  rm -f "$f"
+}
+
+start_dev() {
+  mkdir -p "$LOG_DIR"
+  local log; log="$LOG_DIR/$(basename "$project")-dev.log"
+  local f; f="$(dev_pidfile)"
+
+  if dev_running; then
+    echo "[uitalk] a dev server this bridge started is already running (pid $(cat "$f"))" >&2
+    return 0
+  fi
+
+  echo "[uitalk] starting: $dev_cmd" >&2
+  # The command writes its own pid, so the file names the real process rather than
+  # a wrapper that has already exited.
+  ( cd "$project" && setsid bash -c 'echo $$ > "$1"; exec bash -lc "$2"' _ "$f" "$dev_cmd" \
+      </dev/null >>"$log" 2>&1 & ) 
+  echo "[uitalk] dev log: $log" >&2
+
+  # Wait for it to listen, on the given port or wherever it lands.
+  local waited=0
+  while [ "$waited" -lt 120 ]; do
+    if [ -n "$app_port" ]; then
+      port_open "$app_port" && return 0
+    else
+      for c in $CANDIDATES; do
+        if port_open "$c"; then app_port="$c"; echo "[uitalk] dev server came up on :$c" >&2; return 0; fi
+      done
+    fi
+    sleep 0.5
+    waited=$((waited + 1))
+  done
+
+  echo "[uitalk] the dev server did not start listening within 60s. Last lines of $log:" >&2
+  tail -n 20 "$log" >&2 || true
+  return 1
+}
+
+case "$mode" in
+  status)
+    info="$(running)"
+    if [ -n "$info" ]; then
+      set -- $info
+      echo "[uitalk] running: pid $1 at http://127.0.0.1:$2 -> :$3"
+      if dev_running; then
+        echo "[uitalk] dev server: pid $(cat "$(dev_pidfile)") (started by this bridge)"
+      else
+        port_open "$3" && echo "[uitalk] dev server on :$3 is up (started elsewhere)" \
+                       || echo "[uitalk] WARNING nothing is listening on :$3"
+      fi
+      exit 0
+    fi
+    dev_running && echo "[uitalk] dev server: pid $(cat "$(dev_pidfile)")"
+    echo "[uitalk] nothing running for $project"
+    exit 1
+    ;;
+  stop)
+    stop_dev
+    info="$(running)"
+    if [ -z "$info" ]; then echo "[uitalk] no bridge running for $project"; exit 0; fi
+    set -- $info
+    kill "$1" 2>/dev/null || true
+    echo "[uitalk] stopped pid $1"
+    exit 0
+    ;;
+esac
+
+# Already serving this project: hand back the existing URL rather than racing it.
+info="$(running)"
+if [ -n "$info" ]; then
+  set -- $info
+  echo "[uitalk] already running at http://127.0.0.1:$2 (pid $1)"
+  echo "[uitalk] split screen: http://127.0.0.1:$2/__uitalk/shell"
+  exit 0
+fi
+
+if [ -n "$dev_cmd" ]; then
+  start_dev || exit 1
+fi
+
+# No port given: probe the ports dev servers usually sit on.
+if [ -z "$app_port" ]; then
+  for candidate in 5173 5174 5175 3000 3001 4200 8080 8000 1313; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$candidate") 2>/dev/null; then
+      app_port="$candidate"
+      echo "[uitalk] found a server on :$app_port" >&2
+      break
+    fi
+  done
+fi
+
+if [ -z "$app_port" ]; then
+  cat >&2 <<'MSG'
+[uitalk] No dev server found on the usual ports.
+              Start your app first, then either re-run this or pass the port:
+                uitalk --app-port 4321
+MSG
+  exit 1
+fi
+
+export UITALK_PROJECT="$project"
+export UITALK_APP_PORT="$app_port"
+# Only export what was asked for: an empty value would override the settings file
+# with "", and lose a project's own choice.
+[ -n "$agent" ]    && export UITALK_AGENT="$agent"
+[ -n "$provider" ] && export UITALK_AGENT_PROVIDER="$provider"
+[ -n "$model" ]    && export UITALK_AGENT_MODEL="$model"
+[ -n "$base_url" ] && export UITALK_AGENT_BASE_URL="$base_url"
+true
+
+if [ "$mode" = "fg" ]; then
+  exec node "$ROOT/server/index.mjs"
+fi
+
+mkdir -p "$LOG_DIR"
+log="$LOG_DIR/$(basename "$project").log"
+
+# Fully detach: new session, no controlling terminal, stdin closed, output to the
+# log. A SIGTERM aimed at the caller's process group cannot reach it here.
+if command -v setsid >/dev/null 2>&1; then
+  setsid node "$ROOT/server/index.mjs" </dev/null >>"$log" 2>&1 &
+else
+  nohup node "$ROOT/server/index.mjs" </dev/null >>"$log" 2>&1 &
+  disown 2>/dev/null || true
+fi
+
+# Wait for it to claim a port and register, so the URL reported is the real one.
+for _ in $(seq 1 40); do
+  info="$(running)"
+  if [ -n "$info" ]; then
+    set -- $info
+    echo "[uitalk] http://127.0.0.1:$2  (pid $1, proxying :$3)"
+    echo "[uitalk] split screen: http://127.0.0.1:$2/__uitalk/shell"
+    echo "[uitalk] log: $log"
+    exit 0
+  fi
+  sleep 0.25
+done
+
+echo "[uitalk] it did not come up in 10s. Last lines of $log:" >&2
+tail -n 15 "$log" >&2 || true
+exit 1

@@ -1,0 +1,68 @@
+{
+  "name": "uitalk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Edit a running web app from inside the page: pick elements, preview changes, compare variants, and commit the approved one to source \u2014 driven by a local coding agent.",
+  "scripts": {
+    "start": "node server/index.mjs",
+    "fake-page": "node tools/fake-page.mjs",
+    "install-plugin": "node tools/install-plugin.mjs",
+    "list": "node server/index.mjs --list",
+    "test": "node tools/dom-check.mjs && node tools/ui-check.mjs && node tools/raster-check.mjs && node tools/capture-check.mjs && node tools/probe-ws.mjs && node tools/server-check.mjs && node tools/mcp-check.mjs && node tools/agent-check.mjs",
+    "coverage": "tools/coverage.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "c8": "^12.0.0",
+    "jsdom": "^29.1.1"
+  },
+  "license": "MIT",
+  "author": "Haytham Breaka",
+  "keywords": [
+    "ai",
+    "agent",
+    "claude",
+    "frontend",
+    "devtools",
+    "live-edit",
+    "css",
+    "screenshot",
+    "responsive",
+    "claude-code",
+    "mcp"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "uitalk": "bin/uitalk",
+    "uitalk-mcp": "server/mcp.mjs"
+  },
+  "files": [
+    "bin/",
+    "client/",
+    "server/",
+    "SKILL.md",
+    ".claude-plugin/",
+    ".npmrc",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haytham-breaka/uitalk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/haytham-breaka/uitalk/issues"
+  },
+  "homepage": "https://github.com/haytham-breaka/uitalk#readme",
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+  }
+}
