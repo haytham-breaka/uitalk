@@ -1,254 +1,370 @@
-#!/usr/bin/env bash
-# Launcher for the bridge. Installed either as an npm binary or as a Claude Code
-# plugin, whose bin/ directory is put on the Bash tool's PATH — so the skill can start
-# it without knowing where it lives.
-#
-#   uitalk              # start detached, print the URL, exit
-#   uitalk --dev "npm run dev"   # run the dev server detached too
-#   uitalk --app-port 3000
-#   uitalk --fg         # run in the foreground (Ctrl-C to stop)
-#   uitalk --status     # is one running for this project?
-#   uitalk --stop       # stop the one serving this project
-#   uitalk --list       # every bridge running
-#
-# Who answers the panel:
-#   uitalk                        # the built-in Claude session (default)
-#   uitalk --no-agent             # nobody: drive the page from an MCP client
-#   uitalk --agent adapter        # your own model, over its HTTP API
-#   uitalk --agent adapter --provider gemini --model gemini-2.5-pro
-#
-# The adapter reads its key from $UITALK_API_KEY, the provider's own variable
-# ($OPENAI_API_KEY, $ANTHROPIC_API_KEY, $GEMINI_API_KEY), or
-# ~/.uitalk/credentials.json. Never pass a key as an argument: it would be in
-# your shell history.
-#
-# Detached is the default on purpose. A bridge has to outlive the shell that
-# started it: started as a background job of an agent's shell it is reaped when
-# that shell goes away, which kills the session mid-edit.
-set -euo pipefail
+#!/usr/bin/env node
+// Launcher for the bridge. Installed either as an npm binary (bin/uitalk.cmd wraps
+// this for native Windows shells) or as a Claude Code plugin, whose bin/ directory
+// is put on PATH — so the skill can start it without knowing where it lives.
+//
+//   uitalk              # start detached, print the URL, exit
+//   uitalk --dev "npm run dev"   # run the dev server detached too
+//   uitalk --app-port 3000
+//   uitalk --fg         # run in the foreground (Ctrl-C to stop)
+//   uitalk --status     # is one running for this project?
+//   uitalk --stop       # stop the one serving this project
+//   uitalk --list       # every bridge running
+//
+// Who answers the panel:
+//   uitalk                        # the built-in Claude session (default)
+//   uitalk --no-agent             # nobody: drive the page from an MCP client
+//   uitalk --agent adapter        # your own model, over its HTTP API
+//   uitalk --agent adapter --provider gemini --model gemini-2.5-pro
+//
+// The adapter reads its key from $UITALK_API_KEY, the provider's own variable
+// ($OPENAI_API_KEY, $ANTHROPIC_API_KEY, $GEMINI_API_KEY), or
+// ~/.uitalk/credentials.json. Never pass a key as an argument: it would be in
+// your shell history.
+//
+// Detached is the default on purpose. A bridge has to outlive the shell that
+// started it: started as a background job of an agent's shell it is reaped when
+// that shell goes away, which kills the session mid-edit.
+//
+// This is plain Node rather than a shell script so the same file runs unchanged on
+// Linux, macOS and native Windows (cmd.exe / PowerShell, no WSL or Git Bash
+// required) — a shell script cannot do that, since Windows has no bash and no
+// POSIX process groups.
 
-# Resolve through symlinks to find the install. npm links its bin with a *relative*
-# target, so a link must be resolved against its own directory — resolving against
-# the working directory instead breaks every npm-installed invocation.
-self="${BASH_SOURCE[0]}"
-while [ -L "$self" ]; do
-  target="$(readlink "$self")"
-  case "$target" in
-    /*) self="$target" ;;
-    *)  self="$(cd "$(dirname "$self")" && pwd)/$target" ;;
-  esac
-done
-ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+import { spawn, execFileSync } from "node:child_process";
+import { createConnection } from "node:net";
+import {
+  existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync,
+  realpathSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, basename, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 
-HOME_DIR="${UITALK_HOME:-$HOME/.uitalk}"
-LOG_DIR="$HOME_DIR/logs"
+const WIN = process.platform === "win32";
 
-port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-CANDIDATES="5173 5174 5175 5176 3000 3001 4200 8080 8000 1313"
+// Resolved to the real file (following symlinks) so an npm link or the plugin
+// symlink both find the install root correctly, the way `readlink -f` did in the
+// old bash launcher.
+const SELF = realpathSync(fileURLToPath(import.meta.url));
+const ROOT = dirname(dirname(SELF));
 
-project="$PWD"
-app_port="${UITALK_APP_PORT:-}"
-dev_cmd=""
-mode="start"
-agent="${UITALK_AGENT:-}"
-provider="${UITALK_AGENT_PROVIDER:-}"
-model="${UITALK_AGENT_MODEL:-}"
-base_url="${UITALK_AGENT_BASE_URL:-}"
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --app-port) app_port="$2"; shift 2 ;;
-    --dev)      dev_cmd="$2";  shift 2 ;;
-    --project)  project="$2";  shift 2 ;;
-    --agent)    agent="$2";    shift 2 ;;
-    --no-agent) agent="off";    shift ;;
-    --provider) provider="$2";  shift 2 ;;
-    --model)    model="$2";     shift 2 ;;
-    --base-url) base_url="$2";  shift 2 ;;
-    --fg)       mode="fg";     shift ;;
-    --status)   mode="status"; shift ;;
-    --stop)     mode="stop";   shift ;;
-    --list)     exec node "$ROOT/server/index.mjs" --list ;;
-    # The header block, however long it has grown: a fixed line range silently
-    # truncates the help the moment an option is documented.
-    -h|--help)  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$self"; exit 0 ;;
-    *)          echo "[uitalk] unknown option: $1" >&2; exit 2 ;;
-  esac
-done
-
-case "${agent:-builtin}" in
-  builtin|adapter|off) ;;
-  *) echo "[uitalk] --agent must be builtin, adapter or off (got: $agent)" >&2; exit 2 ;;
-esac
-
-project="$(cd "$project" && pwd)"
-
-# Ask the registry what is already running for this project.
-running() {
-  node --input-type=module -e "
-    import * as registry from '$ROOT/server/registry.mjs';
-    const hit = registry.list().find((e) => e.project === '$project');
-    if (hit) console.log(\`\${hit.pid} \${hit.port} \${hit.appPort}\`);
-  " 2>/dev/null
+/** A quick, non-hanging check: does anything accept a connection on this port? */
+function portOpen(port, host = "127.0.0.1") {
+  return new Promise((done) => {
+    const sock = createConnection({ host, port, timeout: 300 });
+    const finish = (ok) => {
+      sock.destroy();
+      done(ok);
+    };
+    sock.once("connect", () => finish(true));
+    sock.once("timeout", () => finish(false));
+    sock.once("error", () => finish(false));
+  });
 }
 
-dev_pidfile() { echo "$LOG_DIR/$(basename "$project")-dev.pid"; }
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
-dev_running() {
-  local f; f="$(dev_pidfile)"
-  [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null
+/** Kill a process and, where the platform supports it, everything under it. */
+function killTree(pid, signal = "SIGTERM") {
+  if (WIN) {
+    try {
+      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
+    } catch {}
+    return;
+  }
+  // detached:true on POSIX makes the child a process-group leader, so the negative
+  // pid reaches the whole tree (a dev server's own children included).
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {}
+  }
 }
 
-stop_dev() {
-  local f; f="$(dev_pidfile)"
-  [ -f "$f" ] || return 0
-  local pid; pid="$(cat "$f")"
-  if kill -0 "$pid" 2>/dev/null; then
-    # setsid made it a process-group leader, so the whole tree goes with it:
-    # npm spawns the real server as a child and killing only npm would orphan it.
-    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-    echo "[uitalk] stopped the dev server (pid $pid)"
-  fi
-  rm -f "$f"
+// bash -lc sources the user's profile (nvm, asdf, PATH tweaks a dev command may
+// need) the same way the old launcher's login shell did. Fall back to a plain
+// shell where bash is not installed, and to cmd.exe on Windows.
+const HAS_BASH = !WIN && (() => {
+  try {
+    execFileSync("bash", ["-c", "exit 0"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+function spawnShell(command, opts) {
+  if (WIN) return spawn(command, { ...opts, shell: true });
+  if (HAS_BASH) return spawn("bash", ["-lc", command], opts);
+  return spawn(command, { ...opts, shell: true });
 }
 
-start_dev() {
-  mkdir -p "$LOG_DIR"
-  local log; log="$LOG_DIR/$(basename "$project")-dev.log"
-  local f; f="$(dev_pidfile)"
-
-  if dev_running; then
-    echo "[uitalk] a dev server this bridge started is already running (pid $(cat "$f"))" >&2
-    return 0
-  fi
-
-  echo "[uitalk] starting: $dev_cmd" >&2
-  # The command writes its own pid, so the file names the real process rather than
-  # a wrapper that has already exited.
-  ( cd "$project" && setsid bash -c 'echo $$ > "$1"; exec bash -lc "$2"' _ "$f" "$dev_cmd" \
-      </dev/null >>"$log" 2>&1 & ) 
-  echo "[uitalk] dev log: $log" >&2
-
-  # Wait for it to listen, on the given port or wherever it lands.
-  local waited=0
-  while [ "$waited" -lt 120 ]; do
-    if [ -n "$app_port" ]; then
-      port_open "$app_port" && return 0
-    else
-      for c in $CANDIDATES; do
-        if port_open "$c"; then app_port="$c"; echo "[uitalk] dev server came up on :$c" >&2; return 0; fi
-      done
-    fi
-    sleep 0.5
-    waited=$((waited + 1))
-  done
-
-  echo "[uitalk] the dev server did not start listening within 60s. Last lines of $log:" >&2
-  tail -n 20 "$log" >&2 || true
-  return 1
+function tailLines(path, n) {
+  try {
+    const lines = readFileSync(path, "utf8").split("\n");
+    return lines.slice(-n - 1).join("\n");
+  } catch {
+    return "";
+  }
 }
 
-case "$mode" in
-  status)
-    info="$(running)"
-    if [ -n "$info" ]; then
-      set -- $info
-      echo "[uitalk] running: pid $1 at http://127.0.0.1:$2 -> :$3"
-      if dev_running; then
-        echo "[uitalk] dev server: pid $(cat "$(dev_pidfile)") (started by this bridge)"
-      else
-        port_open "$3" && echo "[uitalk] dev server on :$3 is up (started elsewhere)" \
-                       || echo "[uitalk] WARNING nothing is listening on :$3"
-      fi
-      exit 0
-    fi
-    dev_running && echo "[uitalk] dev server: pid $(cat "$(dev_pidfile)")"
-    echo "[uitalk] nothing running for $project"
-    exit 1
-    ;;
-  stop)
-    stop_dev
-    info="$(running)"
-    if [ -z "$info" ]; then echo "[uitalk] no bridge running for $project"; exit 0; fi
-    set -- $info
-    kill "$1" 2>/dev/null || true
-    echo "[uitalk] stopped pid $1"
-    exit 0
-    ;;
-esac
+function help() {
+  const lines = readFileSync(SELF, "utf8").split("\n");
+  const out = [];
+  for (const line of lines.slice(1)) {
+    if (!line.startsWith("//")) break;
+    out.push(line.replace(/^\/\/ ?/, ""));
+  }
+  console.log(out.join("\n"));
+}
 
-# Already serving this project: hand back the existing URL rather than racing it.
-info="$(running)"
-if [ -n "$info" ]; then
-  set -- $info
-  echo "[uitalk] already running at http://127.0.0.1:$2 (pid $1)"
-  echo "[uitalk] split screen: http://127.0.0.1:$2/__uitalk/shell"
-  exit 0
-fi
+// ------------------------------------------------------------------- arguments
 
-if [ -n "$dev_cmd" ]; then
-  start_dev || exit 1
-fi
+const HOME_DIR = process.env.UITALK_HOME || join(homedir(), ".uitalk");
+const LOG_DIR = join(HOME_DIR, "logs");
+const CANDIDATES = [5173, 5174, 5175, 5176, 3000, 3001, 4200, 8080, 8000, 1313];
 
-# No port given: probe the ports dev servers usually sit on.
-if [ -z "$app_port" ]; then
-  for candidate in 5173 5174 5175 3000 3001 4200 8080 8000 1313; do
-    if (exec 3<>"/dev/tcp/127.0.0.1/$candidate") 2>/dev/null; then
-      app_port="$candidate"
-      echo "[uitalk] found a server on :$app_port" >&2
-      break
-    fi
-  done
-fi
+let project = process.cwd();
+let appPort = process.env.UITALK_APP_PORT || "";
+let devCmd = "";
+let mode = "start";
+let agent = process.env.UITALK_AGENT || "";
+let provider = process.env.UITALK_AGENT_PROVIDER || "";
+let model = process.env.UITALK_AGENT_MODEL || "";
+let baseUrl = process.env.UITALK_AGENT_BASE_URL || "";
 
-if [ -z "$app_port" ]; then
-  cat >&2 <<'MSG'
-[uitalk] No dev server found on the usual ports.
-              Start your app first, then either re-run this or pass the port:
-                uitalk --app-port 4321
-MSG
-  exit 1
-fi
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  const next = () => argv[++i];
+  switch (a) {
+    case "--app-port": appPort = next(); break;
+    case "--dev": devCmd = next(); break;
+    case "--project": project = next(); break;
+    case "--agent": agent = next(); break;
+    case "--no-agent": agent = "off"; break;
+    case "--provider": provider = next(); break;
+    case "--model": model = next(); break;
+    case "--base-url": baseUrl = next(); break;
+    case "--fg": mode = "fg"; break;
+    case "--status": mode = "status"; break;
+    case "--stop": mode = "stop"; break;
+    case "--list": {
+      const { list } = await import(join(ROOT, "server", "registry.mjs"));
+      const running = list();
+      if (!running.length) console.log("no bridges running");
+      for (const e of running) {
+        console.log(`  :${e.port} -> ${e.appHost}:${e.appPort}  pid ${e.pid}  ${e.project}`);
+      }
+      process.exit(0);
+      break;
+    }
+    case "-h":
+    case "--help":
+      help();
+      process.exit(0);
+      break;
+    default:
+      console.error(`[uitalk] unknown option: ${a}`);
+      process.exit(2);
+  }
+}
 
-export UITALK_PROJECT="$project"
-export UITALK_APP_PORT="$app_port"
-# Only export what was asked for: an empty value would override the settings file
-# with "", and lose a project's own choice.
-[ -n "$agent" ]    && export UITALK_AGENT="$agent"
-[ -n "$provider" ] && export UITALK_AGENT_PROVIDER="$provider"
-[ -n "$model" ]    && export UITALK_AGENT_MODEL="$model"
-[ -n "$base_url" ] && export UITALK_AGENT_BASE_URL="$base_url"
-true
+if (!["builtin", "adapter", "off"].includes(agent || "builtin")) {
+  console.error(`[uitalk] --agent must be builtin, adapter or off (got: ${agent})`);
+  process.exit(2);
+}
 
-if [ "$mode" = "fg" ]; then
-  exec node "$ROOT/server/index.mjs"
-fi
+try {
+  project = realpathSync(resolvePath(project));
+} catch (err) {
+  console.error(`[uitalk] cannot use project directory ${project}: ${err.message}`);
+  process.exit(1);
+}
 
-mkdir -p "$LOG_DIR"
-log="$LOG_DIR/$(basename "$project").log"
+const { list: registryList } = await import(join(ROOT, "server", "registry.mjs"));
+const running = () => registryList().find((e) => e.project === project);
 
-# Fully detach: new session, no controlling terminal, stdin closed, output to the
-# log. A SIGTERM aimed at the caller's process group cannot reach it here.
-if command -v setsid >/dev/null 2>&1; then
-  setsid node "$ROOT/server/index.mjs" </dev/null >>"$log" 2>&1 &
-else
-  nohup node "$ROOT/server/index.mjs" </dev/null >>"$log" 2>&1 &
-  disown 2>/dev/null || true
-fi
+const devPidfile = () => join(LOG_DIR, `${basename(project)}-dev.pid`);
+const devRunning = () => {
+  const f = devPidfile();
+  if (!existsSync(f)) return null;
+  const pid = Number(readFileSync(f, "utf8").trim());
+  return alive(pid) ? pid : null;
+};
 
-# Wait for it to claim a port and register, so the URL reported is the real one.
-for _ in $(seq 1 40); do
-  info="$(running)"
-  if [ -n "$info" ]; then
-    set -- $info
-    echo "[uitalk] http://127.0.0.1:$2  (pid $1, proxying :$3)"
-    echo "[uitalk] split screen: http://127.0.0.1:$2/__uitalk/shell"
-    echo "[uitalk] log: $log"
-    exit 0
-  fi
-  sleep 0.25
-done
+function stopDev() {
+  const f = devPidfile();
+  const pid = devRunning();
+  if (pid) {
+    killTree(pid);
+    console.log(`[uitalk] stopped the dev server (pid ${pid})`);
+  }
+  try {
+    unlinkSync(f);
+  } catch {}
+}
 
-echo "[uitalk] it did not come up in 10s. Last lines of $log:" >&2
-tail -n 15 "$log" >&2 || true
-exit 1
+async function startDev() {
+  mkdirSync(LOG_DIR, { recursive: true });
+  const logPath = join(LOG_DIR, `${basename(project)}-dev.log`);
+  const f = devPidfile();
+
+  const already = devRunning();
+  if (already) {
+    console.error(`[uitalk] a dev server this bridge started is already running (pid ${already})`);
+    return true;
+  }
+
+  console.error(`[uitalk] starting: ${devCmd}`);
+  const fd = openSync(logPath, "a");
+  const child = spawnShell(devCmd, { cwd: project, detached: true, stdio: ["ignore", fd, fd] });
+  writeFileSync(f, String(child.pid));
+  child.unref();
+  console.error(`[uitalk] dev log: ${logPath}`);
+
+  for (let waited = 0; waited < 120; waited++) {
+    if (appPort) {
+      if (await portOpen(Number(appPort))) return true;
+    } else {
+      for (const c of CANDIDATES) {
+        if (await portOpen(c)) {
+          appPort = String(c);
+          console.error(`[uitalk] dev server came up on :${c}`);
+          return true;
+        }
+      }
+    }
+    await sleep(500);
+  }
+
+  console.error(`[uitalk] the dev server did not start listening within 60s. Last lines of ${logPath}:`);
+  console.error(tailLines(logPath, 20));
+  return false;
+}
+
+// ------------------------------------------------------------------------ modes
+
+if (mode === "status") {
+  const info = running();
+  if (info) {
+    console.log(`[uitalk] running: pid ${info.pid} at http://127.0.0.1:${info.port} -> :${info.appPort}`);
+    const devPid = devRunning();
+    if (devPid) {
+      console.log(`[uitalk] dev server: pid ${devPid} (started by this bridge)`);
+    } else if (await portOpen(info.appPort)) {
+      console.log(`[uitalk] dev server on :${info.appPort} is up (started elsewhere)`);
+    } else {
+      console.log(`[uitalk] WARNING nothing is listening on :${info.appPort}`);
+    }
+    process.exit(0);
+  }
+  const devPid = devRunning();
+  if (devPid) console.log(`[uitalk] dev server: pid ${devPid}`);
+  console.log(`[uitalk] nothing running for ${project}`);
+  process.exit(1);
+}
+
+if (mode === "stop") {
+  stopDev();
+  const info = running();
+  if (!info) {
+    console.log(`[uitalk] no bridge running for ${project}`);
+    process.exit(0);
+  }
+  try {
+    process.kill(info.pid);
+  } catch {}
+  console.log(`[uitalk] stopped pid ${info.pid}`);
+  process.exit(0);
+}
+
+// Already serving this project: hand back the existing URL rather than racing it.
+{
+  const info = running();
+  if (info) {
+    console.log(`[uitalk] already running at http://127.0.0.1:${info.port} (pid ${info.pid})`);
+    console.log(`[uitalk] split screen: http://127.0.0.1:${info.port}/__uitalk/shell`);
+    process.exit(0);
+  }
+}
+
+if (devCmd) {
+  if (!(await startDev())) process.exit(1);
+}
+
+if (!appPort) {
+  for (const candidate of CANDIDATES) {
+    if (await portOpen(candidate)) {
+      appPort = String(candidate);
+      console.error(`[uitalk] found a server on :${appPort}`);
+      break;
+    }
+  }
+}
+
+if (!appPort) {
+  console.error(
+    "[uitalk] No dev server found on the usual ports.\n" +
+      "              Start your app first, then either re-run this or pass the port:\n" +
+      "                uitalk --app-port 4321",
+  );
+  process.exit(1);
+}
+
+const env = { ...process.env, UITALK_PROJECT: project, UITALK_APP_PORT: appPort };
+// Only set what was asked for: an empty value would override the settings file
+// with "", and lose a project's own choice.
+if (agent) env.UITALK_AGENT = agent;
+if (provider) env.UITALK_AGENT_PROVIDER = provider;
+if (model) env.UITALK_AGENT_MODEL = model;
+if (baseUrl) env.UITALK_AGENT_BASE_URL = baseUrl;
+
+const serverEntry = join(ROOT, "server", "index.mjs");
+
+if (mode === "fg") {
+  const child = spawn(process.execPath, [serverEntry], { env, stdio: "inherit" });
+  for (const sig of ["SIGINT", "SIGTERM"]) {
+    process.on(sig, () => child.kill(sig));
+  }
+  child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+} else {
+  mkdirSync(LOG_DIR, { recursive: true });
+  const logPath = join(LOG_DIR, `${basename(project)}.log`);
+  const fd = openSync(logPath, "a");
+  // Fully detached: new session (POSIX) or no console (Windows), stdin closed,
+  // output to the log. A signal aimed at the caller's shell cannot reach it here.
+  const child = spawn(process.execPath, [serverEntry], {
+    env, detached: true, stdio: ["ignore", fd, fd],
+  });
+  child.unref();
+
+  let found = null;
+  for (let i = 0; i < 40 && !found; i++) {
+    found = running();
+    if (!found) await sleep(250);
+  }
+
+  if (found) {
+    console.log(`[uitalk] http://127.0.0.1:${found.port}  (pid ${found.pid}, proxying :${found.appPort})`);
+    console.log(`[uitalk] split screen: http://127.0.0.1:${found.port}/__uitalk/shell`);
+    console.log(`[uitalk] log: ${logPath}`);
+    process.exit(0);
+  }
+
+  console.error(`[uitalk] it did not come up in 10s. Last lines of ${logPath}:`);
+  console.error(tailLines(logPath, 15));
+  process.exit(1);
+}

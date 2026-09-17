@@ -59,12 +59,15 @@ default mode needs nothing but your existing Claude Code login. A key is require
 if you choose `--agent adapter`, and then it is read from the environment or
 `~/.uitalk/credentials.json` — never from the project, and never sent to the page.
 
+The `uitalk` launcher (`bin/uitalk`) is plain Node, so it runs the same way on Linux,
+macOS and native Windows (cmd.exe or PowerShell) — no bash, WSL or Git Bash required.
+
 **It detaches by default, and that matters.** A bridge has to outlive the shell that
 started it. Run as a background job of an agent's shell, it gets reaped when that shell
-goes away — which kills the live session mid-edit. `uitalk` puts the server in its
-own session with no controlling terminal, so a SIGTERM aimed at the caller cannot reach
-it, then waits for it to claim a port and prints the real URL. Logs go to
-`~/.uitalk/logs/<project>.log`.
+goes away — which kills the live session mid-edit. `uitalk` puts the server in its own
+session (a new process group on Linux/macOS; a console-detached process on Windows), so
+a signal aimed at the caller cannot reach it, then waits for it to claim a port and
+prints the real URL. Logs go to `~/.uitalk/logs/<project>.log` (`%USERPROFILE%\.uitalk\logs\` on Windows).
 
 Starting it again while one is already up for the same project just prints that URL, so
 it is safe to re-run.
