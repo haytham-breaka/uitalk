@@ -444,7 +444,18 @@
   // ------------------------------------------------------------ transcript
 
   let streaming = null;
-  const scroll = () => (ui.log.scrollTop = ui.log.scrollHeight);
+  // Called once per streamed text delta (potentially dozens/sec) plus once per tool-use
+  // chip. Coalesce into one scroll per animation frame so a large screenshot already in
+  // the log doesn't force a synchronous layout on every call.
+  let scrollQueued = false;
+  const scroll = () => {
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      ui.log.scrollTop = ui.log.scrollHeight;
+    });
+  };
 
   function say(cls, text) {
     const el = document.createElement("div");

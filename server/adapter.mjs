@@ -423,13 +423,15 @@ export function createAdapter({
   let credential = () => ({ key: null, from: null });
   const keyOrThrow = () => {
     const { key } = credential(name);
-    if (!key) {
-      throw new Error(
-        `no API key for ${name}. Put it in the environment (UITALK_API_KEY) or in ` +
-          `~/.uitalk/credentials.json as {"${name}": "sk-..."}.`,
-      );
-    }
-    return key;
+    if (key) return key;
+    // A custom base URL means the request is not going to the vendor's own API — a
+    // local or self-hosted server (llama.cpp, Ollama, an internal gateway) commonly
+    // takes no key at all, so send a placeholder rather than refuse to even try.
+    if (cfg.base) return "not-required";
+    throw new Error(
+      `no API key for ${name}. Put it in the environment (UITALK_API_KEY) or in ` +
+        `~/.uitalk/credentials.json as {"${name}": "sk-..."}.`,
+    );
   };
 
   /** One user message, then tools until the model stops asking for them. */

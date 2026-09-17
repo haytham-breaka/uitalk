@@ -750,14 +750,17 @@ function runAdapter() {
   // also talks to a third party.
   adapter.useCredentials((provider) => settings.credential(provider));
   const { from } = settings.credential(adapter.provider);
-  if (!from) {
+  if (from) {
+    log(`key for ${adapter.provider} read from ${from}`);
+  } else if (config.agentBaseUrl) {
+    // A custom base URL is usually a local or self-hosted server that takes no key.
+    log(`no key found for ${adapter.provider}, but agentBaseUrl is set (${config.agentBaseUrl}) — proceeding without one`);
+  } else {
     log(`no key found for ${adapter.provider}: set UITALK_API_KEY, or write ${settings.paths.credentials}`);
     toPanel({
       kind: "agent_absent",
       text: `No API key for ${adapter.provider}. Set UITALK_API_KEY in the environment, or put it in ${settings.paths.credentials}.`,
     });
-  } else {
-    log(`key for ${adapter.provider} read from ${from}`);
   }
 
   session = adapter;
