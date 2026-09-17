@@ -9,7 +9,7 @@
 <p align="center">
   <img src="docs/media/story.gif" alt="Talk to your UI, not about it: five acts in one session — centring one button on another by number, fixing a headline that wraps on phones from inside the split-screen frame, a colour change that stays scoped to the selected button, five live style options before anything is written, and a one-click undo" width="100%">
 </p>
-<p align="center"><sub>Five things you stop explaining, in 87 seconds. <a href="docs/media/story.mp4">Full-quality video</a>.</sub></p>
+<p align="center"><sub>A few things you stop explaining once you can point at them. <a href="docs/media/story.mp4">Full-quality video</a>.</sub></p>
 
 Nothing is written into your project to install it, and no credentials live in the page.
 By default the agent is the Claude Code session you are already logged into — no second
