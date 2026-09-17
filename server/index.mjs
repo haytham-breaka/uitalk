@@ -354,6 +354,15 @@ wss.on("connection", (ws) => {
       }
         return pushToAgent(buildUserContent(frame));
 
+      // The panel's answer to an ask_choice question: a plain reply, not an approval —
+      // nothing here is committed to source, so it is forwarded like chat rather than
+      // routed through the CSS-approval path. Still relayed to `agents` so a standalone
+      // MCP client blocked in await_answer (which cannot be pushed a message) hears it.
+      case "choice_answer":
+        record("me", frame.label);
+        toAgents(frame);
+        return pushToAgent(frame.label);
+
       case "settings": {
         const { settings: next, written, rejected } = settings.save(PROJECT, frame.patch);
         config = next;
@@ -654,17 +663,25 @@ How to work here:
   to confirm, not a location to edit blind.
 - "Does this hold up on mobile" is capture_breakpoints, not a request for the user to resize.
   It follows the element across widths, since a rectangle means something different at each.
-- Preview before you edit. try_style shows the user the change in their real page; it writes
-  nothing. Use capture afterwards to check the result against what you intended.
+- When the request is a clear, unambiguous change ("make this button blue", "add 8px of gap
+  here", "increase the font size to 16px"), edit the source directly — do not preview it first.
+  Read the current styles with describe_styles, make the edit, then capture to confirm it took.
+- Preview instead of editing directly when the change is exploratory, when more than one
+  reasonable interpretation of the request exists, or the user is comparing options. try_style
+  shows the change in their real page; it writes nothing. Use capture afterwards to check the
+  result against what you intended.
 - When the user asks for several versions, use show_options. Then end your turn. Their choice
   arrives as a new message from them.
+- For a decision with no visual difference to preview — which approach, which file, a yes/no —
+  use ask_choice so they can tap an answer instead of retyping it back to you. Their pick arrives
+  the same way: end your turn after calling it and wait.
 - A request can arrive with a screenshot and nothing selected. Do not ask the user to go and
   select something you can already identify: scan_region the area the screenshot came from,
   find the element, and pass its "selector" to try_style or show_options. Ask only when the
   screenshot is genuinely ambiguous about which element is meant.
-- Only edit source after the user approves. When you do, place the change where the project
-  already keeps that kind of thing and match its conventions. Never carry a data-uitalk-*
-  attribute into source; those are preview handles only.
+- After a preview is approved, place the change where the project already keeps that kind of
+  thing and match its conventions. Never carry a data-uitalk-* attribute into source; those are
+  preview handles only.
 - Keep replies short. The user is looking at the page, not at text.
 `.trim();
 

@@ -380,7 +380,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   const tools = srv.instance._registeredTools;
   const run = (name, args = {}) => tools[name].handler(args, {});
 
-  check("every page tool is registered", Object.keys(tools).length === 11, Object.keys(tools).length);
+  check("every page tool is registered", Object.keys(tools).length === 12, Object.keys(tools).length);
   check("each tool carries a description the agent can choose from",
     Object.values(tools).every((t) => typeof t.description === "string" && t.description.length > 40),
     Object.entries(tools).find(([, t]) => (t.description ?? "").length <= 40)?.[0] ?? "all described");

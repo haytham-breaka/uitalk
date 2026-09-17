@@ -659,6 +659,26 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   const badRef = await call("tryStyle", { ref: 99, declarations: "color: red" });
   check("a bad ref reports something the agent can act on",
     /CSS selector/.test(badRef?.error ?? ""), badRef?.error ?? "no error");
+
+  // ask_choice: a plain question with tappable buttons, not a CSS comparison.
+  const asked = await call("askChoice", {
+    question: "Which layout?",
+    options: ["Flexbox", "Grid"],
+  });
+  check("ask_choice answers once it has rendered", asked?.result?.presented === true, asked?.error ?? "ok");
+
+  const buttons = [...root.querySelectorAll(".choices button")];
+  check("every option gets a button", buttons.length === 2, buttons.map((b) => b.textContent).join(" | "));
+  check("the question is shown as a message", root.querySelector(".msg.agent")?.textContent.includes("Which layout?"));
+
+  const before = sent.length;
+  buttons[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await tick();
+  const answer = sent.slice(before).find((f) => f.kind === "choice_answer");
+  check("clicking an option sends the pick like a plain reply",
+    answer?.label === "Grid", JSON.stringify(answer));
+  check("the picked option is marked and both buttons disable",
+    buttons[1].classList.contains("picked") && buttons.every((b) => b.disabled));
 }
 
 // --- the floating panel resizes in both axes

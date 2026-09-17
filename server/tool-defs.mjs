@@ -274,6 +274,27 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
       run: (args) => ask("showOptions", args),
     },
     {
+      name: "ask_choice",
+      always: true,
+      description:
+        "Ask the user a plain multiple-choice question that has no visual difference to preview " +
+        "— which approach, which file, a yes/no — unlike show_options, which is for comparing " +
+        "CSS alternatives on the page itself. Renders as clickable buttons in their chat, so they " +
+        "answer with a tap instead of retyping an option back to you. Their pick arrives as a new " +
+        "message from them, so finish your turn after calling this and wait — unless your client " +
+        "cannot receive one, in which case call await_answer next.",
+      schema: {
+        question: { type: "string", description: "The question, in one sentence" },
+        options: {
+          type: "array",
+          description: "Between 2 and 6 short answers to choose from",
+          items: { type: "string" },
+        },
+      },
+      required: ["question", "options"],
+      run: (args) => ask("askChoice", args),
+    },
+    {
       name: "reset_preview",
       description:
         "Discard the entire preview layer: drop all preview stylesheets, unmount any options, " +
