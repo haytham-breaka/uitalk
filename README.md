@@ -4,63 +4,17 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
-[![Version 0.6.1](https://img.shields.io/badge/version-0.6.1-informational.svg)](.claude-plugin/plugin.json)
+[![Version 0.6.2](https://img.shields.io/badge/version-0.6.2-informational.svg)](.claude-plugin/plugin.json)
 
 <p align="center">
-  <img src="docs/media/hero.gif" alt="Selecting a pricing card in a running app, asking for five style options, flipping through them live, approving one, seeing it committed to the stylesheet, then undoing it with one click" width="100%">
+  <img src="docs/media/story.gif" alt="Talk to your UI, not about it: five acts in one session — centring one button on another by number, fixing a headline that wraps on phones from inside the split-screen frame, a colour change that stays scoped to the selected button, five live style options before anything is written, and a one-click undo" width="100%">
 </p>
+<p align="center"><sub>Five things you stop explaining, in 87 seconds. <a href="docs/media/story.mp4">Full-quality video</a>.</sub></p>
 
 Nothing is written into your project to install it, and no credentials live in the page.
 By default the agent is the Claude Code session you are already logged into — no second
 API bill — but any OpenAI-compatible model, a self-hosted one, an OpenCode session, or
 any MCP-capable editor can answer instead.
-
-## See it in action
-
-Seven short clips, each one feature. Click a thumbnail to play it.
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <a href="docs/media/direct-edit.mp4"><img src="docs/media/direct-edit-poster.jpg" alt="Direct edit demo"></a>
-      <p><b>Ask for a change — it just edits the file.</b> Select a button, describe the change, and the agent reads the computed styles and edits the stylesheet directly. No preview step for a request this unambiguous.</p>
-    </td>
-    <td width="50%" valign="top">
-      <a href="docs/media/variants.mp4"><img src="docs/media/variants-poster.jpg" alt="Live variants demo"></a>
-      <p><b>Preview live variants, approve one.</b> Ask for five options and flip through them on the real page. Nothing is written to disk until you approve — and once you do, the style is in your stylesheet.</p>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <a href="docs/media/selecting.mp4"><img src="docs/media/selecting-poster.jpg" alt="Selection demo"></a>
-      <p><b>Select exactly what you mean.</b> Click elements in order, drag a rectangle to select a region, Ctrl+Z to step back, Esc to clear.</p>
-    </td>
-    <td valign="top">
-      <a href="docs/media/undo.mp4"><img src="docs/media/undo-poster.jpg" alt="Undo demo"></a>
-      <p><b>Approved doesn't mean permanent.</b> Every committed change gets a one-click undo, backed by a git snapshot taken before the agent wrote anything.</p>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <a href="docs/media/screenshot.mp4"><img src="docs/media/screenshot-poster.jpg" alt="Screenshot demo"></a>
-      <p><b>Show it what you mean.</b> Drag to capture any region, attach it to your message, and the agent reasons about what is actually on screen.</p>
-    </td>
-    <td valign="top">
-      <a href="docs/media/ask-choice.mp4"><img src="docs/media/ask-choice-poster.jpg" alt="Ask choice demo"></a>
-      <p><b>Plain questions get tappable answers.</b> When the agent needs a decision with no visual answer, it offers buttons instead of making you retype.</p>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <a href="docs/media/splitscreen.mp4"><img src="docs/media/splitscreen-poster.jpg" alt="Split screen demo"></a>
-      <p><b>Test any device size, right beside the chat.</b> Phone, tablet, laptop presets, rotate, custom sizes — a real iframe viewport, so <code>@media</code> rules actually respond.</p>
-    </td>
-    <td valign="top">
-      <a href="docs/media/story.mp4"><img src="docs/media/story-poster.jpg" alt="The long cut: five pain points, one session"></a>
-      <p><b>Talk to your UI, not about it.</b> The long cut — 87 seconds, one session: aligning two buttons by number, a headline that wraps on phones, a colour change that stays scoped, five options before anything is written, and undo. Each act opens with the paragraph you used to type, then what you say once you can point.</p>
-    </td>
-  </tr>
-</table>
 
 ## Contents
 
@@ -375,7 +329,7 @@ client/           concatenated and served at /__uitalk/client.js
   ui.js           launcher, tool palette, tray, chat, option flipper
 tools/            test suites and agent-driven probes — see CONTRIBUTING.md
 docs/
-  architecture.mmd  source of the diagram above; media/ holds its two SVGs and the demo clips
+  architecture.mmd  source of the diagram above; media/ holds its two SVGs and the demo (story.gif, story.mp4)
 ```
 
 ## Configuration
