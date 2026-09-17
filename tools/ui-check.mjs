@@ -661,6 +661,27 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   check("approve is disabled on the original",
     root.querySelector('[data-act="approve"]').disabled === true);
 
+  // An element that moves because a stylesheet swapped — HMR, a live-reload shim,
+  // the agent's own edit landing — used to keep its ring where it had been:
+  // nothing scrolled or resized, so nothing repainted, and a fix that moved a
+  // button looked like it had torn the button out of its outline.
+  {
+    const el = UITalk.picked[0];
+    let key = [...el.classList].find((c) => BOXES[c]);
+    if (!key) { key = "sheet-moved"; el.classList.add(key); BOXES[key] = { ...el.getBoundingClientRect() }; }
+    const before = parseInt(root.querySelector(".ring").style.top, 10);
+    BOXES[key] = { ...BOXES[key], top: BOXES[key].top + 40 };
+    const swapped = window.document.createElement("style");
+    swapped.textContent = "/* what HMR appends */";
+    window.document.head.appendChild(swapped);
+    await tick(); await tick();
+    const after = parseInt(root.querySelector(".ring").style.top, 10);
+    check("a stylesheet swap repaints the rings where the elements are now",
+      after === before + 40, `ring top ${before} -> ${after}`);
+    BOXES[key] = { ...BOXES[key], top: BOXES[key].top - 40 };
+    swapped.remove();
+  }
+
   await call("resetPreview");
 
   const reset = await call("resetPreview");
