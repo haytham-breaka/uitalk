@@ -89,7 +89,7 @@ const rpc = (method, params = {}) =>
 await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } });
 
 const listed = await rpc("tools/list");
-check("it advertises the page tools to any MCP client", listed.result.tools.length === 12,
+check("it advertises the page tools to any MCP client", listed.result.tools.length === 14,
   `${listed.result.tools.length} tools`);
 check("every tool is described well enough to choose from",
   listed.result.tools.every((t) => (t.description ?? "").length > 60));
@@ -127,6 +127,18 @@ check("with the CSS they approved",
 const nothing = await rpc("tools/call", { name: "await_choice", arguments: { timeout: 1000 } });
 check("waiting when nobody chooses times out rather than hanging",
   /did not pick anything/.test(nothing.result.content[0].text), nothing.result.content[0].text.slice(0, 60));
+
+// The same gap, for a plain ask_choice question rather than a CSS comparison.
+const pendingAnswer = rpc("tools/call", { name: "await_answer", arguments: { timeout: 5000 } });
+await new Promise((r) => setTimeout(r, 300));
+page.send(JSON.stringify({ kind: "choice_answer", label: "Use flexbox" }));
+const answered = await pendingAnswer;
+check("a user's ask_choice answer reaches a client that cannot be pushed to",
+  /Use flexbox/.test(answered.result.content[0].text), answered.result.content[0].text.slice(0, 60));
+
+const noAnswer = await rpc("tools/call", { name: "await_answer", arguments: { timeout: 1000 } });
+check("waiting when nobody answers times out rather than hanging",
+  /did not answer/.test(noAnswer.result.content[0].text), noAnswer.result.content[0].text.slice(0, 60));
 
 // Something happened in the page that this client has to know about. It cannot be
 // told — it is a server — so it has to arrive on the next thing it asks for.

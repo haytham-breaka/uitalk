@@ -151,9 +151,10 @@ you are not using:
 Start the bridge as usual (`uitalk --dev "npm run dev"`); the MCP server finds it
 through the registry, or takes `UITALK_PORT` if you would rather be explicit.
 
-**One thing changes shape.** With the built-in session, your choice of variant arrives
-as a *message*. MCP is request/response and a server cannot push one, so there is an
-extra tool: after `show_options`, the client calls **`await_choice`**, which blocks
+**One thing changes shape.** With the built-in session, your choice of variant — or your
+answer to a plain question — arrives as a *message*. MCP is request/response and a
+server cannot push one, so there are two extra tools: after `show_options`, the client
+calls **`await_choice`**; after `ask_choice`, it calls **`await_answer`**. Each blocks
 until you pick and returns what you chose. Everything else is identical.
 
 What stays behind with the built-in session: the in-panel chat, context compaction, the
@@ -351,7 +352,7 @@ bin/
   uitalk     launcher, on PATH while the plugin is enabled
 server/
   index.mjs       proxy + socket + whichever session is answering
-  tool-defs.mjs   the 11 page tools, defined once, owned by no agent SDK
+  tool-defs.mjs   the 12 page tools, defined once, owned by no agent SDK
   page-tools.mjs  those definitions shaped for the Claude Agent SDK
   adapter.mjs     the same tools driven by your own key, plus file tools
   mcp.mjs         the same tools over stdio, for any MCP client

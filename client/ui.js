@@ -240,6 +240,14 @@
       .chip { display: inline-block; font-size: 10px; color: #868d98; border: 1px solid #31363f;
               border-radius: 4px; padding: 0 5px; margin: 0 4px 2px 0; }
 
+      .choices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+      .choice-btn { font: inherit; font-size: 12px; color: #e8eaed; background: #262b33;
+                    border: 1px solid #3a4049; border-radius: 999px; padding: 6px 12px;
+                    cursor: pointer; }
+      .choice-btn:hover:not(:disabled) { border-color: #5b6472; background: #2c323b; }
+      .choice-btn:disabled { opacity: .55; cursor: default; }
+      .choice-btn.picked { border-color: #1d4ed8; background: #1d4ed8; color: #fff; opacity: 1; }
+
       .opts { display: none; flex-direction: column; gap: 7px; padding: 9px 10px; border-top: 1px solid #2c3039;
               background: #171a1f; }
       .opts.on { display: flex; }
@@ -507,13 +515,67 @@
     scroll();
   }
 
+  // Raw tool names are implementation detail — "read_selection" reads like a log
+  // line, not a step a person is watching happen. This is cosmetic only: there is
+  // no per-tool "finished" event to time a real progress indicator against, so a
+  // friendlier label is what closes the gap between a stack of jargon and someone
+  // watching a first reply take shape.
+  const TOOL_LABEL = {
+    read_selection: "Reading selection",
+    capture: "Capturing screenshot",
+    capture_breakpoints: "Checking breakpoints",
+    wait_for: "Waiting for the page",
+    locate_source: "Locating source",
+    describe_styles: "Checking styles",
+    scan_region: "Scanning the page",
+    try_style: "Previewing style",
+    try_markup: "Previewing markup",
+    show_options: "Preparing options",
+    ask_choice: "Asking a question",
+    reset_preview: "Clearing preview",
+    read_file: "Reading file",
+    edit_file: "Editing file",
+    write_file: "Writing file",
+    list_dir: "Listing files",
+    search_files: "Searching files",
+  };
+
   function chip(name) {
     if (!streaming) streaming = say("agent", "");
     const el = document.createElement("span");
     el.className = "chip";
-    el.textContent = name.replace(/^mcp__page__/, "");
+    const bare = name.replace(/^mcp__page__/, "");
+    el.textContent = TOOL_LABEL[bare] ?? bare;
     streaming.appendChild(el);
     scroll();
+  }
+
+  /** ask_choice's answer: a plain reply, so it looks exactly like typed chat. */
+  function sendChoice(text) {
+    sayMine(text, { shots: [], refs: [] });
+    send({ kind: "choice_answer", label: text });
+  }
+
+  /** ask_choice's question, rendered as tappable buttons instead of retyped text. */
+  function renderAskChoice({ question, options = [] }) {
+    const el = say("agent", question);
+    const box = document.createElement("div");
+    box.className = "choices";
+    for (const opt of options) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "choice-btn";
+      btn.textContent = opt;
+      btn.onclick = () => {
+        for (const b of box.querySelectorAll("button")) b.disabled = true;
+        btn.classList.add("picked");
+        sendChoice(opt);
+      };
+      box.appendChild(btn);
+    }
+    el.appendChild(box);
+    scroll();
+    return { presented: true };
   }
 
   // Switching between the plain page and the device shell is a button, not a URL
@@ -1003,6 +1065,7 @@
       tryMarkup: (p) => api().tryMarkup(p),
       showOptions: (p) => api().showOptions(p),
       resetPreview: () => api().resetPreview(),
+      askChoice: (p) => renderAskChoice(p),
     };
     try {
       if (!handlers[method]) throw new Error(`unknown method ${method}`);

@@ -75,6 +75,7 @@ The panel's messages reach you as ordinary user messages. The page tools are:
 | `try_style` | Preview CSS. Writes nothing. |
 | `try_markup` | Preview replacement markup. A re-render discards it. |
 | `show_options` | Offer alternatives, then end your turn. |
+| `ask_choice` | Ask a plain question with no visual preview. Ends your turn too. |
 | `reset_preview` | Drop every preview. |
 
 ### Rules
@@ -90,11 +91,15 @@ grid, a `top` offset under `position: relative`, a margin change or a restructur
 in static flow. Never reach for a margin when the parent is a flex or grid
 container — that is the signature of not having looked.
 
-**Preview, then commit.** Show the change with `try_style` before editing a file.
-The page is the user's verification channel; a capture after the change is yours.
+**Edit directly when the request is clear.** "Make this button blue" needs no preview
+— read the current styles, make the edit, then capture to confirm it took. Preview
+with `try_style` instead when the change is exploratory, more than one reasonable
+interpretation exists, or the user is comparing options; the page is the user's
+verification channel there, and a capture after the change is yours.
 
-**Alternatives end your turn.** After `show_options`, stop. The user's choice
-arrives as a new message. Do not poll, and do not guess which one they will pick.
+**Alternatives end your turn.** After `show_options` or `ask_choice`, stop. The
+user's choice arrives as a new message. Do not poll, and do not guess which one
+they will pick.
 
 **On approval, own the placement.** The approval message carries the chosen
 declarations, the element's identifiers, and the page path. Find where that element

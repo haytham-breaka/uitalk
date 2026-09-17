@@ -43,6 +43,8 @@ let seq = 0;
 const pending = new Map();
 const choices = [];
 const waitingForChoice = [];
+const answers = [];
+const waitingForAnswer = [];
 // Things that happened in the page which this client has to know about but cannot be
 // told: it is a server, nothing can call it. They ride out on the next tool result.
 const notices = [];
@@ -82,6 +84,14 @@ function connect() {
       const waiter = waitingForChoice.shift();
       if (waiter) waiter(frame);
       else choices.push(frame);
+    }
+
+    // ask_choice's answer, the same way: a plain reply held for await_answer rather
+    // than pushed, since there is nothing here to push it to.
+    if (frame.kind === "choice_answer") {
+      const waiter = waitingForAnswer.shift();
+      if (waiter) waiter(frame);
+      else answers.push(frame);
     }
   });
 
@@ -161,6 +171,43 @@ defs.push({
     return waited
       ? text(waited)
       : text({ chose: null, note: "the user did not pick anything before the timeout" });
+  },
+});
+
+// The same gap, for ask_choice: a plain multiple-choice question rather than a
+// CSS comparison.
+defs.push({
+  name: "await_answer",
+  readOnly: true,
+  description:
+    "Wait for the user to tap one of the options you asked with ask_choice, and return what " +
+    "they picked. Call this straight after ask_choice. It blocks until they answer or the " +
+    "timeout passes — your client cannot be sent a message, so this is how their answer " +
+    "reaches you.",
+  schema: {
+    timeout: { type: "number", description: "Give up after this many milliseconds (default 300000)" },
+  },
+  run: async (args) => {
+    await ready();
+    const queued = answers.shift();
+    if (queued) return text(queued);
+
+    const waited = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const i = waitingForAnswer.indexOf(hand);
+        if (i !== -1) waitingForAnswer.splice(i, 1);
+        resolve(null);
+      }, Math.min(Math.max(args.timeout ?? 300000, 1000), 900000));
+      const hand = (frame) => {
+        clearTimeout(timer);
+        resolve(frame);
+      };
+      waitingForAnswer.push(hand);
+    });
+
+    return waited
+      ? text(waited)
+      : text({ chose: null, note: "the user did not answer before the timeout" });
   },
 });
 
