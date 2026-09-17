@@ -37,12 +37,13 @@ Then, from inside your app:
 
 ```bash
 cd ~/code/my-app
-npm run dev &
 claude
 > /uitalk
 ```
 
-The skill starts the bridge, finds your dev server, and hands you the URL.
+You do not need to start your dev server first — the skill reads `package.json` for
+a `dev` script, starts it detached along with the bridge, and hands you the URL. (If
+it is already running, the skill just finds it instead.)
 
 ```bash
 uitalk                 # start detached, print the URL, exit
@@ -133,9 +134,11 @@ runs the adapter and MCP modes with nothing from Anthropic installed.
 ## Other editors
 
 A standalone MCP server exposes all of the page tools over stdio, so Cursor, Cline,
-Windsurf, Zed, Continue — any MCP client — can select elements, capture, preview and
-offer variants. Start the bridge with `--no-agent` so it is not also running a session
-you are not using:
+Windsurf, Zed, Continue, OpenCode — any MCP client — can select elements, capture,
+preview and offer variants. Start the bridge with `--no-agent` so it is not also
+running a session you are not using, then point your editor at `uitalk-mcp`.
+
+Cursor, Cline, Windsurf, Continue, and most others read a config shaped like this:
 
 ```json
 {
@@ -143,6 +146,22 @@ you are not using:
     "uitalk": {
       "command": "uitalk-mcp",
       "env": { "UITALK_PROJECT": "/path/to/your/app" }
+    }
+  }
+}
+```
+
+OpenCode's `opencode.jsonc` shape differs — the server key is `mcp`, the command is an
+array, and the environment key is `environment`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "uitalk": {
+      "type": "local",
+      "command": ["uitalk-mcp"],
+      "environment": { "UITALK_PROJECT": "/path/to/your/app" }
     }
   }
 }

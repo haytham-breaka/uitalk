@@ -228,6 +228,24 @@ async function startDev() {
     return true;
   }
 
+  // Something may already be serving this app outside uitalk's own tracking (started
+  // by hand, or by a previous run whose bridge has since been stopped). Spawning
+  // another copy of the dev command would just crash on the same port a moment later.
+  if (appPort) {
+    if (await portOpen(Number(appPort))) {
+      console.error(`[uitalk] found a server already on :${appPort}`);
+      return true;
+    }
+  } else {
+    for (const c of CANDIDATES) {
+      if (await portOpen(c)) {
+        appPort = String(c);
+        console.error(`[uitalk] found a server already on :${c}`);
+        return true;
+      }
+    }
+  }
+
   console.error(`[uitalk] starting: ${devCmd}`);
   const fd = openSync(logPath, "a");
   const child = spawnShell(devCmd, { cwd: project, detached: true, stdio: ["ignore", fd, fd] });
