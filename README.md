@@ -17,37 +17,37 @@ Seven short clips, each one feature. Click a thumbnail to play it.
 
 <table>
   <tr>
-    <td width="50%">
+    <td width="50%" valign="top">
       <a href="docs/media/direct-edit.mp4"><img src="docs/media/direct-edit-poster.jpg" alt="Direct edit demo"></a>
       <p><b>Ask for a change — it just edits the file.</b> Select a button, describe the change, and the agent reads the computed styles and edits the stylesheet directly. No preview step for a request this unambiguous.</p>
     </td>
-    <td width="50%">
+    <td width="50%" valign="top">
       <a href="docs/media/variants.mp4"><img src="docs/media/variants-poster.jpg" alt="Live variants demo"></a>
       <p><b>Preview live variants, approve one.</b> Ask for a few options and flip through them on the real page. Nothing is written to disk until you approve.</p>
     </td>
   </tr>
   <tr>
-    <td>
+    <td valign="top">
       <a href="docs/media/selecting.mp4"><img src="docs/media/selecting-poster.jpg" alt="Selection demo"></a>
       <p><b>Select exactly what you mean.</b> Click elements in order, drag a rectangle to select a region, Ctrl+Z to step back, Esc to clear.</p>
     </td>
-    <td>
+    <td valign="top">
       <a href="docs/media/undo.mp4"><img src="docs/media/undo-poster.jpg" alt="Undo demo"></a>
       <p><b>Approved doesn't mean permanent.</b> Every committed change gets a one-click undo, backed by a git snapshot taken before the agent wrote anything.</p>
     </td>
   </tr>
   <tr>
-    <td>
+    <td valign="top">
       <a href="docs/media/screenshot.mp4"><img src="docs/media/screenshot-poster.jpg" alt="Screenshot demo"></a>
       <p><b>Show it what you mean.</b> Drag to capture any region, attach it to your message, and the agent reasons about what is actually on screen.</p>
     </td>
-    <td>
+    <td valign="top">
       <a href="docs/media/ask-choice.mp4"><img src="docs/media/ask-choice-poster.jpg" alt="Ask choice demo"></a>
       <p><b>Plain questions get tappable answers.</b> When the agent needs a decision with no visual answer, it offers buttons instead of making you retype.</p>
     </td>
   </tr>
   <tr>
-    <td>
+    <td valign="top">
       <a href="docs/media/splitscreen.mp4"><img src="docs/media/splitscreen-poster.jpg" alt="Split screen demo"></a>
       <p><b>Test any device size, right beside the chat.</b> Phone, tablet, laptop presets, rotate, custom sizes — a real iframe viewport, so <code>@media</code> rules actually respond.</p>
     </td>
@@ -319,32 +319,10 @@ What stays behind with the built-in session: the in-panel chat, context compacti
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph browser["Your browser"]
-        app["Your app<br/>(unchanged)"]
-        panel["Injected panel<br/>client/*.js"]
-    end
-    dev["Your dev server<br/>:5173"]
-    subgraph bridge["uitalk bridge  :8400"]
-        proxy["Proxy<br/>injects the panel into HTML"]
-        ws["WebSocket<br/>page tools + chat"]
-        tools["12 page tools<br/>tool-defs.mjs — defined once"]
-    end
-    subgraph agent["Whoever answers"]
-        builtin["builtin<br/>Claude Agent SDK"]
-        adapter["adapter<br/>any OpenAI-compatible API"]
-        opencode["opencode<br/>OpenCode HTTP API"]
-        mcp["off<br/>your editor over MCP"]
-    end
-    src[("Project source<br/>+ git snapshot for undo")]
-
-    dev --> proxy --> app
-    panel <--> ws
-    ws --> tools
-    tools --> builtin & adapter & opencode & mcp
-    builtin & adapter & opencode & mcp --> src
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/architecture-dark.svg">
+  <img src="docs/media/architecture.svg" alt="Your dev server → uitalk bridge (proxy, WebSocket, 12 page tools) → your browser with the injected panel; the tools are answered by builtin, adapter, opencode or an MCP editor, which edit the project source with a git snapshot for undo">
+</picture>
 
 The bridge sits between your browser and your dev server. It proxies every request, injecting the panel client into HTML responses on the way through — so the app itself needs no change. The panel talks to the bridge over a WebSocket; the bridge exposes the page as **12 tools** (`read_selection`, `capture`, `capture_breakpoints`, `scan_region`, `describe_styles`, `locate_source`, `try_style`, `try_markup`, `show_options`, `ask_choice`, `reset_preview`, `wait_for`), defined once in `server/tool-defs.mjs` and shaped for whichever agent is answering.
 
@@ -378,7 +356,8 @@ client/           concatenated and served at /__uitalk/client.js
   shell.js        split screen: device frame, presets, rotate, dock
   ui.js           launcher, tool palette, tray, chat, option flipper
 tools/            test suites and agent-driven probes — see CONTRIBUTING.md
-docs/media/       the demo clips above
+docs/
+  architecture.mmd  source of the diagram above; media/ holds its two SVGs and the demo clips
 ```
 
 ## Configuration
