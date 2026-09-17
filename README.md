@@ -6,6 +6,10 @@
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
 [![Version 0.6.1](https://img.shields.io/badge/version-0.6.1-informational.svg)](.claude-plugin/plugin.json)
 
+<p align="center">
+  <img src="docs/media/hero.gif" alt="Selecting a pricing card in a running app, asking for five style options, flipping through them live, approving one, seeing it committed to the stylesheet, then undoing it with one click" width="100%">
+</p>
+
 Nothing is written into your project to install it, and no credentials live in the page.
 By default the agent is the Claude Code session you are already logged into — no second
 API bill — but any OpenAI-compatible model, a self-hosted one, an OpenCode session, or
