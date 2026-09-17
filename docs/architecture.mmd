@@ -1,0 +1,27 @@
+%% Source for docs/media/architecture.svg. Re-render with:
+%%   npx -y @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/media/architecture.svg -b transparent
+%% The SVG is what the README embeds, because GitHub's mobile app does not render mermaid blocks.
+flowchart LR
+    subgraph browser["Your browser"]
+        app["Your app<br/>(unchanged)"]
+        panel["Injected panel<br/>client/*.js"]
+    end
+    dev["Your dev server<br/>:5173"]
+    subgraph bridge["uitalk bridge  :8400"]
+        proxy["Proxy<br/>injects the panel into HTML"]
+        ws["WebSocket<br/>page tools + chat"]
+        tools["12 page tools<br/>tool-defs.mjs — defined once"]
+    end
+    subgraph agent["Whoever answers"]
+        builtin["builtin<br/>Claude Agent SDK"]
+        adapter["adapter<br/>any OpenAI-compatible API"]
+        opencode["opencode<br/>OpenCode HTTP API"]
+        mcp["off<br/>your editor over MCP"]
+    end
+    src[("Project source<br/>+ git snapshot for undo")]
+
+    dev --> proxy --> app
+    panel <--> ws
+    ws --> tools
+    tools --> builtin & adapter & opencode & mcp
+    builtin & adapter & opencode & mcp --> src
