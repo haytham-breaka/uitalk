@@ -10,10 +10,6 @@ them, preview changes, and commit the ones they approve.
 
 ## Start
 
-```bash
-uitalk
-```
-
 `uitalk` is on your PATH whenever this plugin is enabled. Run it **as an
 ordinary foreground command** — it starts the bridge detached, prints the URL, and
 exits in about a second.
@@ -23,16 +19,29 @@ a long-lived server held by an agent-managed shell dies when that shell is reape
 taking the user's session with it mid-edit. The command already detaches into its own
 session; your shell call just reads back the URL.
 
-It defaults the project to the working directory and probes the usual dev-server
-ports. If it reports finding nothing, the app is not running: ask the user to start
-it, or pass the port once you know it from `package.json`:
+**Start the app yourself — do not assume the user already has it running.** Before
+running `uitalk`, check `package.json` for a dev script (`dev`, then `start`, then
+`serve`, in that order), and which package manager the project uses (`pnpm-lock.yaml`
+→ pnpm, `yarn.lock` → yarn, `bun.lockb` → bun, otherwise npm). Then pass that command
+with `--dev`, so uitalk starts the app and the bridge together in one call:
+
+```bash
+uitalk --dev "npm run dev"
+```
+
+This is safe even when the app turns out to already be running: `uitalk` probes for an
+existing server on the usual ports first, and only launches the one you gave it if
+nothing answered. Only skip `--dev` and ask the user instead when there is no
+`package.json` (a non-Node project) or none of those scripts exist — then ask what
+command starts the app, or pass the port directly if they already know it:
 
 ```bash
 uitalk --app-port 4321
 ```
 
-Running it again when one is already up for this project prints the existing URL
-instead of starting a second, so it is safe to call without checking first. The other
+Running `uitalk` again when one is already up for this project prints the existing URL
+instead of starting a second, so it is safe to call without checking first — including
+with `--dev` again; it will not start a second copy of the dev server either. The other
 modes, should you need them:
 
 | Command | Does |
