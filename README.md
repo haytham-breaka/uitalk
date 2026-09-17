@@ -57,7 +57,7 @@ Seven short clips, each one feature. Click a thumbnail to play it.
     </td>
     <td valign="top">
       <a href="docs/media/story.mp4"><img src="docs/media/story-poster.jpg" alt="The long cut: five pain points, one session"></a>
-      <p><b>The long cut — five things you stop explaining.</b> 87 seconds, one session: aligning by number, a headline that wraps on phones, a colour change that stays scoped, five options before anything is written, and undo. Each act opens with the prompt you'd have had to type.</p>
+      <p><b>Talk to your UI, not about it.</b> The long cut — 87 seconds, one session: aligning two buttons by number, a headline that wraps on phones, a colour change that stays scoped, five options before anything is written, and undo. Each act opens with the paragraph you used to type, then what you say once you can point.</p>
     </td>
   </tr>
 </table>
