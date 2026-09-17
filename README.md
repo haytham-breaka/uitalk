@@ -55,7 +55,10 @@ Seven short clips, each one feature. Click a thumbnail to play it.
       <a href="docs/media/splitscreen.mp4"><img src="docs/media/splitscreen-poster.jpg" alt="Split screen demo"></a>
       <p><b>Test any device size, right beside the chat.</b> Phone, tablet, laptop presets, rotate, custom sizes — a real iframe viewport, so <code>@media</code> rules actually respond.</p>
     </td>
-    <td></td>
+    <td valign="top">
+      <a href="docs/media/story.mp4"><img src="docs/media/story-poster.jpg" alt="The long cut: five pain points, one session"></a>
+      <p><b>The long cut — five things you stop explaining.</b> 87 seconds, one session: aligning by number, a headline that wraps on phones, a colour change that stays scoped, five options before anything is written, and undo. Each act opens with the prompt you'd have had to type.</p>
+    </td>
   </tr>
 </table>
 
@@ -86,12 +89,23 @@ Requires **Node 20.11+** and, for native screen capture, a Chromium browser. The
 
 ### As a Claude Code plugin (recommended)
 
+The repository is its own marketplace. From inside Claude Code:
+
+```
+/plugin marketplace add haytham-breaka/uitalk
+/plugin install uitalk@uitalk
+```
+
+Or from a terminal, `claude plugin marketplace add haytham-breaka/uitalk` then `claude plugin install uitalk@uitalk`. Claude Code clones the repo into its plugin cache and installs the dependencies itself, so there is nothing else to run; `uitalk` is on the PATH of every session while the plugin is enabled, and `/plugin` updates it.
+
+### From a clone, for hacking on it
+
 ```bash
 git clone https://github.com/haytham-breaka/uitalk.git ~/src/uitalk
 cd ~/src/uitalk && npm install && npm run install-plugin
 ```
 
-That symlinks the directory into `~/.claude/skills/`, which is the quickest way to load it: no marketplace, no `--plugin-dir`, and an edit to the source shows up in the next session. The repository is also a valid plugin — `.claude-plugin/plugin.json`, checked by `claude plugin validate .` — if you would rather install it the packaged way.
+That symlinks the checkout into `~/.claude/skills/`, so an edit to the source shows up in the next session with no reinstall. Don't run both routes at once — each registers `/uitalk`.
 
 ### As a standalone command
 
@@ -101,7 +115,7 @@ Not on npm yet, so from the clone:
 cd ~/src/uitalk && npm install && npm link
 ```
 
-Both routes give you the same `uitalk` binary and the same panel.
+All three routes give you the same `uitalk` binary and the same panel.
 
 ## Usage
 
