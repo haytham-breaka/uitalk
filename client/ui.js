@@ -716,6 +716,19 @@
     WebFetch: "Fetching a page",
     WebSearch: "Searching the web",
     Task: "Delegating a task",
+    // An OpenCode session's own native tools — lowercase, unlike Claude Code's.
+    read: "Reading file",
+    write: "Writing file",
+    edit: "Editing file",
+    patch: "Editing file",
+    glob: "Finding files",
+    grep: "Searching files",
+    list: "Listing files",
+    bash: "Running a command",
+    webfetch: "Fetching a page",
+    todowrite: "Updating the task list",
+    todoread: "Checking the task list",
+    task: "Delegating a task",
   };
 
   function chip(name) {

@@ -79,7 +79,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("a project can choose to run with no built-in agent", agentOff.clean.agent === "off");
   const agentBad = settings.validate({ agent: "gpt" });
   check("and a mode that does not exist is refused with the list",
-    !("agent" in agentBad.clean) && /builtin, adapter, off/.test(agentBad.rejected[0] ?? ""),
+    !("agent" in agentBad.clean) && /builtin, adapter, opencode, off/.test(agentBad.rejected[0] ?? ""),
     agentBad.rejected[0]);
 
   const model = settings.validate({ agentModel: "  gemini-2.5-pro  " });

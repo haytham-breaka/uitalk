@@ -52,11 +52,12 @@ modes, should you need them:
 | `uitalk --fg` | Run in the foreground instead (rarely what you want) |
 | `uitalk --no-agent` | Start the panel with no session behind it, for an MCP client |
 | `uitalk --agent adapter` | Answer the panel with a model the user has a key for |
+| `uitalk --agent opencode` | Answer the panel with an OpenCode session the user already has set up |
 
 The default is right for almost every case: the bridge runs its own Claude session on
 the user's subscription, and that session — not you — answers the panel. Only pass
-`--no-agent` or `--agent adapter` if the user asks for a different model or says they
-will drive it from another editor.
+`--no-agent`, `--agent adapter`, or `--agent opencode` if the user asks for a different
+model or says they will drive it from another editor.
 
 **Never pass `UITALK_PORT`.** The bridge claims the first free port from 8400 upward,
 which is what lets several run at once. Read the port out of the command's output and
