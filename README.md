@@ -1,39 +1,107 @@
 # uitalk
 
-Edit a running web app from inside the page. A floating icon opens a tool palette:
-pick elements in order, describe the change, flip through alternatives, approve
-one, and the agent commits it to real source.
+**Edit a running web app from inside the page.** Click an element, say what you want, flip through live alternatives, approve one — and your coding agent commits it to real source.
 
-Nothing is written into your project to install it, and no credentials live in the
-client — the agent is your own already-authenticated Claude Code, so there is no
-second API bill.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
+[![Version 0.6.1](https://img.shields.io/badge/version-0.6.1-informational.svg)](.claude-plugin/plugin.json)
+
+Nothing is written into your project to install it, and no credentials live in the page.
+By default the agent is the Claude Code session you are already logged into — no second
+API bill — but any OpenAI-compatible model, a self-hosted one, an OpenCode session, or
+any MCP-capable editor can answer instead.
+
+## See it in action
+
+Seven short clips, each one feature. Click a thumbnail to play it.
+
+<table>
+  <tr>
+    <td width="50%">
+      <a href="docs/media/direct-edit.mp4"><img src="docs/media/direct-edit-poster.jpg" alt="Direct edit demo"></a>
+      <p><b>Ask for a change — it just edits the file.</b> Select a button, describe the change, and the agent reads the computed styles and edits the stylesheet directly. No preview step for a request this unambiguous.</p>
+    </td>
+    <td width="50%">
+      <a href="docs/media/variants.mp4"><img src="docs/media/variants-poster.jpg" alt="Live variants demo"></a>
+      <p><b>Preview live variants, approve one.</b> Ask for a few options and flip through them on the real page. Nothing is written to disk until you approve.</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/media/selecting.mp4"><img src="docs/media/selecting-poster.jpg" alt="Selection demo"></a>
+      <p><b>Select exactly what you mean.</b> Click elements in order, drag a rectangle to select a region, Ctrl+Z to step back, Esc to clear.</p>
+    </td>
+    <td>
+      <a href="docs/media/undo.mp4"><img src="docs/media/undo-poster.jpg" alt="Undo demo"></a>
+      <p><b>Approved doesn't mean permanent.</b> Every committed change gets a one-click undo, backed by a git snapshot taken before the agent wrote anything.</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/media/screenshot.mp4"><img src="docs/media/screenshot-poster.jpg" alt="Screenshot demo"></a>
+      <p><b>Show it what you mean.</b> Drag to capture any region, attach it to your message, and the agent reasons about what is actually on screen.</p>
+    </td>
+    <td>
+      <a href="docs/media/ask-choice.mp4"><img src="docs/media/ask-choice-poster.jpg" alt="Ask choice demo"></a>
+      <p><b>Plain questions get tappable answers.</b> When the agent needs a decision with no visual answer, it offers buttons instead of making you retype.</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <a href="docs/media/splitscreen.mp4"><img src="docs/media/splitscreen-poster.jpg" alt="Split screen demo"></a>
+      <p><b>Test any device size, right beside the chat.</b> Phone, tablet, laptop presets, rotate, custom sizes — a real iframe viewport, so <code>@media</code> rules actually respond.</p>
+    </td>
+    <td></td>
+  </tr>
+</table>
+
+## Contents
+
+- [Why uitalk](#why-uitalk)
+- [Install](#install)
+- [Usage](#usage)
+- [Features](#features)
+- [Who answers: agent modes](#who-answers-agent-modes)
+- [Other editors (MCP)](#other-editors-mcp)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Contributing](#contributing)
+- [Licence](#licence)
+
+## Why uitalk
+
+- **Works with any stack.** The bridge proxies your dev server and injects the panel on the way through, so Vite, Next, Rails, Django, PHP, Go templates or plain static files all work with zero framework-specific code.
+- **Model-agnostic where it counts.** Selection, screenshots, preview, variants and undo are the browser's and git's work, not a model's. The model only reads your message — and you choose which one.
+- **Real pixels, not a DOM guess.** Screenshots come from the Screen Capture API, so canvas, video, cross-origin images and backdrop filters look the way they actually look.
+- **Nothing lands until you say so.** Variants are live CSS on the real page. Approving commits the one you chose; undo reverts it.
+- **The panel tells you what it could not do.** A font that would not embed, a stylesheet it could not read, an edit that did not take effect — each is reported rather than silently degraded.
 
 ## Install
 
-Either as a standalone command, or as a Claude Code plugin. Both give you the same
-`uitalk` binary and the same panel.
+Requires **Node 20.11+** and, for native screen capture, a Chromium browser. The launcher is plain Node, so it runs the same way on Linux, macOS and native Windows (cmd.exe or PowerShell) — no bash, WSL or Git Bash required.
 
-**As a command** (not on npm yet, so from a clone):
+### As a Claude Code plugin (recommended)
 
 ```bash
 git clone https://github.com/haytham-breaka/uitalk.git ~/src/uitalk
-cd ~/src/uitalk && npm install && npm link
-cd ~/code/my-app
-uitalk --dev "npm run dev"
+cd ~/src/uitalk && npm install && npm run install-plugin
 ```
 
-**For Claude Code**, so the agent can start it for you:
+That symlinks the directory into `~/.claude/skills/`, which is the quickest way to load it: no marketplace, no `--plugin-dir`, and an edit to the source shows up in the next session. The repository is also a valid plugin — `.claude-plugin/plugin.json`, checked by `claude plugin validate .` — if you would rather install it the packaged way.
+
+### As a standalone command
+
+Not on npm yet, so from the clone:
 
 ```bash
-cd ~/src/uitalk && npm run install-plugin
+cd ~/src/uitalk && npm install && npm link
 ```
 
-That symlinks the directory into `~/.claude/skills/`, which is the quickest way to load
-it: no marketplace, no `--plugin-dir`, and an edit to the source shows up in the next
-session. The repository is also a valid plugin — `.claude-plugin/plugin.json`, checked
-by `claude plugin validate .` — if you would rather install it the packaged way.
+Both routes give you the same `uitalk` binary and the same panel.
 
-Then, from inside your app:
+## Usage
+
+### From Claude Code
 
 ```bash
 cd ~/code/my-app
@@ -41,49 +109,105 @@ claude
 > /uitalk
 ```
 
-You do not need to start your dev server first — the skill reads `package.json` for
-a `dev` script, starts it detached along with the bridge, and hands you the URL. (If
-it is already running, the skill just finds it instead.)
+You do not need to start your dev server first — the skill reads `package.json` for a `dev` script, starts it detached along with the bridge, and hands you the URL. If it is already running, the skill just finds it.
+
+### From the command line
 
 ```bash
-uitalk                 # start detached, print the URL, exit
-uitalk --dev "npm run dev"   # run the dev server detached too
-uitalk --app-port 3000
-uitalk --status        # is one running for this project?
-uitalk --stop          # stop this project's bridge
-uitalk --list          # every bridge running
-uitalk --fg            # foreground instead (Ctrl-C to stop)
+uitalk                        # start detached, print the URL, exit
+uitalk --dev "npm run dev"    # run the dev server detached too
+uitalk --app-port 3000        # your dev server is not on :5173
+uitalk --status               # is one running for this project?
+uitalk --stop                 # stop this project's bridge
+uitalk --list                 # every bridge running
+uitalk --fg                   # foreground instead (Ctrl-C to stop)
 ```
 
-Requires **Node 20.11+** and, for native screen capture, a Chromium browser. The
-default mode needs nothing but your existing Claude Code login. A key is required only
-if you choose `--agent adapter`, and then it is read from the environment or
-`~/.uitalk/credentials.json` — never from the project, and never sent to the page.
+**It detaches by default, and that matters.** A bridge has to outlive the shell that started it. Run as a background job of an agent's shell, it gets reaped when that shell goes away — which kills the live session mid-edit. `uitalk` puts the server in its own session (a new process group on Linux/macOS; a console-detached process on Windows), so a signal aimed at the caller cannot reach it, then waits for it to claim a port and prints the real URL. Logs go to `~/.uitalk/logs/<project>.log` (`%USERPROFILE%\.uitalk\logs\` on Windows). Starting it again while one is already up for the same project just prints that URL, so it is safe to re-run.
 
-The `uitalk` launcher (`bin/uitalk`) is plain Node, so it runs the same way on Linux,
-macOS and native Windows (cmd.exe or PowerShell) — no bash, WSL or Git Bash required.
+### The panel
 
-**It detaches by default, and that matters.** A bridge has to outlive the shell that
-started it. Run as a background job of an agent's shell, it gets reaped when that shell
-goes away — which kills the live session mid-edit. `uitalk` puts the server in its own
-session (a new process group on Linux/macOS; a console-detached process on Windows), so
-a signal aimed at the caller cannot reach it, then waits for it to claim a port and
-prints the real URL. Logs go to `~/.uitalk/logs/<project>.log` (`%USERPROFILE%\.uitalk\logs\` on Windows).
+Open the app at the URL the launcher printed and click the floating **◈** (drag it anywhere; the pip shows how many elements are selected, the dot shows the socket). The panel resizes by dragging its **top edge** for height, its **left edge** for width, or the **top-left corner** for both.
 
-Starting it again while one is already up for the same project just prints that URL, so
-it is safe to re-run.
+| Tool | Does |
+|---|---|
+| **Select** | Arms the picker. Click elements in order; each gets a numbered badge. Drag on empty background to select by region. |
+| **Screenshot** | Sends a picture of the selection — or a dragged region — with your next message. |
+| **Clear** | Drops the selection. |
+| **Reset** | Throws away every previewed style and restores replaced markup. |
+| **Ctrl/Cmd-Z** | Steps the selection back — a pick, a deselect, an area drag, or a clear. |
+| **Esc** | Unwinds one layer: dismiss alternatives, then clear the selection, then turn the tool off. |
+| **← →** | Steps through alternatives — including **Original**, so comparing against the unstyled page is part of the same sequence. In the screenshot viewer they step between queued shots. |
+| **Variant buttons** | **Original** plus 1…N under the label, for jumping straight to any variant. |
+| **Approve** | Sends the chosen alternative to the agent to commit to source. |
+| **↑ / ↓** in the composer | Recalls what you have sent, to resend or edit first. Esc cancels the recall. On a multi-line message the arrows move the caret as usual — recall only triggers from the edge line. |
 
-## Which model answers
+Refer to selections by number: "align element 2 to the top of element 1", "make 1 and 2 the same width", "give me 3 versions of 2". You can also send **just a screenshot** and ask for variations, with nothing selected — the agent scans the region, identifies the element, and targets it by CSS selector.
 
-The page half of uitalk is model-agnostic: selection, screenshots, preview, variants
-and undo are the browser's and git's work, not a model's. What varies is who reads
-your message. One setting chooses:
+## Features
+
+### Live variants and approval
+
+Ask for options and the agent mounts them as live CSS on the real page — flip through with the arrows or the numbered buttons, compare against **Original**, then approve one. Only then does the agent touch a file. A clear, single-answer request ("make this button a deep purple gradient") skips the preview and edits directly.
+
+### Undo, backed by git
+
+Before the agent writes, the bridge snapshots the working tree with `git stash create`. An **↩ undo** button appears beside the tray; reverting restores exactly the files that changed since. Projects without git history get no undo button rather than a broken one.
+
+### Verified edits, with before/after
+
+Approving records the computed values the preview was producing, then re-reads them once the agent has finished. If they drifted — the usual cause being a rule written somewhere that loses the cascade — the panel says so and the agent is told which properties missed and pointed at `describe_styles`. Approving also captures the element **before** the edit and again after, and shows them side by side, so "did that work?" is a look rather than a memory.
+
+### Real-pixel screenshots
+
+Via the Screen Capture API: the browser asks once which surface to share (pick this tab), then every capture is a crop of the live compositor output. The panel warns you before that prompt appears, so it is not mistaken for something to dismiss. If you decline, or the browser lacks the API, it falls back to rendering the DOM to an image and labels those shots **rendered**, since that path cannot reproduce canvas, video or cross-origin content. Turn the native path off in ⚙ (`nativeCapture`) if you prefer it.
+
+### Tappable answers
+
+When the agent needs a decision that has no visual answer — "free forever, or a 14-day trial?" — it can call `ask_choice`, and the panel renders the options as buttons. Your tap continues the conversation.
+
+### Device sizes and split screen
+
+Click **⧉** in the panel's meter row. The shell puts your app in an iframe, which is the only way to test a mobile layout honestly: `@media` rules answer to a real viewport, so resizing a `<div>` would change nothing they can observe. Inside the frame the app genuinely believes it is 390px wide.
+
+Presets for iPhone SE/14, Pixel 7, iPad mini/Pro, laptop and desktop, plus **Rotate**, a custom width×height, and **drag handles** on the frame's edges. **Panel: right ▸** cycles which edge the chat sits on. A device bigger than your screen is scaled down to fit while still reporting its full viewport to the app. The simulated screen travels with every message as `page.screen = { preset, width, height, orientation, zoom }`, so "why does this wrap" is answerable.
+
+### Apps without live reload
+
+Vite, webpack and Next push changes into the browser themselves. A Flask, Django or FastAPI dev server restarts but leaves the page as it was. The panel detects whether the app hot-reloads and, when it does not, reloads it before judging the result — the frame in split screen, the whole page otherwise, with the pending check handed to the next page load rather than lost. Set `reloadAfterEdit` to `always` or `never` to override the detection.
+
+### Context meter and compaction
+
+The panel shows a context meter (percent, tokens used, window). When usage crosses the threshold, the bridge compacts between turns: the agent writes a handover note to itself, the session is cleared, and the note is pushed back in — so facts survive but the token cost of the transcript does not. Because this summarizes and restarts rather than compacting incrementally, it is lossier than the harness's own; raise `compactAtPercent` if summaries start losing detail you needed.
+
+**Sessions:** one per bridge process. Opening the panel, reloading the page, or navigating does not start a new one — the agent keeps its context and the panel replays the transcript. **New session** (⚙ pane) is the only reset short of restarting the bridge.
+
+### Several projects at once
+
+One bridge serves one app, so run as many as you have projects — each claims its own port and owns its own agent session, project root and page sockets.
+
+```bash
+# terminal 1
+UITALK_PROJECT=~/code/my-app     UITALK_APP_PORT=5173 npm start   # -> :8400
+# terminal 2
+UITALK_PROJECT=~/code/storefront UITALK_APP_PORT=3000 npm start   # -> :8401
+
+uitalk --list
+#   :8400 -> 127.0.0.1:5173  pid 8117  /home/you/code/my-app
+#   :8401 -> 127.0.0.1:3000  pid 8159  /home/you/code/storefront
+```
+
+**Several tabs on one bridge** is fine: each announces itself, and page calls follow whichever you last used. A background tab is never asked — its `requestAnimationFrame` is paused, which used to make captures hang. Instances are recorded in `~/.uitalk/instances.json`, removed on exit, and pruned if a process dies, so `--list` never shows a phantom.
+
+## Who answers: agent modes
+
+The page half of uitalk is model-agnostic. What varies is who reads your message. One setting chooses:
 
 | `agent` | Who answers | Costs |
 | --- | --- | --- |
 | `builtin` *(default)* | the Claude Code session the bridge runs itself | your existing subscription, no API key |
-| `adapter` | any model you hold a key for — OpenAI, Anthropic, Gemini, or anything OpenAI-compatible | that provider's per-token price |
-| `opencode` | an OpenCode session, driven over its own HTTP API | whatever OpenCode is already configured with — uitalk doesn't manage its auth or model choice |
+| `adapter` | any model you hold a key for — OpenAI, Anthropic, Gemini, or anything OpenAI-compatible, including a local one | that provider's per-token price, or nothing for a local server |
+| `opencode` | an OpenCode session, driven over its own HTTP API | whatever OpenCode is already configured with |
 | `off` | nobody here: an MCP client drives the page tools from your editor | whatever your editor already costs |
 
 ```bash
@@ -91,6 +215,7 @@ uitalk                                     # built-in Claude session
 uitalk --no-agent                          # MCP client drives it
 uitalk --agent adapter                     # your key, OpenAI by default
 uitalk --agent adapter --provider gemini --model gemini-2.5-pro
+uitalk --agent adapter --base-url http://127.0.0.1:8080/v1 --model qwen2.5-coder   # local, no key
 uitalk --agent opencode                    # an OpenCode session you already have configured
 ```
 
@@ -107,14 +232,27 @@ What each mode can and cannot do:
 | The 12 page tools | ✅ | ✅ | ⚠️ only if `opencode.jsonc` points at uitalk's MCP server — see below | ✅ |
 | Edits source after an approval | ✅ Claude Code's own file tools | ✅ `read_file`, `edit_file`, `write_file`, `list_dir`, `search_files`, scoped to the project | ✅ OpenCode's own file tools | ✅ your editor's |
 | Chat in the panel | ✅ | ✅ | ✅ | ❌ — type in your editor; the panel says so instead of swallowing it |
-| Context meter, compaction, New session | ✅ | ✅ | ✅ | ❌ — the conversation is in your editor, so there is nothing here to measure or compact |
-| Undo a committed change | ✅ | ✅ | ✅ | ✅ — and the MCP client is told it happened, so it will not re-apply it |
+| Context meter, compaction, New session | ✅ | ✅ | ✅ | ❌ — the conversation is in your editor |
+| Undo a committed change | ✅ | ✅ | ✅ | ✅ — and the MCP client is told, so it will not re-apply it |
 | Streams the reply token by token | ✅ | ❌ — a turn arrives whole | ✅ | n/a |
+
+`builtin` needs `@anthropic-ai/claude-agent-sdk` and `opencode` needs `@opencode-ai/sdk` — both **optional** dependencies, so neither is required by the other. `npm install --omit=optional` gives you a uitalk that runs the adapter and MCP modes with neither installed.
+
+### Your own key, or no key at all
+
+The adapter never takes a key as an argument — that would put it in your shell history. It reads, in order: `$UITALK_API_KEY`, then the provider's own variable (`$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, `$GEMINI_API_KEY`), then `~/.uitalk/credentials.json`:
+
+```json
+{ "openai": "sk-…", "gemini": "…" }
+```
+
+That file is written `0600`, and a key is never a setting: it cannot go in `.uitalk.json` (which is meant to be committed) and is never sent to the page.
+
+`agentBaseUrl` points the OpenAI shape at something else — a local llama.cpp, Ollama or vLLM server, OpenRouter, Groq, an internal gateway. **When a base URL is set, no key is required**, so a self-hosted open-weights model works with nothing to configure but the URL and the model name. `agentModel` defaults to a current model per provider; if the provider answers `404`, the error names the setting to change.
 
 ### Setting up `opencode` mode
 
-uitalk doesn't bundle or manage OpenCode — it only talks to an existing installation
-over HTTP, the same way `builtin` talks to your existing Claude Code login.
+uitalk doesn't bundle or manage OpenCode — it only talks to an existing installation over HTTP, the same way `builtin` talks to your existing Claude Code login.
 
 1. **Install OpenCode and configure a provider**, if you haven't already:
 
@@ -123,8 +261,7 @@ over HTTP, the same way `builtin` talks to your existing Claude Code login.
    opencode auth login   # or however you've already set up a model with it
    ```
 
-2. **Give uitalk its optional dependency** — `@opencode-ai/sdk` ships as an
-   `optionalDependencies` entry, same as the Claude SDK, so a plain install picks it up:
+2. **Give uitalk its optional dependency** — `@opencode-ai/sdk` ships as an `optionalDependencies` entry, so a plain install picks it up:
 
    ```bash
    cd ~/src/uitalk && npm install
@@ -136,14 +273,9 @@ over HTTP, the same way `builtin` talks to your existing Claude Code login.
    uitalk --agent opencode
    ```
 
-   This finds an `opencode serve` already running on its default port (`4096`) and
-   uses it, or starts one itself if nothing answers there. To use one already running
-   elsewhere, set `opencodeServerUrl` in `.uitalk.json` instead of relying on discovery.
+   This finds an `opencode serve` already running on its default port (`4096`) and uses it, or starts one itself if nothing answers there. To use one already running elsewhere, set `opencodeServerUrl` in `.uitalk.json`.
 
-4. **Let it see the page.** OpenCode has no way to receive custom tools
-   programmatically — a session only gets tools from its own config — so add uitalk's
-   MCP server to this project's `opencode.jsonc` (the same file an editor's own OpenCode
-   would read for this directory, from [Other editors](#other-editors) below):
+4. **Let it see the page.** OpenCode has no way to receive custom tools programmatically — a session only gets tools from its own config — so add uitalk's MCP server to this project's `opencode.jsonc`:
 
    ```jsonc
    {
@@ -158,40 +290,11 @@ over HTTP, the same way `builtin` talks to your existing Claude Code login.
    }
    ```
 
-   Without this step, `opencode` mode still chats in the panel and edits files — it
-   just can't select elements, screenshot, or preview, since it never sees those tools.
-   uitalk checks for this at startup and logs a warning if it looks missing, but never
-   writes to `opencode.jsonc` itself — comments in a hand-edited JSONC file would not
-   survive a parse-and-rewrite round-trip.
+   Without this step, `opencode` mode still chats in the panel and edits files — it just can't select elements, screenshot, or preview, since it never sees those tools. uitalk checks for this at startup and logs a warning if it looks missing, but never writes to `opencode.jsonc` itself — comments in a hand-edited JSONC file would not survive a parse-and-rewrite round-trip.
 
-### Your own key
+## Other editors (MCP)
 
-The adapter needs a key, and never takes one as an argument — that would put it in
-your shell history. It reads, in order: `$UITALK_API_KEY`, then the provider's own
-variable (`$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, `$GEMINI_API_KEY`), then
-`~/.uitalk/credentials.json`:
-
-```json
-{ "openai": "sk-…", "gemini": "…" }
-```
-
-That file is written `0600`, and a key is never a setting: it cannot go in
-`.uitalk.json` (which is meant to be committed) and is never sent to the page.
-
-`agentBaseUrl` points the OpenAI shape at something else — a local llama.cpp server,
-OpenRouter, Groq, an internal gateway. `agentModel` defaults to a current model per
-provider; if the provider answers `404`, the error names the setting to change.
-
-`builtin` needs `@anthropic-ai/claude-agent-sdk` and `opencode` needs `@opencode-ai/sdk` —
-both **optional** dependencies, so neither is required by the other. `npm install --omit=optional`
-gives you a uitalk that runs the adapter and MCP modes with neither installed.
-
-## Other editors
-
-A standalone MCP server exposes all of the page tools over stdio, so Cursor, Cline,
-Windsurf, Zed, Continue, OpenCode — any MCP client — can select elements, capture,
-preview and offer variants. Start the bridge with `--no-agent` so it is not also
-running a session you are not using, then point your editor at `uitalk-mcp`.
+A standalone MCP server exposes all of the page tools over stdio, so Cursor, Cline, Windsurf, Zed, Continue, OpenCode — any MCP client — can select elements, capture, preview and offer variants. Start the bridge with `--no-agent` so it is not also running a session you are not using, then point your editor at `uitalk-mcp`.
 
 Cursor, Cline, Windsurf, Continue, and most others read a config shaped like this:
 
@@ -206,224 +309,58 @@ Cursor, Cline, Windsurf, Continue, and most others read a config shaped like thi
 }
 ```
 
-OpenCode's `opencode.jsonc` shape differs — the server key is `mcp`, the command is an
-array, and the environment key is `environment`:
+OpenCode's `opencode.jsonc` shape differs — the server key is `mcp`, the command is an array, and the environment key is `environment` (see the block in [Setting up `opencode` mode](#setting-up-opencode-mode)).
 
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "uitalk": {
-      "type": "local",
-      "command": ["uitalk-mcp"],
-      "environment": { "UITALK_PROJECT": "/path/to/your/app" }
-    }
-  }
-}
+Start the bridge as usual (`uitalk --dev "npm run dev"`); the MCP server finds it through the registry, or takes `UITALK_PORT` if you would rather be explicit.
+
+**One thing changes shape.** With the built-in session, your choice of variant — or your answer to a plain question — arrives as a *message*. MCP is request/response and a server cannot push one, so there are two extra tools: after `show_options`, the client calls **`await_choice`**; after `ask_choice`, it calls **`await_answer`**. Each blocks until you pick and returns what you chose. Everything else is identical.
+
+What stays behind with the built-in session: the in-panel chat, context compaction, the context meter, transcript replay, and the unprompted "that edit did not take effect" nudge — all of which need an agent the bridge can push messages into. The panel hides those controls rather than leaving them to do nothing. The other direction has the same problem and is solved the same way: when you undo a change or start a new session, the message waits and is prepended to the next tool result the client asks for, so it cannot re-apply an edit you have just reverted.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph browser["Your browser"]
+        app["Your app<br/>(unchanged)"]
+        panel["Injected panel<br/>client/*.js"]
+    end
+    dev["Your dev server<br/>:5173"]
+    subgraph bridge["uitalk bridge  :8400"]
+        proxy["Proxy<br/>injects the panel into HTML"]
+        ws["WebSocket<br/>page tools + chat"]
+        tools["12 page tools<br/>tool-defs.mjs — defined once"]
+    end
+    subgraph agent["Whoever answers"]
+        builtin["builtin<br/>Claude Agent SDK"]
+        adapter["adapter<br/>any OpenAI-compatible API"]
+        opencode["opencode<br/>OpenCode HTTP API"]
+        mcp["off<br/>your editor over MCP"]
+    end
+    src[("Project source<br/>+ git snapshot for undo")]
+
+    dev --> proxy --> app
+    panel <--> ws
+    ws --> tools
+    tools --> builtin & adapter & opencode & mcp
+    builtin & adapter & opencode & mcp --> src
 ```
 
-Start the bridge as usual (`uitalk --dev "npm run dev"`); the MCP server finds it
-through the registry, or takes `UITALK_PORT` if you would rather be explicit.
+The bridge sits between your browser and your dev server. It proxies every request, injecting the panel client into HTML responses on the way through — so the app itself needs no change. The panel talks to the bridge over a WebSocket; the bridge exposes the page as **12 tools** (`read_selection`, `capture`, `capture_breakpoints`, `scan_region`, `describe_styles`, `locate_source`, `try_style`, `try_markup`, `show_options`, `ask_choice`, `reset_preview`, `wait_for`), defined once in `server/tool-defs.mjs` and shaped for whichever agent is answering.
 
-**One thing changes shape.** With the built-in session, your choice of variant — or your
-answer to a plain question — arrives as a *message*. MCP is request/response and a
-server cannot push one, so there are two extra tools: after `show_options`, the client
-calls **`await_choice`**; after `ask_choice`, it calls **`await_answer`**. Each blocks
-until you pick and returns what you chose. Everything else is identical.
+**Two agents, not one.** The session you type `/uitalk` into and the session behind the panel are **different agents with separate contexts**. The skill only launches the bridge; the bridge runs its own agent against the same project. That keeps your terminal session free, and it means the panel's context meter and compaction settings apply to the panel's agent alone.
 
-What stays behind with the built-in session: the in-panel chat, context compaction, the
-context meter, transcript replay, and the unprompted "that edit did not take effect"
-nudge — all of which need an agent the bridge can push messages into. The panel hides
-those controls rather than leaving them to do nothing.
+Prefer your own URL? `curl http://127.0.0.1:8400/__uitalk/bookmarklet` prints a bookmarklet that loads the same client. It needs re-clicking after each reload, and a strict app CSP can block it.
 
-The other direction has the same problem and is solved the same way: when you undo a
-change or start a new session, there is no way to call your editor. The message waits
-and is prepended to the next tool result it asks for, so a client cannot re-apply an
-edit you have just reverted.
-
-### Two agents, not one
-
-The session you type `/uitalk` into and the session behind the panel are
-**different agents with separate contexts**. The skill only launches the bridge; the
-bridge runs its own agent against the same project. That keeps your terminal session
-free, and it means the panel's context meter and compaction settings apply to the
-panel's agent alone. The bridge proxies your
-dev server and injects the panel into the HTML on the way through, so the app needs
-no change — this is what makes it work with Vite, Next, Rails, Django, PHP, Go
-templates, or plain static files without any framework-specific code.
-
-Prefer your own URL? `curl http://127.0.0.1:8400/__uitalk/bookmarklet` prints a
-bookmarklet that loads the same client. It needs re-clicking after each reload, and
-a strict app CSP can block it.
-
-From a terminal agent, `skill/SKILL.md` is an agent skill: ask for live editing and
-it finds the port, starts the bridge, and hands back the URL.
-
-| Env var | Default | Meaning |
-|---|---|---|
-| `UITALK_PROJECT` | `cwd` | Project root the agent reads and edits |
-| `UITALK_APP_PORT` | `5173` | Your dev server's port |
-| `UITALK_APP_HOST` | `127.0.0.1` | Your dev server's host |
-| `UITALK_PORT` | *first free from 8400* | Pin the bridge's port. Leave unset to run several at once. |
-| `UITALK_HOME` | `~/.uitalk` | Where the instance registry lives |
-| `UITALK_RPC_TIMEOUT` | `5000` | Milliseconds before a page call is abandoned |
-| `UITALK_DEBUG` | unset | `1` logs agent events, `2` dumps them |
-
-## Several at once
-
-One bridge serves one app, so run as many as you have projects — each claims its own
-port and owns its own agent session, project root and page sockets. The injected
-client derives its socket from `location.host`, so nothing needs configuring per
-instance.
-
-```bash
-# terminal 1
-UITALK_PROJECT=~/code/my-app   UITALK_APP_PORT=5173 npm start   # -> :8400
-
-# terminal 2
-UITALK_PROJECT=~/code/storefront UITALK_APP_PORT=3000 npm start   # -> :8401
-
-node server/index.mjs --list
-#   :8400 -> 127.0.0.1:5173  pid 8117  /home/you/code/my-app
-#   :8401 -> 127.0.0.1:3000  pid 8159  /home/you/code/storefront
-```
-
-**Several tabs on one bridge** is fine: each announces itself, and page calls follow
-whichever you last used. The meter row shows a count when more than one is connected,
-so you can tell. A background tab is never asked — its `requestAnimationFrame` is
-paused, which used to make captures hang.
-
-Instances are recorded in `~/.uitalk/instances.json`, removed on exit, and
-pruned if a process dies, so `--list` never shows a phantom.
-
-## Context and settings
-
-The panel shows a context meter (percent, tokens used, window). When usage crosses
-the threshold, the bridge compacts between turns: the agent writes a handover note to
-itself, the session is cleared, and the note is pushed back in — so facts survive but
-the token cost of the transcript does not.
-
-`/compact` is not available to an SDK-driven session (sent as a message it is read as
-plain English), which is why compaction is built from `/clear`, which is.
-
-Settings live behind the ⚙ in the meter row, and persist to `.uitalk.json` in the
-project — per app, so each can have its own budget.
-
-| Setting | Default | Means |
-|---|---|---|
-| `autoCompact` | `true` | Compact automatically at the threshold |
-| `compactAtPercent` | `20` | Percent of the window that triggers compaction |
-| `contextTokens` | `200000` | Your window size. **Raise to `1000000` on a 1M-context setup** |
-| `compactCooldownTurns` | `2` | Turns to wait before compacting again |
-| `reloadAfterEdit` | `auto` | Reload the app after an edit: `auto` only when no live reload is detected, or `always` / `never` |
-| `replayLimit` | `200` | Transcript entries kept for replay |
-| `inventoryWithCapture` | `true` | Ship the element inventory with screenshots |
-| `inventoryMaxNodes` | `150` | Cap on inventory size |
-
-Precedence: defaults < `~/.uitalk/settings.json` < `<project>/.uitalk.json` <
-env (`UITALK_COMPACT_AT_PERCENT`, `UITALK_CONTEXT_TOKENS`, …).
-
-Because compaction here summarizes and restarts rather than compacting incrementally,
-it is lossier than the harness's own. A low threshold compacts more often and throws
-away more each time — 20 is what you asked for; raise it if summaries start losing
-detail you needed.
-
-**Sessions:** one per bridge process. Opening the panel, reloading the page, or
-navigating does not start a new one — the agent keeps its context and the panel
-replays the transcript. **New session** (⚙ pane) is the only reset short of
-restarting the bridge.
-
-## How screenshots are taken
-
-Real screen pixels, via the Screen Capture API. The browser asks once which surface
-to share (pick this tab), then every capture is a crop of the live compositor output —
-so canvas, video, cross-origin images and backdrop filters are all captured as they
-actually look.
-
-If you decline the prompt, or the browser lacks the API, it falls back to rendering the
-DOM to an image and labels those shots **rendered**, since that path cannot reproduce
-canvas, video or cross-origin content. Turn the native path off in ⚙ if you prefer it.
-
-## After a change lands
-
-Approving records the computed values the preview was producing, then re-reads them once
-the agent has finished. If they drifted — the usual cause being a rule written somewhere
-that loses the cascade — the panel says so and the agent is told which properties missed
-and pointed at `describe_styles`. That failure is otherwise silent: the page looks
-unchanged and the edit was reported as done.
-
-Approving also captures the element **before** the edit and again once the agent finishes,
-and shows them side by side in the panel — so "did that work?" is a look rather than a
-memory. An **↩ undo** button appears beside the tray: the bridge snapshots the working
-tree with `git stash create` before the agent writes, and reverting restores exactly the
-files that changed since. Projects without git history get no undo button rather than a
-broken one.
-
-## Apps without live reload
-
-Vite, webpack and Next push changes into the browser themselves. A Flask, Django or
-FastAPI dev server restarts but leaves the page exactly as it was, so after an approved
-edit the page still shows the old markup — and both the after-shot and the verification
-would be comparing against a stale page.
-
-The panel detects whether the app hot-reloads and, when it does not, reloads it before
-judging the result: the frame in split screen, the whole page otherwise. In that second
-case the pending check is handed to the next page load rather than lost. Set
-`reloadAfterEdit` to `always` or `never` in ⚙ to override the detection.
-
-## Device sizes
-
-Click **⧉** in the panel's meter row. The shell puts your app in an iframe, which is the only way to test a mobile layout
-honestly: `@media` rules answer to a real viewport, so resizing a `<div>` would change
-nothing they can observe. Inside the frame the app genuinely believes it is 390px wide.
-
-Presets for iPhone SE/14, Pixel 7, iPad mini/Pro, laptop and desktop, plus **Rotate**,
-a custom width×height, and **drag handles** on the frame's right edge, bottom edge and
-corner. **Panel: right ▸** cycles which edge the chat sits on.
-
-The browser's own back, forward and reload act on the app in the frame, as they would
-on any page.
-A device bigger than your screen is scaled down to fit while still reporting its full
-viewport to the app.
-
-The simulated screen travels with every message as
-`page.screen = { preset, width, height, orientation, zoom }`, and the agent sees it in
-each message header — so "why does this wrap" is answerable.
-
-## The panel
-
-Click the floating **◈** (drag it anywhere; the pip shows how many elements are
-selected, the dot shows the socket). The panel resizes by dragging its **top edge**
-for height, its **left edge** for width, or the **top-left corner** for both — it is
-anchored bottom-right, so both edges grow away from that corner.
-
-| Tool | Does |
-|---|---|
-| **Select** | Arms the picker. Click elements in order; each gets a numbered badge. |
-| **Screenshot** | Sends a picture of the selection with your next message. |
-| **Clear** | Drops the selection. |
-| **Reset** | Throws away every previewed style and restores replaced markup. |
-| **↑ / ↓** in the composer | Recalls what you have sent, to resend or edit first. Your part-typed draft is put back when you come forward past the newest, and Esc cancels the recall. On a multi-line message the arrows move the caret as usual — recall only triggers from the edge line. |
-| **Ctrl/Cmd-Z** | Steps the selection back — a pick, a deselect, an area drag, or a clear. |
-| **Esc** | Unwinds one layer: dismiss alternatives, then clear the selection, then turn the tool off. |
-| **← →** | Steps through alternatives — including **Original**, so comparing against the unstyled page is part of the same sequence. In the screenshot viewer they step between queued shots. |
-| **Variant buttons** | A wrapping row of numbers under the label — **Original** plus 1…N — for jumping straight to any variant instead of walking the arrows. The active variant's full name is spelled out above it; each number's is in its tooltip. |
-| **Approve** | Sends the chosen alternative to the agent to commit to source. |
-
-Refer to selections by number: "align element 2 to the top of element 1", "make 1
-and 2 the same width", "give me 3 versions of 2".
-
-You can also send **just a screenshot** and ask for variations, with nothing selected —
-the agent scans the region, identifies the element, and targets it by CSS selector.
-
-## Layout
+### Layout
 
 ```
 .claude-plugin/
   plugin.json     plugin manifest
 SKILL.md          the skill Claude Code invokes as /uitalk
 bin/
-  uitalk     launcher, on PATH while the plugin is enabled
+  uitalk          launcher (Node, cross-platform); on PATH while the plugin is enabled
+  uitalk.cmd      Windows shim for the same
 server/
   index.mjs       proxy + socket + whichever session is answering
   tool-defs.mjs   the 12 page tools, defined once, owned by no agent SDK
@@ -440,126 +377,42 @@ client/           concatenated and served at /__uitalk/client.js
   native.js       real screen pixels via getDisplayMedia, cropped to the selection
   shell.js        split screen: device frame, presets, rotate, dock
   ui.js           launcher, tool palette, tray, chat, option flipper
-skill/
-  SKILL.md        terminal entry point for an agent
-tools/
-  dom-check.mjs          selection, geometry, preview, capture logic
-  ui-check.mjs           panel gestures and the shell, via synthetic events
-  raster-check.mjs       the DOM rasterizer, including what it refuses to inline
-  capture-check.mjs      frame strips, click-triggered timelines, region cropping
-  agent-check.mjs        the adapter's loop and wires, and the panel with no agent
-  mcp-check.mjs          the MCP server end to end, over real stdio JSON-RPC
-  probe-context.mjs      meter, settings, compaction, replay (costs tokens)
-  probe-tabs.mjs         multi-tab routing: calls follow the active tab
-  probe-ws.mjs           HMR passthrough, including a frame packed into the handshake
-  server-check.mjs       settings, keys, registry, git snapshots, proxy, tool handlers
-  coverage.sh            runs every offline suite under c8, gated at 85% lines
-  probe-variations.mjs   screenshot-only request still mounts variants
-  install-plugin.mjs     symlink into ~/.claude/skills/
-  fake-page.mjs          agent loop, one turn
-  fake-page-approve.mjs  alternatives -> approval -> source edit
-  make-png.mjs           PNG encoder for the harnesses
+tools/            test suites and agent-driven probes — see CONTRIBUTING.md
+docs/media/       the demo clips above
 ```
 
-## Tests
+## Configuration
 
-```bash
-node tools/dom-check.mjs                  # no server needed
-node tools/ui-check.mjs                  # no server needed
-node tools/agent-check.mjs               # the adapter and the agentless panel
-node tools/mcp-check.mjs                 # the MCP server over real stdio
-node tools/server-check.mjs              # bridge logic, no browser or agent needed
-node tools/probe-ws.mjs                  # HMR passthrough, no server needed
+Settings live behind the ⚙ in the meter row and persist to `.uitalk.json` in the project — per app, so each can have its own budget. Precedence: defaults < `~/.uitalk/settings.json` < `<project>/.uitalk.json` < env (`UITALK_COMPACT_AT_PERCENT`, `UITALK_CONTEXT_TOKENS`, …).
 
-node tools/fake-page.mjs "align element 2 to the top of element 1"
-node tools/fake-page-approve.mjs         # these two drive a real agent
-node tools/probe-context.mjs             # settings, meter, compaction, replay
+| Setting | Default | Means |
+|---|---|---|
+| `agent` | `builtin` | Who answers: `builtin`, `adapter`, `opencode` or `off` |
+| `agentProvider` | `openai` | Adapter provider: `openai`, `anthropic` or `gemini` |
+| `agentModel` | *provider default* | Adapter model name |
+| `agentBaseUrl` | *unset* | An OpenAI-compatible endpoint that is not OpenAI's own. Set, no key is needed |
+| `opencodeServerUrl` | *auto* | An `opencode serve` to use instead of discovering one on `:4096` |
+| `nativeCapture` | `true` | Capture real screen pixels via the Screen Capture API (asks once) |
+| `reloadAfterEdit` | `auto` | Reload the app after an edit: `auto` only when no live reload is detected, or `always` / `never` |
+| `autoCompact` | `true` | Compact automatically at the threshold |
+| `compactAtPercent` | `20` | Percent of the window that triggers compaction |
+| `contextTokens` | `200000` | Your window size. **Raise to `1000000` on a 1M-context setup** |
+| `compactCooldownTurns` | `2` | Turns to wait before compacting again |
+| `replayLimit` | `200` | Transcript entries kept for replay |
+| `inventoryWithCapture` | `true` | Ship the element inventory with screenshots |
+| `inventoryMaxNodes` | `150` | Cap on inventory size |
 
-npm test                                 # every offline suite
-npm run coverage                         # the same, measured, failing under 85% lines
-```
+Changing `agent*` or `opencodeServerUrl` takes effect on the next bridge start. A key is never a setting — see [Your own key](#your-own-key-or-no-key-at-all).
 
-`dom-check` runs the real client against a synthetic DOM: selection ordering,
-handle stamping, greppable identifiers, ancestor layout, deltas, specificity
-doubling, `!important` stripping, option mounting, and reset. The fake-page
-harnesses speak the real socket protocol, so they exercise the bridge and the tool
-surface without a browser.
-
-## Coverage
-
-`npm run coverage` runs every suite that needs no bridge, no agent and no tokens, and
-fails under **85% lines**. It currently sits at ~87%: the client around 89%, the bridge
-around 83%.
-
-One file stays low on purpose. `index.mjs` (~64%) is mostly the parts a test cannot
-reach without spending money or taking a port: binding, the Claude session, the three
-dispatch paths. What it does around those — message building, routing, context
-accounting, compaction, replay, reverts — is covered. `native.js` and `raster.js` can
-be driven up to the point where real pixels are needed and no further: jsdom has no
-Screen Capture API and cannot rasterize an SVG, and mocking those would measure the
-mock.
-
-The agent-driven probes (`fake-page`, `probe-context`, `probe-tabs`, `probe-variations`)
-run the bridge as a subprocess, so they cost tokens and contribute no coverage. They are
-run by hand when the agent-facing behaviour changes.
-
-## Status
-
-Verified against a React 19 + Vite app:
-
-- Proxy injects into its HTML; `/src/main.jsx` and other assets pass through; HMR
-  upgrades are forwarded.
-- Push-driven input — a message reaches the agent with no polling.
-- `read_selection` → relational reasoning produced `align-self: flex-start` from the
-  ancestor's flex context rather than a margin hack.
-- `capture` → image plus inventory reaches the agent as an image block.
-- `show_options` → three labelled alternatives, then the turn ends to wait.
-- Approval → the agent found the rule in `src/App.css`, merged declarations into the
-  existing block, preserved nested `&:hover` selectors, and leaked no handle.
-  (That test edit was reverted.)
-- jsdom assertions on the client logic, the panel and the shell (click to
-  pick, drag to rubber-band, drag to screenshot, tray, preview, discard, Escape,
-  device presets, rotate, fit-scaling, docking, and screen metadata reaching the
-  message).
-- Loads as a Claude Code plugin (`claude plugin validate` passes, no load errors),
-  auto-loads from inside a project with no flags once linked, and `bin/uitalk`
-  resolves on the Bash PATH.
-- Zero-argument launcher from the app directory detected `:5173`, set the project to
-  the working directory, and proxied the app's real page with the panel injected.
-- 16/16 context assertions: settings round-trip with clamping, usage measured from
-  real token counts, compaction through both stages, meter reset, transcript replayed
-  to a second client — and **a fact stated before compaction was still known after
-  it**, which is the only test that proves compaction is not just amnesia.
-- Two bridges at once: auto-claimed 8400 and 8401, each proxying its own app, each
-  agent reading only its own project root with no cross-talk. Registry pruned on
-  kill; an explicit `UITALK_PORT` on a taken port failed with a clear message; the freed
-  port was reclaimed by the next start.
-
-**Not yet run in a real browser.** The launcher, badge positioning, drag, and above
-all the rasterizer's fidelity are unexercised — jsdom has no layout engine and no
-canvas. Expect to debug those on the first real load.
-
-Also unexercised: `try_markup` and `scan_region` end to end.
-
-Open items: one agent session is shared by every tab, and `try_markup` is discarded by
-a framework re-render.
-
-## Updating
-
-As a plugin, bump `version` in `.claude-plugin/plugin.json` and users get the new
-version; installed from a marketplace, Claude Code installs the dependencies itself
-with `npm ci --ignore-scripts` (which is why the lockfile is committed and `.npmrc`
-carries `omit=dev` — jsdom and c8 have no business in a user's plugin cache).
-
-Two things about a *running* bridge, because a long-lived process is the part that goes
-stale:
-
-- **The client is served from disk**, re-read when it changes. Updating the plugin or
-  editing `client/` needs only a page reload, and a page still running an older build
-  is told so by its build stamp rather than looking like a live bug.
-- **The bridge's own code cannot be swapped under itself.** When `server/` changes on
-  disk the panel says so and asks for `uitalk --stop && uitalk`. Silently
-  serving old behaviour is how an already-fixed bug gets chased twice.
+| Env var | Default | Meaning |
+|---|---|---|
+| `UITALK_PROJECT` | `cwd` | Project root the agent reads and edits |
+| `UITALK_APP_PORT` | `5173` | Your dev server's port |
+| `UITALK_APP_HOST` | `127.0.0.1` | Your dev server's host |
+| `UITALK_PORT` | *first free from 8400* | Pin the bridge's port. Leave unset to run several at once |
+| `UITALK_HOME` | `~/.uitalk` | Where the instance registry, logs and credentials live |
+| `UITALK_RPC_TIMEOUT` | `5000` | Milliseconds before a page call is abandoned |
+| `UITALK_DEBUG` | unset | `1` logs agent events, `2` dumps them |
 
 ## Contributing
 
@@ -571,19 +424,12 @@ npm run coverage            # the same, measured, failing under 85% lines
 
 Three conventions the codebase holds to, because each was learned from a bug:
 
-1. **A comment says why, not what.** The non-obvious constraints — why the upgrade
-   `head` is written rather than unshifted, why the roll waits a frame past the click,
-   why the dock side is a class rather than an attribute selector — are the ones worth
-   writing down, and they are why those bugs have not come back.
-2. **A test must fail against the bug it describes.** Several assertions here were
-   written, passed, and proved worthless until checked against the broken code. If you
-   add a regression test, revert the fix and watch it fail first.
-3. **Tell the user what the tool could not do.** A capture that could not embed a font,
-   a `locate_source` that fell back to searching HTML, a stylesheet that could not be
-   read: each is reported rather than silently degraded. An answer with a hole in it is
-   only useful if the hole is visible.
+1. **A comment says why, not what.**
+2. **A test must fail against the bug it describes.** If you add a regression test, revert the fix and watch it fail first.
+3. **Tell the user what the tool could not do.** An answer with a hole in it is only useful if the hole is visible.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the full version: what each suite covers, how coverage is measured and where it is deliberately low, what has been verified and what has not, and what to know about updating a bridge that is already running.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). No code in this project is derived from any other; see
-[NOTICE.md](NOTICE.md) for the dependencies it uses.
+MIT — see [LICENSE](LICENSE). No code in this project is derived from any other; see [NOTICE.md](NOTICE.md) for the dependencies it uses.
