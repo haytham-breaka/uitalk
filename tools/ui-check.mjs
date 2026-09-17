@@ -596,6 +596,21 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   const shot = await call("capture", { inventory: false });
   check("capture answers", typeof shot?.result?.png === "string", shot?.error ?? "ok");
 
+  // A region capture goes through native.ready(), which can pop a real browser
+  // permission dialog with no prompt of its own — say what it is first, the one
+  // time it is actually about to ask, or an agent-triggered capture is a surprise
+  // popup with nothing on screen to explain it.
+  {
+    fakeNative.active = false;
+    const notesBefore = root.querySelectorAll(".msg.note").length;
+    await call("capture", { region: { left: 10, top: 10, right: 100, bottom: 100 }, inventory: false });
+    const notes = [...root.querySelectorAll(".msg.note")].slice(notesBefore);
+    check("a first native capture warns before asking for permission",
+      notes.some((n) => /may ask to share this tab/.test(n.textContent)),
+      notes.map((n) => n.textContent).join(" | "));
+    fakeNative.active = true;
+  }
+
   const styled = await call("tryStyle", { ref: 1, declarations: "color: red" });
   check("try_style answers", styled?.result?.applied === true, styled?.error ?? "ok");
 
