@@ -23,7 +23,7 @@ Seven short clips, each one feature. Click a thumbnail to play it.
     </td>
     <td width="50%" valign="top">
       <a href="docs/media/variants.mp4"><img src="docs/media/variants-poster.jpg" alt="Live variants demo"></a>
-      <p><b>Preview live variants, approve one.</b> Ask for a few options and flip through them on the real page. Nothing is written to disk until you approve.</p>
+      <p><b>Preview live variants, approve one.</b> Ask for five options and flip through them on the real page. Nothing is written to disk until you approve — and once you do, the style is in your stylesheet.</p>
     </td>
   </tr>
   <tr>
