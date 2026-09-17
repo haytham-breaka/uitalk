@@ -1856,6 +1856,7 @@
     attachedTo = w.document ?? w;
     setPageCursor(mode === "shot" ? "crosshair" : "");
     api().setUiHost?.(shell ? null : host);
+    watchSheets?.();
     checkFrameBuild();
   }
 
@@ -2146,6 +2147,28 @@
   installShield(); // last, so the gesture handlers above still receive events
   onSource("scroll", paint, true);
   onSource("resize", paint);
+
+  // A stylesheet swap — Vite's HMR, a live-reload shim, or the agent's own edit
+  // landing — moves elements without a scroll or a resize, and the rings used to
+  // stay where the elements had been, so a fix that moved a button looked like it
+  // had torn the button out of its outline. Sheet churn in <head> and a stylesheet
+  // finishing loading both mean layout may have moved; repaint once it settles.
+  let settling = false;
+  function settleThenPaint() {
+    if (settling || !api().picked.length) return;
+    settling = true;
+    requestAnimationFrame(() => requestAnimationFrame(() => { settling = false; paint(); }));
+  }
+  onSource("load", (e) => { if (e.target?.tagName === "LINK") settleThenPaint(); }, true);
+  let sheetWatch = null;
+  function watchSheets() {
+    sheetWatch?.disconnect();
+    const head = source()?.document?.head;
+    if (!head) return;
+    sheetWatch = new MutationObserver(settleThenPaint);
+    sheetWatch.observe(head, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["href"] });
+  }
+  watchSheets();
 
   // --------------------------------------------------------------- options
 
