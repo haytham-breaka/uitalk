@@ -222,7 +222,25 @@
              display: flex; flex-direction: column; gap: 7px; }
       .msg { padding: 7px 9px; border-radius: 9px; white-space: pre-wrap; word-break: break-word; }
       .msg.me { background: #1d4ed8; color: #fff; align-self: flex-end; max-width: 86%; }
-      .msg.agent { background: #1b1e24; max-width: 96%; }
+      .msg.agent { background: #1b1e24; max-width: 96%; white-space: normal; }
+      .msg.agent .md-run:first-child { margin-top: 0; }
+      .msg.agent p { margin: 0 0 6px; }
+      .msg.agent p:last-child { margin-bottom: 0; }
+      .msg.agent ul, .msg.agent ol { margin: 4px 0 6px; padding-left: 20px; }
+      .msg.agent li { margin: 2px 0; }
+      .msg.agent pre { margin: 6px 0; padding: 8px 10px; background: #0d0f12;
+                        border: 1px solid #2c3039; border-radius: 6px; overflow-x: auto;
+                        font-size: 11.5px; line-height: 1.4; }
+      .msg.agent pre code { background: none; border: none; padding: 0; }
+      .msg.agent .tok-comment { color: #7f848e; font-style: italic; }
+      .msg.agent .tok-string { color: #98c379; }
+      .msg.agent .tok-keyword { color: #c678dd; }
+      .msg.agent .tok-number { color: #d19a66; }
+      .msg.agent .tok-prop, .msg.agent .tok-attr { color: #61afef; }
+      .msg.agent .tok-tag { color: #e06c75; }
+      .msg.agent code { background: #0d0f12; border: 1px solid #2c3039; border-radius: 4px;
+                         padding: 1px 5px; font-size: 11.5px; font-family: ui-monospace, monospace; }
+      .msg.agent a { color: #6ea8fe; }
       .msg.note { color: #868d98; font-size: 11px; padding: 0 2px; }
       /* What actually went with a message, kept in the message itself. */
       .sent { display: flex; flex-direction: column; gap: 5px; margin-top: 6px;
@@ -465,10 +483,133 @@
     });
   };
 
+  // A light, dependency-free markdown renderer for the agent's own replies — not
+  // for "me"/"note"/"warn" text, which is either the user's own literal typing or
+  // a plain string we wrote ourselves. Deliberately narrow: bold/italic use only
+  // asterisks, never underscores, because this is a coding tool and snake_case
+  // identifiers (read_selection, data_uitalk_ref) are exactly the kind of prose
+  // that underscore-emphasis misfires on.
+  const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  function renderInline(line) {
+    let out = escapeHtml(line);
+    out = out.replace(/`([^`\n]+)`/g, (_, code) => `<code>${code}</code>`);
+    out = out.replace(/\*\*([^*\n]+)\*\*/g, (_, b) => `<strong>${b}</strong>`);
+    out = out.replace(/\*([^*\n]+)\*/g, (_, i) => `<em>${i}</em>`);
+    out = out.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (_, text, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`);
+    return out;
+  }
+
+  // A tiny, dependency-free syntax highlighter — not a full grammar, just enough
+  // to make a CSS/JS/HTML/JSON snippet in a reply scannable at a glance. Each rule
+  // set is tried in order against the whole block; the earliest-starting match at
+  // each position wins, so a rule for comments/strings ahead of keywords/numbers
+  // keeps their contents from being re-tokenized.
+  const TOKEN_RULES = {
+    css: [
+      ["comment", /\/\*[\s\S]*?\*\//],
+      ["string", /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/],
+      ["keyword", /!important\b|@[a-zA-Z-]+/],
+      ["prop", /[a-zA-Z-]+(?=\s*:)/],
+      ["number", /-?\d+\.?\d*(px|em|rem|%|vh|vw|vmin|vmax|deg|s|ms)?\b/],
+    ],
+    js: [
+      ["comment", /\/\/[^\n]*|\/\*[\s\S]*?\*\//],
+      ["string", /`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/],
+      ["keyword", /\b(const|let|var|function|return|if|else|for|while|import|export|from|default|class|extends|new|this|async|await|try|catch|finally|throw|typeof|instanceof|in|of|switch|case|break|continue|null|undefined|true|false)\b/],
+      ["number", /\b\d+\.?\d*\b/],
+    ],
+    html: [
+      ["comment", /<!--[\s\S]*?-->/],
+      ["string", /"[^"]*"|'[^']*'/],
+      ["tag", /<\/?[a-zA-Z][a-zA-Z0-9-]*|\/?>/],
+      ["attr", /[a-zA-Z-]+(?=\s*=)/],
+    ],
+    json: [
+      ["prop", /"(?:[^"\\]|\\.)*"(?=\s*:)/],
+      ["string", /"(?:[^"\\]|\\.)*"/],
+      ["keyword", /\b(true|false|null)\b/],
+      ["number", /-?\d+\.?\d*\b/],
+    ],
+  };
+  TOKEN_RULES.scss = TOKEN_RULES.css;
+  TOKEN_RULES.jsx = TOKEN_RULES.js;
+  TOKEN_RULES.ts = TOKEN_RULES.js;
+  TOKEN_RULES.tsx = TOKEN_RULES.js;
+  TOKEN_RULES.javascript = TOKEN_RULES.js;
+  TOKEN_RULES.typescript = TOKEN_RULES.js;
+  TOKEN_RULES.htm = TOKEN_RULES.html;
+  TOKEN_RULES.xml = TOKEN_RULES.html;
+
+  function highlightCode(code, lang) {
+    const rules = TOKEN_RULES[lang];
+    if (!rules) return escapeHtml(code);
+
+    const combined = new RegExp(rules.map(([, re]) => `(${re.source})`).join("|"), "g");
+    let out = "";
+    let last = 0;
+    let m;
+    while ((m = combined.exec(code))) {
+      out += escapeHtml(code.slice(last, m.index));
+      const cls = rules[m.slice(1).findIndex((g) => g !== undefined)][0];
+      out += `<span class="tok-${cls}">${escapeHtml(m[0])}</span>`;
+      last = m.index + m[0].length;
+      if (m[0].length === 0) combined.lastIndex++; // never loop on a zero-width match
+    }
+    out += escapeHtml(code.slice(last));
+    return out;
+  }
+
+  function renderMarkdown(raw) {
+    const lines = raw.split("\n");
+    const blocks = [];
+    let i = 0;
+    while (i < lines.length) {
+      const fence = lines[i].match(/^```(\w*)\s*$/);
+      if (fence) {
+        const code = [];
+        i++;
+        while (i < lines.length && !/^```\s*$/.test(lines[i])) code.push(lines[i++]);
+        i++; // the closing fence, if a delta has delivered one yet
+        blocks.push(`<pre><code>${highlightCode(code.join("\n"), fence[1].toLowerCase())}</code></pre>`);
+        continue;
+      }
+      if (/^[-*]\s+/.test(lines[i])) {
+        const items = [];
+        while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+          items.push(`<li>${renderInline(lines[i].replace(/^[-*]\s+/, ""))}</li>`);
+          i++;
+        }
+        blocks.push(`<ul>${items.join("")}</ul>`);
+        continue;
+      }
+      if (/^\d+\.\s+/.test(lines[i])) {
+        const items = [];
+        while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+          items.push(`<li>${renderInline(lines[i].replace(/^\d+\.\s+/, ""))}</li>`);
+          i++;
+        }
+        blocks.push(`<ol>${items.join("")}</ol>`);
+        continue;
+      }
+      if (!lines[i].trim()) { i++; continue; }
+      const para = [];
+      while (i < lines.length && lines[i].trim() &&
+             !/^```/.test(lines[i]) && !/^[-*]\s+/.test(lines[i]) && !/^\d+\.\s+/.test(lines[i])) {
+        para.push(renderInline(lines[i]));
+        i++;
+      }
+      blocks.push(`<p>${para.join("<br>")}</p>`);
+    }
+    return blocks.join("");
+  }
+
   function say(cls, text) {
     const el = document.createElement("div");
     el.className = `msg ${cls}`;
-    el.textContent = text;
+    if (cls === "agent") el.innerHTML = renderMarkdown(text);
+    else el.textContent = text;
     ui.log.appendChild(el);
     scroll();
     return el;
@@ -509,9 +650,32 @@
     return el;
   }
 
+  // Re-parsing on every token would re-run the whole markdown pass dozens of
+  // times a second on a long reply; batch it the same way scroll() is batched.
+  function scheduleMdRender(run) {
+    if (run.__renderQueued) return;
+    run.__renderQueued = true;
+    requestAnimationFrame(() => {
+      run.__renderQueued = false;
+      run.innerHTML = renderMarkdown(run.__raw);
+    });
+  }
+
   function delta(text) {
     if (!streaming) streaming = say("agent", "");
-    streaming.append(text);
+    // A chip breaks the run: the text before and after it are two separate spans,
+    // in the same left-to-right order, rather than one span a chip has to be
+    // spliced into.
+    let run = streaming.__run;
+    if (!run) {
+      run = document.createElement("div");
+      run.className = "md-run";
+      run.__raw = "";
+      streaming.appendChild(run);
+      streaming.__run = run;
+    }
+    run.__raw += text;
+    scheduleMdRender(run);
     scroll();
   }
 
@@ -538,10 +702,25 @@
     write_file: "Writing file",
     list_dir: "Listing files",
     search_files: "Searching files",
+    // The built-in Claude Code session's own tools (allowedTools in runBuiltin),
+    // not a uitalk page tool — shown with their own mcp__page__ prefix stripped
+    // above, but under their native, capitalized names, which need the same
+    // treatment.
+    Read: "Reading file",
+    Edit: "Editing file",
+    Write: "Writing file",
+    Grep: "Searching files",
+    Glob: "Finding files",
+    Bash: "Running a command",
+    TodoWrite: "Updating the task list",
+    WebFetch: "Fetching a page",
+    WebSearch: "Searching the web",
+    Task: "Delegating a task",
   };
 
   function chip(name) {
     if (!streaming) streaming = say("agent", "");
+    streaming.__run = null; // the next delta starts a fresh run after this chip
     const el = document.createElement("span");
     el.className = "chip";
     const bare = name.replace(/^mcp__page__/, "");
