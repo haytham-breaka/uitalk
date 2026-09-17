@@ -968,6 +968,48 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
       ![...root.querySelectorAll(".tools .tool")].some((b) => b.disabled),
     `${root.querySelectorAll(".tools .tool").length} tools, none disabled`);
 
+  // The agent's reply is markdown; the panel renders it rather than showing the
+  // raw asterisks and backticks. Streamed in two deltas, with a tool chip between
+  // them, to check the chip doesn't get swallowed by the markdown re-render.
+  sock.onmessage({ data: JSON.stringify({ kind: "delta", text: "**Bold**, `code`, and:\n- one\n- two\n" }) });
+  sock.onmessage({ data: JSON.stringify({ kind: "tool", name: "read_selection" }) });
+  sock.onmessage({ data: JSON.stringify({ kind: "delta", text: "after the chip" }) });
+  await new Promise((r) => setTimeout(r, 50)); // the markdown render is batched onto a rAF
+  {
+    const bubble = [...root.querySelectorAll(".msg.agent")].at(-1);
+    check("bold markdown renders as an element, not asterisks",
+      bubble.querySelector("strong")?.textContent === "Bold", bubble.innerHTML.slice(0, 200));
+    check("inline code renders as an element, not backticks",
+      bubble.querySelector("code")?.textContent === "code", bubble.innerHTML.slice(0, 200));
+    check("a bullet list renders as list items", bubble.querySelectorAll("li").length === 2,
+      bubble.querySelectorAll("li").length);
+    check("a chip between two deltas is not swallowed by the markdown re-render",
+      bubble.querySelector(".chip")?.textContent === "Reading selection", bubble.innerHTML.slice(0, 300));
+    check("text after the chip still renders as its own run",
+      bubble.textContent.includes("after the chip"), bubble.textContent.slice(-40));
+  }
+  sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+  await tick();
+
+  // A fenced code block gets language-aware syntax highlighting, not a flat block
+  // of monochrome text.
+  sock.onmessage({ data: JSON.stringify({ kind: "delta",
+    text: "```css\n.card {\n  color: red; /* was blue */\n}\n```" } ) });
+  await new Promise((r) => setTimeout(r, 50));
+  {
+    const bubble = [...root.querySelectorAll(".msg.agent")].at(-1);
+    const pre = bubble.querySelector("pre code");
+    check("a fenced code block renders as <pre><code>", Boolean(pre), bubble.innerHTML.slice(0, 200));
+    check("a CSS comment is tokenized", pre?.querySelector(".tok-comment")?.textContent === "/* was blue */",
+      pre?.innerHTML.slice(0, 200));
+    check("a CSS property name is tokenized", pre?.querySelector(".tok-prop")?.textContent === "color",
+      pre?.innerHTML.slice(0, 200));
+    check("the code text itself is unchanged, tags aside", pre?.textContent.includes("color: red"),
+      pre?.textContent);
+  }
+  sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+  await tick();
+
   sock.onmessage({ data: JSON.stringify({ kind: "agent_absent", text: "nobody is here to read that" }) });
   await tick();
   check("a message the bridge could not deliver is reported in the log",
