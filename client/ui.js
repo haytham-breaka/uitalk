@@ -2120,7 +2120,11 @@
   }
 
   onSource("click", (e) => {
-    if (!banding() || interacting) return;
+    // Without this, approving a variant, flipping between them, or any other
+    // click on the panel's own controls — all real clicks, all handled — was
+    // also reaching here, where the page has nothing at those coordinates, and
+    // reporting a confusing "hit nothing selectable" for a click that worked.
+    if (!banding() || interacting || fromOurUi(e)) return;
     if (swallowClick) { swallowClick = false; e.preventDefault(); e.stopPropagation(); return; }
     const el = elementAt(e.clientX, e.clientY);
     if (!el) {
