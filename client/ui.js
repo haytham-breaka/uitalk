@@ -1143,6 +1143,14 @@
   async function captureBest(region, opts) {
     if (native?.supported() && !native.declined && config.nativeCapture !== false && region) {
       try {
+        // The agent calls capture on its own, with nothing on screen to explain why a
+        // browser permission prompt would suddenly appear — and an unexplained one
+        // reads as something to dismiss on reflex. Say what it is and that declining
+        // is fine, before asking, the one time per session it is actually asked.
+        if (!native.active) {
+          say("note", "your browser may ask to share this tab — that's for a pixel-accurate " +
+            "screenshot; declining just falls back to a rendered one.");
+        }
         if (await native.ready()) return await grabNative(region, opts, opts.origin);
       } catch (err) {
         say("warn", `${err.message}`);
