@@ -111,7 +111,58 @@ What each mode can and cannot do:
 | Undo a committed change | ✅ | ✅ | ✅ | ✅ — and the MCP client is told it happened, so it will not re-apply it |
 | Streams the reply token by token | ✅ | ❌ — a turn arrives whole | ✅ | n/a |
 
-**`opencode` needs OpenCode installed separately** (uitalk only talks to it over HTTP, via `@opencode-ai/sdk` — an optional dependency, same as the Claude SDK) — either already running as `opencode serve`, found automatically on its default port `4096`, or set `opencodeServerUrl` in `.uitalk.json` to one running elsewhere. And because OpenCode has no way to receive tools programmatically, the page tools only reach it the same way they reach any other MCP client — add uitalk to its `opencode.jsonc` (see [Other editors](#other-editors) below). Without that, `opencode` mode still chats and edits files, it just can't see the page.
+### Setting up `opencode` mode
+
+uitalk doesn't bundle or manage OpenCode — it only talks to an existing installation
+over HTTP, the same way `builtin` talks to your existing Claude Code login.
+
+1. **Install OpenCode and configure a provider**, if you haven't already:
+
+   ```bash
+   npm install -g opencode-ai
+   opencode auth login   # or however you've already set up a model with it
+   ```
+
+2. **Give uitalk its optional dependency** — `@opencode-ai/sdk` ships as an
+   `optionalDependencies` entry, same as the Claude SDK, so a plain install picks it up:
+
+   ```bash
+   cd ~/src/uitalk && npm install
+   ```
+
+3. **Start uitalk pointed at it:**
+
+   ```bash
+   uitalk --agent opencode
+   ```
+
+   This finds an `opencode serve` already running on its default port (`4096`) and
+   uses it, or starts one itself if nothing answers there. To use one already running
+   elsewhere, set `opencodeServerUrl` in `.uitalk.json` instead of relying on discovery.
+
+4. **Let it see the page.** OpenCode has no way to receive custom tools
+   programmatically — a session only gets tools from its own config — so add uitalk's
+   MCP server to this project's `opencode.jsonc` (the same file an editor's own OpenCode
+   would read for this directory, from [Other editors](#other-editors) below):
+
+   ```jsonc
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "mcp": {
+       "uitalk": {
+         "type": "local",
+         "command": ["uitalk-mcp"],
+         "environment": { "UITALK_PROJECT": "/path/to/this/project" }
+       }
+     }
+   }
+   ```
+
+   Without this step, `opencode` mode still chats in the panel and edits files — it
+   just can't select elements, screenshot, or preview, since it never sees those tools.
+   uitalk checks for this at startup and logs a warning if it looks missing, but never
+   writes to `opencode.jsonc` itself — comments in a hand-edited JSONC file would not
+   survive a parse-and-rewrite round-trip.
 
 ### Your own key
 
