@@ -342,7 +342,7 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
     ready?.agent?.mode === "off" && /MCP/.test(ready.agent.of ?? ""),
     JSON.stringify(ready?.agent));
   check("the agent mode is a setting, so a project can hold it",
-    ready?.fields?.agent?.choices?.join(",") === "builtin,adapter,off" && ready.fields.agent.restart === true,
+    ready?.fields?.agent?.choices?.join(",") === "builtin,adapter,opencode,off" && ready.fields.agent.restart === true,
     JSON.stringify(ready?.fields?.agent?.choices));
 
   page.send(JSON.stringify({ kind: "chat", text: "make it blue", page: { path: "/" } }));

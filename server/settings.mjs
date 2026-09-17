@@ -41,11 +41,15 @@ export const DEFAULTS = {
 
   // Who answers the panel.
   //
-  //   builtin  the Claude Code session the bridge runs itself, on the user's
-  //            subscription. Needs @anthropic-ai/claude-agent-sdk.
-  //   adapter  any model the user has a key for, driven over its own HTTP API.
-  //   off      nobody: an MCP client drives the page tools instead, and the
-  //            panel's chat, context meter and compaction step aside for it.
+  //   builtin   the Claude Code session the bridge runs itself, on the user's
+  //             subscription. Needs @anthropic-ai/claude-agent-sdk.
+  //   adapter   any model the user has a key for, driven over its own HTTP API.
+  //   opencode  an OpenCode session, driven over its HTTP API. Needs the
+  //             "opencode" CLI installed and its own model already configured —
+  //             uitalk only owns the conversation loop, not its auth. Needs
+  //             @opencode-ai/sdk.
+  //   off       nobody: an MCP client drives the page tools instead, and the
+  //             panel's chat, context meter and compaction step aside for it.
   //
   // Changing this takes effect when the bridge restarts: a session cannot be
   // swapped underneath a conversation.
@@ -53,6 +57,7 @@ export const DEFAULTS = {
   agentProvider: "openai", // openai | anthropic | gemini  (adapter only)
   agentModel: "", // empty means the provider's default below
   agentBaseUrl: "", // an OpenAI-compatible endpoint that is not OpenAI's own
+  opencodeServerUrl: "", // empty: use one already on :4096, else start one (opencode only)
 };
 
 export const FIELDS = {
@@ -65,10 +70,11 @@ export const FIELDS = {
   reloadAfterEdit: { type: "choice", choices: ["auto", "always", "never"], label: "Reload the app after an edit" },
   inventoryWithCapture: { type: "boolean", label: "Send element inventory with screenshots" },
   inventoryMaxNodes: { type: "number", min: 10, max: 1000, label: "Max inventory nodes" },
-  agent: { type: "choice", choices: ["builtin", "adapter", "off"], label: "Who answers the panel", restart: true },
+  agent: { type: "choice", choices: ["builtin", "adapter", "opencode", "off"], label: "Who answers the panel", restart: true },
   agentProvider: { type: "choice", choices: ["openai", "anthropic", "gemini"], label: "Adapter provider", restart: true },
   agentModel: { type: "text", max: 120, label: "Adapter model", restart: true },
   agentBaseUrl: { type: "text", max: 300, label: "OpenAI-compatible base URL", restart: true },
+  opencodeServerUrl: { type: "text", max: 300, label: "OpenCode server URL (blank: auto)", restart: true },
 };
 
 const ENV = {
@@ -85,6 +91,7 @@ const ENV = {
   agentProvider: String,
   agentModel: String,
   agentBaseUrl: String,
+  opencodeServerUrl: String,
 };
 
 const readJson = (path) => {

@@ -83,6 +83,7 @@ your message. One setting chooses:
 | --- | --- | --- |
 | `builtin` *(default)* | the Claude Code session the bridge runs itself | your existing subscription, no API key |
 | `adapter` | any model you hold a key for — OpenAI, Anthropic, Gemini, or anything OpenAI-compatible | that provider's per-token price |
+| `opencode` | an OpenCode session, driven over its own HTTP API | whatever OpenCode is already configured with — uitalk doesn't manage its auth or model choice |
 | `off` | nobody here: an MCP client drives the page tools from your editor | whatever your editor already costs |
 
 ```bash
@@ -90,6 +91,7 @@ uitalk                                     # built-in Claude session
 uitalk --no-agent                          # MCP client drives it
 uitalk --agent adapter                     # your key, OpenAI by default
 uitalk --agent adapter --provider gemini --model gemini-2.5-pro
+uitalk --agent opencode                    # an OpenCode session you already have configured
 ```
 
 Or commit the choice to the project, in `.uitalk.json`:
@@ -100,14 +102,16 @@ Or commit the choice to the project, in `.uitalk.json`:
 
 What each mode can and cannot do:
 
-| | `builtin` | `adapter` | `off` |
-| --- | --- | --- | --- |
-| The 12 page tools | ✅ | ✅ | ✅ |
-| Edits source after an approval | ✅ Claude Code's own file tools | ✅ `read_file`, `edit_file`, `write_file`, `list_dir`, `search_files`, scoped to the project | ✅ your editor's |
-| Chat in the panel | ✅ | ✅ | ❌ — type in your editor; the panel says so instead of swallowing it |
-| Context meter, compaction, New session | ✅ | ✅ | ❌ — the conversation is in your editor, so there is nothing here to measure or compact |
-| Undo a committed change | ✅ | ✅ | ✅ — and the MCP client is told it happened, so it will not re-apply it |
-| Streams the reply token by token | ✅ | ❌ — a turn arrives whole | n/a |
+| | `builtin` | `adapter` | `opencode` | `off` |
+| --- | --- | --- | --- | --- |
+| The 12 page tools | ✅ | ✅ | ⚠️ only if `opencode.jsonc` points at uitalk's MCP server — see below | ✅ |
+| Edits source after an approval | ✅ Claude Code's own file tools | ✅ `read_file`, `edit_file`, `write_file`, `list_dir`, `search_files`, scoped to the project | ✅ OpenCode's own file tools | ✅ your editor's |
+| Chat in the panel | ✅ | ✅ | ✅ | ❌ — type in your editor; the panel says so instead of swallowing it |
+| Context meter, compaction, New session | ✅ | ✅ | ✅ | ❌ — the conversation is in your editor, so there is nothing here to measure or compact |
+| Undo a committed change | ✅ | ✅ | ✅ | ✅ — and the MCP client is told it happened, so it will not re-apply it |
+| Streams the reply token by token | ✅ | ❌ — a turn arrives whole | ✅ | n/a |
+
+**`opencode` needs OpenCode installed separately** (uitalk only talks to it over HTTP, via `@opencode-ai/sdk` — an optional dependency, same as the Claude SDK) — either already running as `opencode serve`, found automatically on its default port `4096`, or set `opencodeServerUrl` in `.uitalk.json` to one running elsewhere. And because OpenCode has no way to receive tools programmatically, the page tools only reach it the same way they reach any other MCP client — add uitalk to its `opencode.jsonc` (see [Other editors](#other-editors) below). Without that, `opencode` mode still chats and edits files, it just can't see the page.
 
 ### Your own key
 
@@ -127,9 +131,9 @@ That file is written `0600`, and a key is never a setting: it cannot go in
 OpenRouter, Groq, an internal gateway. `agentModel` defaults to a current model per
 provider; if the provider answers `404`, the error names the setting to change.
 
-The built-in session is the only mode that needs `@anthropic-ai/claude-agent-sdk`, so
-it is an **optional** dependency. `npm install --omit=optional` gives you a uitalk that
-runs the adapter and MCP modes with nothing from Anthropic installed.
+`builtin` needs `@anthropic-ai/claude-agent-sdk` and `opencode` needs `@opencode-ai/sdk` —
+both **optional** dependencies, so neither is required by the other. `npm install --omit=optional`
+gives you a uitalk that runs the adapter and MCP modes with neither installed.
 
 ## Other editors
 

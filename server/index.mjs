@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { WebSocketServer } from "ws";
-import { createAdapter } from "./adapter.mjs";
+import { createAdapter, normalize } from "./adapter.mjs";
 import { createProxy, proxyUpgrade } from "./proxy.mjs";
 import * as registry from "./registry.mjs";
 import * as settings from "./settings.mjs";
@@ -251,13 +251,20 @@ function settleRpc({ id, result, error }) {
 // and report honestly when the answer is "nobody is listening".
 let session = null;
 
-const AGENT_MODES = { builtin: "the built-in Claude session", adapter: "your own model", off: "an MCP client" };
+const AGENT_MODES = {
+  builtin: "the built-in Claude session",
+  adapter: "your own model",
+  opencode: "an OpenCode session",
+  off: "an MCP client",
+};
 
 let wake = null;
 const backlog = [];
 
 function pushToAgent(content) {
-  if (session?.mode === "adapter") return session.send(content);
+  // Both drive their own HTTP-shaped conversation rather than the Claude SDK's
+  // async-generator inbox below, so they own the send path themselves.
+  if (session?.mode === "adapter" || session?.mode === "opencode") return session.send(content);
   if (config.agent === "off") {
     // Nothing can be pushed to an MCP client, and silently swallowing the message
     // would look like an agent that never answers.
@@ -784,6 +791,255 @@ function runAdapter() {
   adapter.start();
 }
 
+const unwrapOpencode = (result) => {
+  if (result?.error) {
+    throw new Error(typeof result.error === "string" ? result.error : JSON.stringify(result.error));
+  }
+  return result?.data;
+};
+
+/**
+ * An OpenCode session, driven over its HTTP API (@opencode-ai/sdk) rather than
+ * in-process like the Claude SDK. OpenCode has no equivalent of custom tool
+ * injection — a session only gets tools from its own opencode.jsonc MCP config,
+ * the same way any other MCP client gets uitalk's page tools (./mcp.mjs) — so
+ * this only owns the conversation loop: sending prompts and relaying OpenCode's
+ * event stream back into the panel. It does not manage OpenCode's own auth or
+ * model choice; those are whatever the user already has OpenCode configured with.
+ */
+async function runOpencode() {
+  let sdk;
+  try {
+    sdk = await import("@opencode-ai/sdk");
+  } catch (err) {
+    log("the OpenCode agent needs @opencode-ai/sdk, which is not installed.");
+    log(`  npm install @opencode-ai/sdk   (or run with --agent off / --agent adapter / --agent builtin)`);
+    toPanel({
+      kind: "agent_absent",
+      text:
+        "The OpenCode agent is not installed (@opencode-ai/sdk). The page tools still work — " +
+        "drive them from an MCP client, or set agent to \"builtin\" or \"adapter\".",
+    });
+    return;
+  }
+
+  const DEFAULT_URL = "http://127.0.0.1:4096";
+  const probe = async (baseUrl) => {
+    try {
+      unwrapOpencode(await sdk.createOpencodeClient({ baseUrl, directory: PROJECT }).session.list());
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  let baseUrl = config.opencodeServerUrl || null;
+  let closeServer = null;
+  try {
+    if (baseUrl) {
+      if (!(await probe(baseUrl))) throw new Error(`no OpenCode server answered at ${baseUrl}`);
+    } else if (await probe(DEFAULT_URL)) {
+      baseUrl = DEFAULT_URL;
+    } else {
+      log(`no OpenCode server at ${DEFAULT_URL}; starting one`);
+      const started = await sdk.createOpencode({});
+      baseUrl = started.server.url;
+      closeServer = started.server.close;
+      process.on("exit", () => closeServer?.());
+    }
+  } catch (err) {
+    log(`could not reach OpenCode: ${err.message}`);
+    log(`  is "opencode" installed and on PATH? See https://opencode.ai/docs — or set opencodeServerUrl.`);
+    toPanel({
+      kind: "agent_absent",
+      text:
+        `Could not reach OpenCode (${err.message}). Install it and make sure "opencode" is on PATH, ` +
+        `or set opencodeServerUrl to one already running.`,
+    });
+    return;
+  }
+
+  const client = sdk.createOpencodeClient({ baseUrl, directory: PROJECT });
+
+  // Best-effort, read-only nudge: the page tools only reach OpenCode through its
+  // own MCP config, and there is no safe way to add that ourselves without
+  // risking a JSONC file's comments on a round-trip, so this only checks.
+  const hasUitalkMcp = ["opencode.jsonc", "opencode.json"].some((f) => {
+    try {
+      return readFileSync(join(PROJECT, f), "utf8").includes("uitalk");
+    } catch {
+      return false;
+    }
+  });
+  if (!hasUitalkMcp) {
+    log(`no opencode.jsonc/opencode.json in ${PROJECT} mentions uitalk — the page tools may not reach it`);
+    toPanel({
+      kind: "agent_absent",
+      text:
+        "OpenCode's config doesn't look like it points at uitalk's MCP server yet, so it may not see " +
+        "the page tools. Add uitalk to opencode.jsonc (see the README's \"Other editors\" section).",
+    });
+  }
+
+  let sessionID;
+  try {
+    sessionID = unwrapOpencode(await client.session.create({ body: { title: "uitalk" } })).id;
+  } catch (err) {
+    log(`could not create an OpenCode session: ${err.message}`);
+    toPanel({ kind: "error", text: `could not create an OpenCode session: ${err.message}` });
+    return;
+  }
+
+  // One turn at a time: { said, quiet, seenTools, textLen } while a prompt is in
+  // flight, plus resolve/reject when it is a quiet (compaction) turn rather than
+  // chat. textLen tracks, per text part id, how much of it has already been
+  // relayed — message.part.delta carries the actual incremental text, but
+  // message.part.updated resends the part's *full* text on every change (first
+  // empty, then complete), so relaying that verbatim would double every reply.
+  let turn = null;
+
+  function finishTurn() {
+    const t = turn;
+    turn = null;
+    if (!t) return;
+    if (t.quiet) return t.resolve(t.said.trim());
+    if (t.said.trim()) record("agent", t.said.trim());
+    toPanel({ kind: "turn_end" });
+    maybeCompact();
+  }
+
+  function failTurn(message) {
+    const t = turn;
+    turn = null;
+    if (!t) return;
+    if (t.quiet) return t.reject(new Error(message));
+    toPanel({ kind: "error", text: message });
+    toPanel({ kind: "turn_end", text: "error" });
+  }
+
+  (async () => {
+    try {
+      const { stream } = await client.event.subscribe({ query: { directory: PROJECT } });
+      for await (const ev of stream) {
+        // A part carries no role of its own — only its messageID — and the
+        // prompt's own text comes back as a part on the *user* message it was
+        // sent as, on the same session, before the assistant message even
+        // exists. Relaying it verbatim would echo every prompt into its own
+        // reply, so nothing is relayed until its messageID is known assistant.
+        if (ev.type === "message.updated") {
+          const info = ev.properties.info;
+          if (turn && info.sessionID === sessionID && info.role === "assistant") {
+            turn.assistantMessageIds.add(info.id);
+          }
+          continue;
+        }
+        if (ev.type === "message.part.delta") {
+          const p = ev.properties;
+          if (!turn || p.sessionID !== sessionID || !turn.assistantMessageIds.has(p.messageID)) continue;
+          if (p.field !== "text" || !p.delta) continue;
+          turn.said += p.delta;
+          turn.textLen.set(p.partID, (turn.textLen.get(p.partID) ?? 0) + p.delta.length);
+          if (!turn.quiet) toPanel({ kind: "delta", text: p.delta });
+        } else if (ev.type === "message.part.updated") {
+          const part = ev.properties.part;
+          if (!turn || part.sessionID !== sessionID || !turn.assistantMessageIds.has(part.messageID)) continue;
+          if (part.type === "text") {
+            // Whatever this part's deltas have not already covered — normally
+            // nothing, since the final "updated" for a part just confirms what
+            // its deltas already sent; this only relays anything for a part that
+            // (rarely) completed with no delta events of its own.
+            const already = turn.textLen.get(part.id) ?? 0;
+            const chunk = part.text.slice(already);
+            if (!chunk) continue;
+            turn.said += chunk;
+            turn.textLen.set(part.id, part.text.length);
+            if (!turn.quiet) toPanel({ kind: "delta", text: chunk });
+          } else if (part.type === "tool" && part.state.status !== "pending" && !turn.seenTools.has(part.callID)) {
+            turn.seenTools.add(part.callID);
+            if (!turn.quiet) toPanel({ kind: "tool", name: part.tool });
+          } else if (part.type === "step-finish") {
+            const t = part.tokens ?? {};
+            noteTokens((t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0));
+          }
+        } else if (ev.type === "permission.updated") {
+          if (ev.properties.sessionID !== sessionID) continue;
+          // Mirrors the built-in session's permissionMode: "acceptEdits" — a real
+          // edit is already gated behind uitalk's own approval, upstream of this.
+          client
+            .postSessionIdPermissionsPermissionId({
+              path: { id: sessionID, permissionID: ev.properties.id },
+              body: { response: "once" },
+            })
+            .catch((err) => log(`could not approve an OpenCode permission request: ${err.message}`));
+        } else if (ev.type === "session.idle") {
+          if (ev.properties.sessionID === sessionID) finishTurn();
+        } else if (ev.type === "session.error") {
+          if (!ev.properties.sessionID || ev.properties.sessionID === sessionID) {
+            failTurn(ev.properties.error?.message ?? "the OpenCode session ended with an error");
+          }
+        }
+      }
+    } catch (err) {
+      log(`OpenCode event stream ended: ${err.message}`);
+      failTurn(`lost the connection to OpenCode: ${err.message}`);
+    }
+  })();
+
+  const toParts = (content) =>
+    normalize(content).map((p) =>
+      p.png
+        ? { type: "file", mime: "image/png", filename: "screenshot.png", url: `data:image/png;base64,${p.png}` }
+        : { type: "text", text: p.text });
+
+  let busy = Promise.resolve();
+  const queue = (fn) => (busy = busy.then(fn, fn));
+
+  session = {
+    mode: "opencode",
+    label: "opencode",
+
+    send(content) {
+      queue(async () => {
+        turn = { said: "", quiet: false, seenTools: new Set(), textLen: new Map(), assistantMessageIds: new Set() };
+        try {
+          unwrapOpencode(
+            await client.session.promptAsync({
+              path: { id: sessionID },
+              body: { parts: toParts(content), system: GUIDANCE },
+            }),
+          );
+        } catch (err) {
+          failTurn(err.message);
+        }
+      });
+    },
+
+    /** The handover note compaction needs. Asked for without showing it as chat. */
+    summarize(request) {
+      return queue(
+        () =>
+          new Promise((resolve, reject) => {
+            turn = { said: "", quiet: true, seenTools: new Set(), textLen: new Map(), assistantMessageIds: new Set(), resolve, reject };
+            client.session
+              .promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text: request }] } })
+              .then((res) => res?.error && failTurn(JSON.stringify(res.error)))
+              .catch((err) => failTurn(err.message));
+          }),
+      );
+    },
+
+    /** A fresh OpenCode session; the old one is simply left behind, not deleted. */
+    clear() {
+      return queue(async () => {
+        sessionID = unwrapOpencode(await client.session.create({ body: { title: "uitalk" } })).id;
+      });
+    },
+  };
+
+  toPanel({ kind: "status", text: "ready · opencode" });
+  log(`OpenCode session ready: ${sessionID} (${baseUrl})`);
+}
+
 function runSession() {
   if (config.agent === "off") {
     log("no built-in agent (agent: off) — drive the page from an MCP client:");
@@ -795,6 +1051,7 @@ function runSession() {
     return;
   }
   if (config.agent === "adapter") return runAdapter();
+  if (config.agent === "opencode") return void runOpencode();
   return void runBuiltin();
 }
 

@@ -182,8 +182,8 @@ for (let i = 0; i < argv.length; i++) {
   }
 }
 
-if (!["builtin", "adapter", "off"].includes(agent || "builtin")) {
-  console.error(`[uitalk] --agent must be builtin, adapter or off (got: ${agent})`);
+if (!["builtin", "adapter", "opencode", "off"].includes(agent || "builtin")) {
+  console.error(`[uitalk] --agent must be builtin, adapter, opencode or off (got: ${agent})`);
   process.exit(2);
 }
 
