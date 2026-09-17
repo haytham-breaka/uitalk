@@ -1,0 +1,12 @@
+{
+  "name": "uitalk",
+  "description": "uitalk — edit a running web app from inside the page, driven by your coding agent.",
+  "owner": { "name": "Haytham Breaka" },
+  "plugins": [
+    {
+      "name": "uitalk",
+      "source": "./",
+      "description": "Edit a running web app from inside the page: a floating panel for picking elements, previewing changes, choosing between alternatives, and committing the approved one to source."
+    }
+  ]
+}
