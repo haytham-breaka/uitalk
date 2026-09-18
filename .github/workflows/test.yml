@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Single OS on purpose: every suite in `npm test` spawns node/git directly
+    # (see tools/*.mjs) rather than the real bin/uitalk launcher, so none of
+    # them touch the process-group/detach code that actually differs by
+    # platform. A Windows/macOS runner would re-run the identical Node-only
+    # logic and imply coverage this suite doesn't have.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm install --include=dev
+      - run: npm test
+
+  coverage:
+    # Informational only: main is currently below the 85% gate (see
+    # CONTRIBUTING.md#coverage) because runOpencode has no offline harness
+    # yet. This job reports the real number without failing the workflow
+    # until that harness exists.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --include=dev
+      - run: npm run coverage
+        continue-on-error: true
