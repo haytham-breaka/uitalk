@@ -1,7 +1,8 @@
 # uitalk
 
-**Edit a running web app from inside the page.** Click an element, say what you want, flip through live alternatives, approve one — and your coding agent commits it to real source.
+**Stop describing your UI to an agent that can't see it.** Click the element, say what you want, flip through live alternatives, approve one — and your coding agent commits it to real source. No screenshot pasted into chat, no CSS selector spelled out by hand, no "the second button, no, the *other* second button."
 
+[![test](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml/badge.svg)](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
 [![Version 0.6.2](https://img.shields.io/badge/version-0.6.2-informational.svg)](.claude-plugin/plugin.json)
@@ -31,13 +32,15 @@ any MCP-capable editor can answer instead.
 
 ## Why uitalk
 
-- **Works with any stack.** The bridge proxies your dev server and injects the panel on the way through, so Vite, Next, Rails, Django, PHP, Go templates or plain static files all work with zero framework-specific code.
-- **Model-agnostic where it counts.** Selection, screenshots, preview, variants and undo are the browser's and git's work, not a model's. The model only reads your message — and you choose which one.
-- **Real pixels, not a DOM guess.** Screenshots come from the Screen Capture API, so canvas, video, cross-origin images and backdrop filters look the way they actually look.
-- **Nothing lands until you say so.** Variants are live CSS on the real page. Approving commits the one you chose; undo reverts it.
-- **The panel tells you what it could not do.** A font that would not embed, a stylesheet it could not read, an edit that did not take effect — each is reported rather than silently degraded.
+- **Works with any stack.** The bridge proxies your dev server and injects the panel on the way through, so Vite, Next, Rails, Django, PHP, Go templates or plain static files all work with zero framework-specific code. It doesn't know or care what's rendering the page.
+- **Model-agnostic where it counts.** Selection, screenshots, preview, variants and undo are the browser's and git's work, not a model's. The model only reads your message — and you choose which one, including one running on your own machine with no API key at all.
+- **Real pixels, not a DOM guess.** Screenshots come from the Screen Capture API, so canvas, video, cross-origin images and backdrop filters look the way they actually look — not the way a headless renderer thinks they should.
+- **Nothing lands until you say so.** Variants are live CSS on the real page, not a diff you have to imagine. Approving commits the one you chose; undo reverts it, because "approved" and "final" are not the same word.
+- **An answer with a hole in it says so.** A font that wouldn't embed, a stylesheet that couldn't be read, an edit that didn't take effect: reported, not silently swallowed. The one thing worse than a tool that fails is a tool that fails quietly.
 
 ## Install
+
+**Fastest path:** in Claude Code, `/plugin marketplace add haytham-breaka/uitalk` then `/plugin install uitalk@uitalk`; in your app's directory, `claude` then `/uitalk`. That's a panel open on your running app in about a minute. Everything below is for when the default agent, or the default install route, isn't the one you want.
 
 Requires **Node 20.11+** and, for native screen capture, a Chromium browser. The launcher is plain Node, so it runs the same way on Linux, macOS and native Windows (cmd.exe or PowerShell) — no bash, WSL or Git Bash required.
 
@@ -209,15 +212,21 @@ Open the app at the URL the launcher printed and click the floating **◈** (dra
 
 Refer to selections by number: "align element 2 to the top of element 1", "make 1 and 2 the same width", "give me 3 versions of 2". You can also send **just a screenshot** and ask for variations, with nothing selected — the agent scans the region, identifies the element, and targets it by CSS selector.
 
+![Clicking three cards in order, Ctrl+Z stepping one back, dragging a rectangle to select by region, then Esc twice to clear the selection and turn the tool off](docs/media/feature-selecting.gif)
+
 ## Features
 
 ### Live variants and approval
 
-Ask for options and the agent mounts them as live CSS on the real page — flip through with the arrows or the numbered buttons, compare against **Original**, then approve one. Only then does the agent touch a file. A clear, single-answer request ("make this button a deep purple gradient") skips the preview and edits directly.
+Ask for options and the agent mounts them as live CSS on the real page — flip through with the arrows or the numbered buttons, compare against **Original**, then approve one. Only then does the agent touch a file. A clear, single-answer request ("make this button a deep purple gradient") skips the preview and edits directly — asking permission to do the obvious thing isn't careful, it's just slow.
+
+![Asking for five style options on a pricing card, flipping through Accent border, Soft tint, Gradient fill, Lifted and Glow ring, then approving Lifted, which lands in the stylesheet](docs/media/feature-variants.gif)
 
 ### Undo, backed by git
 
-Before the agent writes, the bridge snapshots the working tree with `git stash create`. An **↩ undo** button appears beside the tray; reverting restores exactly the files that changed since. Projects without git history get no undo button rather than a broken one.
+Before the agent writes, the bridge snapshots the working tree with `git stash create`. An **↩ undo** button appears beside the tray; reverting restores exactly the files that changed since. Projects without git history get no undo button rather than a broken one — better to admit there's nothing to revert to than to pretend there is.
+
+![Approving a headline resize, seeing it committed, then clicking undo and watching the reverted note appear](docs/media/feature-undo.gif)
 
 ### Verified edits, with before/after
 
@@ -227,15 +236,21 @@ Approving records the computed values the preview was producing, then re-reads t
 
 Via the Screen Capture API: the browser asks once which surface to share (pick this tab), then every capture is a crop of the live compositor output. The panel warns you before that prompt appears, so it is not mistaken for something to dismiss. If you decline, or the browser lacks the API, it falls back to rendering the DOM to an image and labels those shots **rendered**, since that path cannot reproduce canvas, video or cross-origin content. Turn the native path off in ⚙ (`nativeCapture`) if you prefer it.
 
+![Dragging a rectangle over three feature cards, sending the crop with a question about narrow screens, and getting back a reply grounded in what's actually in the shot](docs/media/feature-screenshot.gif)
+
 ### Tappable answers
 
-When the agent needs a decision that has no visual answer — "free forever, or a 14-day trial?" — it can call `ask_choice`, and the panel renders the options as buttons. Your tap continues the conversation.
+When the agent needs a decision that has no visual answer — "free forever, or a 14-day trial?" — it can call `ask_choice`, and the panel renders the options as buttons. Your tap continues the conversation instead of making you type an answer back out.
+
+![The agent asking a plain question, the panel rendering it as two buttons, a tap sent back as the answer, and the conversation continuing](docs/media/feature-ask-choice.gif)
 
 ### Device sizes and split screen
 
 Click **⧉** in the panel's meter row. The shell puts your app in an iframe, which is the only way to test a mobile layout honestly: `@media` rules answer to a real viewport, so resizing a `<div>` would change nothing they can observe. Inside the frame the app genuinely believes it is 390px wide.
 
-Presets for iPhone SE/14, Pixel 7, iPad mini/Pro, laptop and desktop, plus **Rotate**, a custom width×height, and **drag handles** on the frame's edges. **Panel: right ▸** cycles which edge the chat sits on. A device bigger than your screen is scaled down to fit while still reporting its full viewport to the app. The simulated screen travels with every message as `page.screen = { preset, width, height, orientation, zoom }`, so "why does this wrap" is answerable.
+Presets for iPhone SE/14, Pixel 7, iPad mini/Pro, laptop and desktop, plus **Rotate**, a custom width×height, and **drag handles** on the frame's edges. **Panel: right ▸** cycles which edge the chat sits on. A device bigger than your screen is scaled down to fit while still reporting its full viewport to the app. The simulated screen travels with every message as `page.screen = { preset, width, height, orientation, zoom }`, so "why does this wrap" is answerable — the agent isn't guessing about your viewport any more than it's guessing about your CSS.
+
+![Reaching the split screen from the panel's own control, picking an iPhone 14, then switching to an iPad mini in portrait](docs/media/feature-splitscreen.gif)
 
 ### Apps without live reload
 
