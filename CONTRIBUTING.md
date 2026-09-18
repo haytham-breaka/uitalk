@@ -127,10 +127,24 @@ end. Separately verified, by hand:
   how the panel-click false-hint bug was found and fixed.
 - In `opencode` mode, against a live `opencode serve`: session creation, a selection
   reaching the session, a streamed reply.
+- **In Firefox**, `--agent off`: proxy injection, the panel opening from a cold page,
+  click-to-select drawing a numbered badge, a screenshot drag producing a thumbnail
+  through the `raster.js` `foreignObject`→canvas path, and split screen loading the app
+  inside the device iframe — 8/8, no uncaught page errors. This is the one client code
+  path with real cross-engine risk (canvas tainting and `foreignObject` support have
+  historically diverged between engines), and it holds up. Script:
+  `uitalk-demos/scripts/smoke-firefox.mjs`.
 
-**Not exercised anywhere:** the native `getDisplayMedia` path in a headed browser (the
-demo harness disables it — headless Chromium hangs on the permission prompt), `try_markup`
-and `scan_region` end to end, rasterizer fidelity on fonts and images from a real page.
+**Known not to work here, not in the product:** WebKit could not be installed on this
+machine — `playwright install webkit` downloads it, but launching it needs a GTK4 /
+GStreamer stack (`libgtk-4.so.1` and ~18 others) this Linux box doesn't have. That's a
+missing system library, not a finding about uitalk; it has not been run against WebKit
+at all, in either direction.
+
+**Not exercised anywhere:** the native `getDisplayMedia` path in a headed browser (every
+headless engine — not just Chromium — either has no real display to share or hangs on
+the permission prompt, which is why the demo harness disables it), `try_markup` and
+`scan_region` end to end, rasterizer fidelity on fonts and images from a real page.
 
 **Known gaps:** one agent session is shared by every browser tab; `try_markup` is
 discarded by a framework re-render.
