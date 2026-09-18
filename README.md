@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/media/mascot.png" alt="uitalk mascot: a browser window with an oversized, listening ear and sunglasses, pointing at one of its own buttons as it changes colour" width="260">
+</p>
+
 # uitalk
 
 **Stop describing your UI to an agent that can't see it.** Click the element, say what you want, flip through live alternatives, approve one — and your coding agent commits it to real source. No screenshot pasted into chat, no CSS selector spelled out by hand, no "the second button, no, the *other* second button."
