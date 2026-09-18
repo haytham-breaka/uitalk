@@ -373,13 +373,7 @@ npm test                    # every offline suite
 npm run coverage            # the same, measured, failing under 85% lines
 ```
 
-Three conventions the codebase holds to, because each was learned from a bug:
-
-1. **A comment says why, not what.**
-2. **A test must fail against the bug it describes.** If you add a regression test, revert the fix and watch it fail first.
-3. **Tell the user what the tool could not do.** An answer with a hole in it is only useful if the hole is visible.
-
-[CONTRIBUTING.md](CONTRIBUTING.md) has the full version: what each suite covers, how coverage is measured and where it is deliberately low, what has been verified and what has not, and what to know about updating a bridge that is already running.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rest: coding conventions, what each suite covers, how coverage is measured and where it is deliberately low, what has been verified and what has not, and what to know about updating a bridge that is already running.
 
 ## Licence
 

@@ -38,18 +38,25 @@ docs/media/        the demo clips linked from the README
 
 ## Coding conventions
 
-1. **A comment explains why, not what.** Identifier names should make the *what* obvious;
-   comment the non-obvious constraint instead — why a list is appended to rather than
-   unshifted, why a handler waits a frame before acting, why a selector is a class and
-   not an attribute.
-2. **A regression test must fail against the bug it fixes.** Before you add one, revert
-   the fix and confirm the test actually goes red. If the harness can't reproduce the
-   bug — jsdom has no layout engine, so anything depending on real pixel coordinates is
-   in that category — say so in the PR description and verify by hand instead of
-   committing a test that would pass either way.
-3. **A degraded result says so.** A capture that couldn't embed a font, a `locate_source`
-   that fell back to searching HTML, a stylesheet that couldn't be read: report it rather
-   than silently returning a partial answer.
+No linter or formatter is configured. Match the style of the file you're editing.
+A few patterns are consistent across the codebase and PRs are expected to keep to them:
+
+- ESM only, no default exports — `export const` / `export function` everywhere.
+- One file, one responsibility (`tool-defs.mjs` defines tools, `settings.mjs` owns
+  settings, `snapshots.mjs` owns git snapshots). A new concern gets a new file rather
+  than a new corner of an existing one.
+- `camelCase`; verb-first for a function that does something (`createAdapter`,
+  `revertTo`, `saveCredential`), a noun for something that holds state.
+- A failure path returns a result rather than throwing across the panel/agent boundary
+  — `{ kind: "reverted", ok: false, text }` over the socket, `failed(err)` for an MCP
+  tool. `settings.mjs`'s `validate()` collects every rejected field instead of stopping
+  at the first.
+- Shaping repeated in more than one place goes in a shared helper instead — `text()`
+  and `failed()` in `tool-defs.mjs` are why every MCP content block has the same shape.
+- A `/** */` block goes on an exported function only when its name and signature don't
+  already say what it does. A plain `//` above a block is for a constraint the code
+  itself can't show — why a handler waits a frame before acting, why a selector is a
+  class and not an attribute — not a restatement of the line below it.
 
 ## Testing
 
@@ -57,6 +64,12 @@ docs/media/        the demo clips linked from the README
 npm test          # every offline suite
 npm run coverage  # the same, measured
 ```
+
+A regression test must fail against the bug it fixes. Before adding one, revert the fix
+and confirm the test actually goes red. If the harness can't reproduce the bug — jsdom
+has no layout engine, so anything depending on real pixel coordinates is in that
+category — say so in the PR description and verify by hand instead of committing a test
+that would pass either way.
 
 | Suite | Covers |
 |---|---|
