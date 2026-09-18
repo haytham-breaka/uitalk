@@ -242,12 +242,6 @@ Via the Screen Capture API: the browser asks once which surface to share (pick t
 
 ![Dragging a rectangle over three feature cards, sending the crop with a question about narrow screens, and getting back a reply grounded in what's actually in the shot](docs/media/feature-screenshot.gif)
 
-### Tappable answers
-
-When the agent needs a decision that has no visual answer — "free forever, or a 14-day trial?" — it can call `ask_choice`, and the panel renders the options as buttons. Your tap continues the conversation instead of making you type an answer back out.
-
-![The agent asking a plain question, the panel rendering it as two buttons, a tap sent back as the answer, and the conversation continuing](docs/media/feature-ask-choice.gif)
-
 ### Device sizes and split screen
 
 Click **⧉** in the panel's meter row. The shell puts your app in an iframe, which is the only way to test a mobile layout honestly: `@media` rules answer to a real viewport, so resizing a `<div>` would change nothing they can observe. Inside the frame the app genuinely believes it is 390px wide.
