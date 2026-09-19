@@ -819,6 +819,273 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   await bridge.callPage("readSelection", {}, 50).catch((e) => (noPage = e.message));
   check("with no page connected a call is refused immediately", /no page is connected/.test(noPage ?? ""),
     noPage);
+
+  // -------------------------------------------- approval / undo core contract
+  //
+  // preview -> approve -> agent edits source -> undo safely restores exactly
+  // that change. The snapshot that makes undo possible is a real subprocess
+  // call (see snapshots.mjs), not something that resolves before the approval
+  // handler returns — so nothing that could let an agent start editing may run
+  // ahead of it.
+  execFileSync("git", ["init", "-q"], { cwd: process.env.UITALK_PROJECT });
+  execFileSync("git", ["config", "user.email", "t@t"], { cwd: process.env.UITALK_PROJECT });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: process.env.UITALK_PROJECT });
+  writeFileSync(join(process.env.UITALK_PROJECT, "a.css"), ".a{color:red}\n");
+  execFileSync("git", ["add", "."], { cwd: process.env.UITALK_PROJECT });
+  execFileSync("git", ["commit", "-qm", "init"], { cwd: process.env.UITALK_PROJECT });
+
+  // The snapshot and captureAfter are real git subprocess calls; how long they
+  // take is the machine's business, so wait for the state rather than a duration.
+  const until = async (cond, what) => {
+    for (let i = 0; i < 400; i++) {
+      if (cond()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+  const untilPhase = (phase) => until(() => bridge.approvalPhaseForTest() === phase, `approval phase "${phase}"`);
+
+  {
+    // adapter/opencode mode calls session.send() synchronously inside
+    // pushToAgent(), with no await in between — so if the old fire-and-forget
+    // snapshot code were still here, the agent would already have the edit
+    // instruction the instant deliver() returns, well before the snapshot's
+    // own subprocess call could possibly have resolved.
+    const p = makePage();
+    const sent = [];
+    bridge.setSessionForTest({ mode: "adapter", send: (c) => sent.push(c) });
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "make it bold", ref: 1, declarations: "font-weight:700", element: {} });
+    check("the agent is not pushed the edit instruction before the pre-edit snapshot exists",
+      sent.length === 0, `pushed ${sent.length} time(s) synchronously`);
+
+    await untilPhase("editing");
+    check("...and receives it once the snapshot has actually been taken",
+      sent.length === 1 && /Now commit this to source/.test(sent[0]), JSON.stringify(sent));
+    check("the panel is told the change is revertable no earlier than that",
+      p.sent.some((f) => f.kind === "revertable" && f.available === true), JSON.stringify(p.sent));
+
+    bridge.setSessionForTest(null);
+    await bridge.clearSession(); // drop lastChange and the approval phase before what follows
+    p.close();
+  }
+
+  {
+    // Two approvals close together: the second must be refused, deliberately
+    // and visibly, rather than racing the first for lastChange.
+    const p = makePage();
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "first", ref: 1, declarations: "color:red", element: {} });
+    p.deliver({ kind: "approval", label: "second", ref: 2, declarations: "color:blue", element: {} });
+    check("a second approval arriving before the first has finished is rejected, not raced",
+      p.sent.some((f) => f.kind === "approval_rejected" && f.label === "second"),
+      JSON.stringify(p.sent.map((f) => f.kind)));
+
+    await untilPhase("editing");
+    check("the first approval's own snapshot still completed undisturbed",
+      p.sent.some((f) => f.kind === "revertable" && f.label === "first"),
+      JSON.stringify(p.sent.filter((f) => f.kind === "revertable")));
+
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
+    // A full approve -> edit -> approve -> edit -> undo sequence, run for real
+    // (real git, real turn-end events), to prove undo lands on the most recent
+    // approval rather than whichever snapshot happened to resolve last.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "first change", ref: 1, declarations: "color:red", element: {} });
+    await untilPhase("editing"); // the pre-edit snapshot has resolved
+    writeFileSync(join(proj, "a.css"), ".a{color:blue}\n"); // the "agent" makes the edit
+    bridge.relay({ type: "result", subtype: "success" }); // its turn ends
+    await untilPhase("idle"); // captureAfter has run
+
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "second change", ref: 2, declarations: "color:green", element: {} });
+    check("a second approval is accepted once the first one's turn has genuinely ended",
+      !p.sent.some((f) => f.kind === "approval_rejected"), JSON.stringify(p.sent.map((f) => f.kind)));
+    await untilPhase("editing");
+    writeFileSync(join(proj, "a.css"), ".a{color:green}\n"); // the "agent" makes the second edit
+    bridge.relay({ type: "result", subtype: "success" });
+    await untilPhase("idle");
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the revert to answer");
+    const reverted = p.sent.find((f) => f.kind === "reverted");
+    check("undo after two sequential approvals names the most recent one",
+      reverted?.ok === true && reverted.label === "second change", JSON.stringify(reverted));
+    check("...and actually restores the file to its state from just before that edit",
+      readFileSync(join(proj, "a.css"), "utf8") === ".a{color:blue}\n",
+      readFileSync(join(proj, "a.css"), "utf8"));
+
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
+    // An approval missing the fields it needs is refused rather than sent to
+    // the agent as a nonsense edit instruction.
+    const p = makePage();
+    p.sent.length = 0;
+    p.deliver({ kind: "approval" });
+    check("an approval with no label or declarations is rejected rather than forwarded",
+      p.sent.some((f) => f.kind === "approval_rejected"), JSON.stringify(p.sent.map((f) => f.kind)));
+    p.close();
+  }
+
+  {
+    // A revert also blocks a *new* approval, and a second revert, while it is
+    // itself still rewriting the working tree — snapshot() and revertTo() must
+    // never run concurrently against the same repo.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+
+    p.deliver({ kind: "approval", label: "third change", ref: 1, declarations: "color:purple", element: {} });
+    await untilPhase("editing");
+    writeFileSync(join(proj, "a.css"), ".a{color:purple}\n");
+    bridge.relay({ type: "result", subtype: "success" });
+    await untilPhase("idle");
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    p.deliver({ kind: "approval", label: "fourth change", ref: 2, declarations: "color:black", element: {} });
+    p.deliver({ kind: "revert" });
+    check("a new approval arriving while a revert is in flight is rejected",
+      p.sent.some((f) => f.kind === "approval_rejected" && f.label === "fourth change"),
+      JSON.stringify(p.sent.map((f) => f.kind)));
+    check("a second revert arriving while the first is in flight is rejected too",
+      p.sent.filter((f) => f.kind === "reverted" && f.ok === false && /already undoing/.test(f.text ?? "")).length === 1,
+      JSON.stringify(p.sent));
+
+    await until(() => p.sent.some((f) => f.kind === "reverted" && f.ok === true), "the first revert to finish");
+    check("the original revert still completes normally",
+      p.sent.some((f) => f.kind === "reverted" && f.ok === true), JSON.stringify(p.sent));
+
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  // ------------------------------------------------- RPC answers are bound to
+  // ------------------------------------------------- the socket asked, not id alone
+  {
+    const pageA = makePage();
+    const pageB = makePage();
+    pageA.deliver({ kind: "focus", url: "http://127.0.0.1:8400/a", visible: true });
+
+    let settled = null;
+    bridge.callPage("readSelection", {}, 500).then(
+      (v) => (settled = { ok: true, v }),
+      (e) => (settled = { ok: false, e: e.message }),
+    );
+    const rpc = pageA.sent.find((f) => f.kind === "rpc");
+    check("the call is addressed to the active page", Boolean(rpc), JSON.stringify(pageA.sent.map((f) => f.kind)));
+
+    pageB.deliver({ kind: "rpc_result", id: rpc.id, result: { selected: 999, hijacked: true } });
+    await new Promise((r) => setTimeout(r, 30));
+    check("a different connected page answering with the same request id does not settle it",
+      settled === null, JSON.stringify(settled));
+
+    pageA.deliver({ kind: "rpc_result", id: rpc.id, result: { selected: 3 } });
+    await new Promise((r) => setTimeout(r, 30));
+    check("the page the call actually went to can still answer it",
+      settled?.ok === true && settled.v.selected === 3, JSON.stringify(settled));
+
+    pageA.close();
+    pageB.close();
+  }
+
+  // ------------------------------------------------------ active-page ownership
+  {
+    const a = makePage();
+    const b = makePage();
+    b.deliver({ kind: "focus", url: "http://127.0.0.1:8400/b", visible: true }); // b is now the active page
+
+    a.sent.length = 0;
+    b.sent.length = 0;
+    a.deliver({ kind: "settings", patch: { compactAtPercent: 33 } }); // an ordinary frame from a background tab
+    await new Promise((r) => setTimeout(r, 20));
+
+    a.sent.length = 0;
+    b.sent.length = 0;
+    bridge.callPage("readSelection", {}, 300).catch(() => {});
+    check("an ordinary frame from a background page does not steal active-page routing",
+      b.sent.some((f) => f.kind === "rpc") && !a.sent.some((f) => f.kind === "rpc"),
+      JSON.stringify({ aGotRpc: a.sent.some((f) => f.kind === "rpc"), bGotRpc: b.sent.some((f) => f.kind === "rpc") }));
+    const firstRpc = b.sent.find((f) => f.kind === "rpc");
+    if (firstRpc) b.deliver({ kind: "rpc_result", id: firstRpc.id, result: {} });
+
+    a.sent.length = 0;
+    b.sent.length = 0;
+    a.deliver({ kind: "focus", url: "http://127.0.0.1:8400/a", visible: true }); // a explicitly takes focus
+    bridge.callPage("readSelection", {}, 300).catch(() => {});
+    check("an explicit focus frame does move active-page routing",
+      a.sent.some((f) => f.kind === "rpc"), JSON.stringify(a.sent.map((f) => f.kind)));
+    const secondRpc = a.sent.find((f) => f.kind === "rpc");
+    if (secondRpc) a.deliver({ kind: "rpc_result", id: secondRpc.id, result: {} });
+
+    a.close();
+    b.close();
+  }
+}
+
+// ------------------------------------------ the WebSocket upgrade trust boundary
+//
+// The bridge binds to loopback, which keeps other machines out, but a browser
+// can still be made to open a WebSocket to a local port just by visiting a page
+// that tries it. This exercises the real HTTP upgrade path end to end — a fake
+// in-process socket cannot stand in for a real Origin header.
+{
+  const bridge = await import("../server/index.mjs");
+  const { WebSocket } = await import("ws");
+
+  await new Promise((resolve) => bridge.http.listen(0, "127.0.0.1", resolve));
+  const port = bridge.http.address().port;
+
+  const tryConnect = (origin) => new Promise((resolve) => {
+    const opts = origin ? { headers: { Origin: origin } } : {};
+    const sock = new WebSocket(`ws://127.0.0.1:${port}/__uitalk/socket`, opts);
+    sock.on("open", () => {
+      resolve({ ok: true });
+      sock.close();
+    });
+    sock.on("unexpected-response", (req, res) => resolve({ ok: false, status: res.statusCode }));
+    sock.on("error", () => resolve({ ok: false, status: null }));
+  });
+
+  const evil = await tryConnect("https://evil.example");
+  check("a socket upgrade from an untrusted remote origin is refused",
+    evil.ok === false && evil.status === 403, JSON.stringify(evil));
+
+  const none = await tryConnect(null);
+  check("a socket upgrade with no Origin header (MCP and other non-browser clients) is allowed",
+    none.ok === true, JSON.stringify(none));
+
+  const own = await tryConnect(`http://127.0.0.1:${port}`);
+  check("a socket upgrade whose origin is the bridge's own address is allowed",
+    own.ok === true, JSON.stringify(own));
+
+  const bookmarklet = await tryConnect("http://localhost:5173");
+  check("a socket upgrade from another loopback port (the bookmarklet's own dev server) is allowed",
+    bookmarklet.ok === true, JSON.stringify(bookmarklet));
+
+  await new Promise((resolve) => bridge.http.close(resolve));
 }
 
 // ------------------------------------- the client is served fresh, not from boot

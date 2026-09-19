@@ -185,8 +185,36 @@ const http = createServer((req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 const forwardUpgrade = proxyUpgrade({ target: { host: APP_HOST, port: APP_PORT } });
 
+// A browser can be made to open a WebSocket to any local port just by visiting a
+// page that tries it — binding to loopback keeps other machines out, but not a
+// malicious page running in the user's own browser. Origin is the standard defense:
+// it is set by the browser itself and cannot be spoofed by page script. Non-browser
+// clients (the MCP server, a plain Node `ws` connection) never send one at all, so
+// only a *present and untrue* origin is refused. The bridge and the app it proxies
+// are only ever reached on loopback (see http.listen below and APP_HOST's default),
+// so every legitimate caller — the proxied app, the split-screen shell, and the
+// bookmarklet pointed at a locally-run dev server — has a loopback origin too.
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1"]);
+
+function originIsTrusted(originHeader) {
+  if (!originHeader) return true;
+  let hostname;
+  try {
+    hostname = new URL(originHeader).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
+  }
+  return LOOPBACK_HOSTNAMES.has(hostname);
+}
+
 http.on("upgrade", (req, socket, head) => {
   if (req.url === SOCKET_PATH) {
+    if (!originIsTrusted(req.headers.origin)) {
+      log(`rejected a socket upgrade from an untrusted origin: ${req.headers.origin}`);
+      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
     return;
   }
@@ -247,9 +275,12 @@ function callPage(method, params = {}, timeoutMs = RPC_TIMEOUT) {
   });
 }
 
-function settleRpc({ id, result, error }) {
+// A result only settles the request if it comes back on the same socket the
+// request was sent to — otherwise a second connected page could answer on behalf
+// of the one actually asked, e.g. with a fabricated selection or capture.
+function settleRpc({ id, result, error }, ws) {
   const entry = pending.get(id);
-  if (!entry) return;
+  if (!entry || entry.page !== ws) return;
   pending.delete(id);
   clearTimeout(entry.timer);
   if (error) entry.reject(new Error(error));
@@ -278,6 +309,19 @@ let session = null;
  * in for one to exercise compact()/clearSession() without a real SDK. */
 function setSessionForTest(s) {
   session = s;
+}
+
+// Indirection so a test can force a controllable delay around the approval
+// snapshot without touching the git-backed implementation itself.
+let snapshotFn = (label) => snapshots.snapshot(PROJECT, label);
+function setSnapshotForTest(fn) {
+  snapshotFn = fn ?? ((label) => snapshots.snapshot(PROJECT, label));
+}
+
+/** captureAfter() sends no panel frame of its own, so a test polls this instead
+ * of sleeping for a duration a slower machine may not honour. */
+function approvalPhaseForTest() {
+  return approvalPhase;
 }
 
 const AGENT_MODES = {
@@ -368,12 +412,9 @@ wss.on("connection", (ws) => {
       return log("dropped a frame that was not JSON");
     }
 
-    // Anything the user did in a page makes it the active one.
-    if (frame.kind !== "rpc_result") markActive(ws);
-
     switch (frame.kind) {
       case "rpc_result":
-        return settleRpc(frame);
+        return settleRpc(frame, ws);
 
       case "hello":
       case "focus": {
@@ -382,6 +423,13 @@ wss.on("connection", (ws) => {
           log(`an external agent attached (${agents.size} connected)`);
           return;
         }
+        // Only these two kinds are genuine "I am the tab the user is looking at"
+        // signals — see client/ui.js's announce(), sent on connect, on becoming
+        // visible, on window focus, and on a click inside the panel. Every other
+        // frame kind is something a page sends once it is already the active one,
+        // not evidence that a different, possibly stale or background, socket
+        // deserves to become it.
+        markActive(ws);
         const others = [...clients].filter((c) => c !== ws && c.readyState === c.OPEN).length;
         toPanel({ kind: "pages", total: others + 1, activeUrl: frame.url });
         return;
@@ -422,6 +470,13 @@ wss.on("connection", (ws) => {
       }
 
       case "revert": {
+        // Blocks a new approval too (it requires "idle"): its snapshot() and this
+        // revertTo() both rewrite the working tree, and running them concurrently
+        // could interleave a stash-create with a checkout, or race each other.
+        if (approvalPhase === "reverting") {
+          toPanel({ kind: "reverted", ok: false, text: "already undoing the last change — wait for that to finish" });
+          return;
+        }
         void (async () => {
           if (!lastChange?.snap) {
             toPanel({ kind: "reverted", ok: false, text: "there is nothing to go back to" });
@@ -439,6 +494,7 @@ wss.on("connection", (ws) => {
             });
             return;
           }
+          approvalPhase = "reverting";
           try {
             const out = await snapshots.revertTo(PROJECT, lastChange.snap);
             log(
@@ -473,7 +529,9 @@ wss.on("connection", (ws) => {
                 `Do not re-apply it unless I ask.`,
             );
             lastChange = null;
+            approvalPhase = "idle";
           } catch (err) {
+            approvalPhase = "idle";
             toPanel({ kind: "reverted", ok: false, text: err.message });
           }
         })();
@@ -496,24 +554,46 @@ wss.on("connection", (ws) => {
       case "clear":
         return void clearSession();
 
-      case "approval":
+      case "approval": {
+        if (typeof frame.label !== "string" || !frame.label || typeof frame.declarations !== "string") {
+          toPanel({ kind: "approval_rejected", label: frame.label, text: "that approval was missing its label or declarations" });
+          return;
+        }
+        if (approvalPhase !== "idle") {
+          toPanel({
+            kind: "approval_rejected",
+            label: frame.label,
+            text: "still applying the previous approved change — approve this one again once it finishes",
+          });
+          return;
+        }
+        approvalPhase = "snapshotting";
         record("me", `approved: ${frame.label}`);
-        toAgents(frame); // an external agent cannot be sent a message; it waits for this
+        // Neither the external-agent notice nor the edit instruction may reach an
+        // agent until the pre-edit snapshot exists — otherwise the agent's own
+        // write can land in what undo believes was the "before" state, and undo
+        // would no longer fully restore it. See snapshots.mjs's snapshot(), a real
+        // subprocess call, not something that resolves before this handler returns.
         void (async () => {
-          lastChange = { snap: await snapshots.snapshot(PROJECT, frame.label), label: frame.label };
-          toPanel({ kind: "revertable", available: Boolean(lastChange.snap), label: frame.label });
+          const snap = await snapshotFn(frame.label);
+          lastChange = { snap, label: frame.label };
+          approvalPhase = "editing";
+          toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label });
+          toAgents(frame); // an external agent cannot be sent a message; it waits for this
+          pushToAgent(
+            `The user approved option "${frame.label}" for element ${frame.ref}.\n\n` +
+              `Approved declarations:\n${frame.declarations}\n` +
+              (frame.also ? `Additional rules:\n${frame.also}\n` : "") +
+              `\nElement identity:\n${JSON.stringify(frame.element, null, 2)}\n` +
+              `Page: ${frame.page?.path ?? "unknown"}\n\n` +
+              `Now commit this to source. Find where this element is defined and where its ` +
+              `styles live, then make the edit the way the surrounding code would. Match the ` +
+              `project's conventions rather than pasting the preview CSS verbatim, and do not ` +
+              `carry over any data-uitalk-* attribute. Tell me which files you changed.`,
+          );
         })();
-        return pushToAgent(
-          `The user approved option "${frame.label}" for element ${frame.ref}.\n\n` +
-            `Approved declarations:\n${frame.declarations}\n` +
-            (frame.also ? `Additional rules:\n${frame.also}\n` : "") +
-            `\nElement identity:\n${JSON.stringify(frame.element, null, 2)}\n` +
-            `Page: ${frame.page?.path ?? "unknown"}\n\n` +
-            `Now commit this to source. Find where this element is defined and where its ` +
-            `styles live, then make the edit the way the surrounding code would. Match the ` +
-            `project's conventions rather than pasting the preview CSS verbatim, and do not ` +
-            `carry over any data-uitalk-* attribute. Tell me which files you changed.`,
-        );
+        return;
+      }
 
       default:
         log(`ignored frame of unknown kind: ${frame.kind}`);
@@ -546,7 +626,7 @@ function buildUserContent(frame) {
   if (process.env.UITALK_DEBUG) log(`user header: ${header}`);
 
   // One or more screenshots the user queued in the panel.
-  const shots = frame.shots ?? (frame.png ? [{ png: frame.png, label: "screenshot" }] : []);
+  const shots = Array.isArray(frame.shots) ? frame.shots : frame.png ? [{ png: frame.png, label: "screenshot" }] : [];
   if (!shots.length) return `${header}\n\n${frame.text}`;
 
   const content = [{ type: "text", text: `${header}\n\n${frame.text}` }];
@@ -612,6 +692,7 @@ function noteTokens(total) {
 async function noteTurnEnded() {
   if (lastChange?.snap && !lastChange.snap.postCaptured) {
     lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap);
+    approvalPhase = "idle";
   }
   maybeCompact();
 }
@@ -720,6 +801,7 @@ async function clearSession() {
   transcript.length = 0;
   resetContextMeter();
   lastChange = null;
+  approvalPhase = "idle"; // abandon any approval whose turn will now never end
   toPanel({ kind: "cleared" });
   notifyAgents("The user started a new session in the panel. The panel's history was cleared.");
   log(session ? "session cleared on request" : "panel history cleared (no built-in agent)");
@@ -1253,6 +1335,16 @@ function listen(candidates) {
 }
 
 let lastChange = null;
+
+// One approval's snapshot-then-edit lifecycle at a time. "idle": nothing in
+// flight, or the previous edit's turn already ended and got captured — a new
+// approval may proceed. "snapshotting": the pre-edit snapshot hasn't resolved
+// yet, so the agent must not be told about the edit. "editing": the agent has
+// the instruction and is expected to write, and captureAfter() is still owed
+// once its turn ends (see noteTurnEnded()). A second approval arriving in
+// either of the non-idle phases is refused rather than raced — see the
+// "approval" case below.
+let approvalPhase = "idle";
 let started = false;
 
 function ready() {
@@ -1290,6 +1382,7 @@ if (process.env.UITALK_IMPORT_ONLY !== "1") listen(FIXED_PORT ? [FIXED_PORT] : P
 
 export {
   wss,
+  http,
   clients,
   agents,
   callPage,
@@ -1315,6 +1408,8 @@ export {
   AGENT_MODES,
   askAgent,
   setSessionForTest,
+  setSnapshotForTest,
+  approvalPhaseForTest,
 };
 
 let closing = false;
