@@ -11,7 +11,7 @@
 // can be told apart from the agent's own change and left alone.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmdirSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -26,6 +26,30 @@ const git = async (cwd, args) => {
 const lines = (text) => (text ? text.split("\n").map((l) => l.trim()).filter(Boolean) : []);
 
 const untracked = (cwd) => git(cwd, ["ls-files", "--others", "--exclude-standard"]).then(lines);
+
+/**
+ * git's blob id for each file's current contents. With write:true the contents
+ * are also stored in the object database, so the exact bytes can be recovered
+ * later even though nothing in the tree references them — the same unreferenced
+ * lifetime the stash-create commit already relies on. Lets undo restore an
+ * untracked file git itself never tracked, without holding its bytes in memory.
+ * --no-filters keeps the bytes verbatim: no EOL/clean filter from .gitattributes,
+ * so what goes in is what comes back out, and the id is a raw-byte comparison.
+ */
+async function blobIds(cwd, files, { write = false } = {}) {
+  const args = write ? ["hash-object", "-w", "--no-filters", "--"] : ["hash-object", "--no-filters", "--"];
+  const out = {};
+  await Promise.all(
+    files.map(async (f) => {
+      try {
+        out[f] = await git(cwd, [...args, f]);
+      } catch {
+        out[f] = null; // vanished or unreadable — no baseline to keep for it
+      }
+    }),
+  );
+  return out;
+}
 
 const hashFile = (path) => {
   try {
@@ -54,7 +78,11 @@ export async function snapshot(cwd, label) {
     const wip = await git(cwd, ["stash", "create"]);
     const ref = wip || (await git(cwd, ["rev-parse", "HEAD"]));
     const untrackedBefore = await untracked(cwd);
-    return { ref, label, at: Date.now(), untrackedBefore };
+    // stash create captures only tracked files, so an already-untracked file the
+    // agent later edits has no restore point in `ref`. Keep each one's contents
+    // as a git blob now, before any edit, so undo can put it back exactly.
+    const untrackedBlobs = await blobIds(cwd, untrackedBefore, { write: true });
+    return { ref, label, at: Date.now(), untrackedBefore, untrackedBlobs };
   } catch {
     return null;
   }
@@ -79,7 +107,26 @@ export async function captureAfter(cwd, snap) {
   const createdHashes = {};
   for (const file of createdByAgent) createdHashes[file] = hashFile(join(cwd, file));
 
-  return { ...snap, postCaptured: true, changedByAgent, postHashes, createdByAgent, createdHashes };
+  // A file that was already untracked and whose bytes the agent changed since the
+  // snapshot. git diff never lists it (it is untracked) and it is not "created"
+  // (it predates the snapshot), so it needs its own bucket. Freeze the post-edit
+  // hash too, to tell a later user edit apart from the agent's own change.
+  const stillUntracked = (snap.untrackedBefore ?? []).filter((f) => existsSync(join(cwd, f)));
+  const nowBlobs = await blobIds(cwd, stillUntracked);
+  const modifiedUntracked = [];
+  const modifiedHashes = {};
+  for (const file of stillUntracked) {
+    const baseline = snap.untrackedBlobs?.[file];
+    if (baseline && nowBlobs[file] && nowBlobs[file] !== baseline) {
+      modifiedUntracked.push(file);
+      modifiedHashes[file] = hashFile(join(cwd, file));
+    }
+  }
+
+  return {
+    ...snap, postCaptured: true, changedByAgent, postHashes, createdByAgent, createdHashes,
+    modifiedUntracked, modifiedHashes,
+  };
 }
 
 function removeEmptyParents(cwd, file) {
@@ -116,8 +163,9 @@ export async function revertTo(cwd, snap) {
 
   const reverted = [];
   const skipped = [];
+  const fromRef = []; // tracked files, restorable straight from the snapshot ref
   for (const file of snap.changedByAgent ?? []) {
-    if (hashFile(join(cwd, file)) === snap.postHashes?.[file]) reverted.push(file);
+    if (hashFile(join(cwd, file)) === snap.postHashes?.[file]) fromRef.push(file);
     else skipped.push(file);
   }
 
@@ -129,7 +177,31 @@ export async function revertTo(cwd, snap) {
     else skipped.push(file);
   }
 
-  if (reverted.length) await git(cwd, ["checkout", snap.ref, "--", ...reverted]);
+  // Untracked-and-modified files are not in the ref, so they are restored from the
+  // blob captured at snapshot time rather than by checkout — but only if the user
+  // has not edited them again since the agent finished.
+  const fromBlob = [];
+  for (const file of snap.modifiedUntracked ?? []) {
+    const blob = snap.untrackedBlobs?.[file];
+    if (blob && hashFile(join(cwd, file)) === snap.modifiedHashes?.[file]) fromBlob.push(file);
+    else skipped.push(file);
+  }
+
+  if (fromRef.length) await git(cwd, ["checkout", snap.ref, "--", ...fromRef]);
+  reverted.push(...fromRef);
+  for (const file of fromBlob) {
+    try {
+      const { stdout } = await run("git", ["cat-file", "blob", snap.untrackedBlobs[file]], {
+        cwd,
+        encoding: "buffer",
+        maxBuffer: 1024 * 1024 * 64,
+      });
+      writeFileSync(join(cwd, file), stdout);
+      reverted.push(file);
+    } catch {
+      skipped.push(file); // the blob is gone (gc'd) — better to leave the file than to fail the whole undo
+    }
+  }
   for (const file of removed) {
     unlinkSync(join(cwd, file));
     removeEmptyParents(cwd, file);
