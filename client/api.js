@@ -749,7 +749,13 @@ globalThis.UITalk = (() => {
     stamp(replacement, ref);
     el.replaceWith(replacement);
     picked[ref - 1] = replacement;
-    return { applied: true, ref, note: "A framework re-render will discard this." };
+    return {
+      applied: true,
+      ref,
+      note:
+        "a visual mockup, not a faithful preview: this markup was swapped in behind the framework's " +
+        "back, so it carries no component state or event bindings, and a re-render will discard it",
+    };
   }
 
   function showOptions({ ref, selector, options }) {

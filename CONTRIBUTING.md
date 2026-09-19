@@ -146,8 +146,10 @@ headless engine — not just Chromium — either has no real display to share or
 the permission prompt, which is why the demo harness disables it), `try_markup` and
 `scan_region` end to end, rasterizer fidelity on fonts and images from a real page.
 
-**Known gaps:** one agent session is shared by every browser tab; `try_markup` is
-discarded by a framework re-render.
+**Known gaps:** one agent session is shared by every browser tab; `try_markup` swaps in
+raw HTML behind React/Vue/Svelte's back, so the replacement carries no component state
+or event bindings and a re-render discards it outright — treat it as a visual mockup,
+never as evidence that the real component would behave the same way.
 
 ## Updating a running bridge
 

@@ -234,7 +234,9 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
       description:
         "Preview CSS on an element, named either by selection ref or by CSS selector. Applied " +
         "through a preview stylesheet above the page's own; nothing is written to disk and a " +
-        "reload clears it. Show the user a change before they approve it. Do not use !important.",
+        "reload clears it. The element itself is untouched — its framework identity, state, " +
+        "and event handlers all stay live — so this is a faithful preview of the real thing, " +
+        "unlike try_markup. Show the user a change before they approve it. Do not use !important.",
       schema: {
         ref: { type: "number", description: "Selection ref" },
         selector: { type: "string", description: "A CSS selector, when nothing is selected" },
@@ -247,9 +249,14 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
     {
       name: "try_markup",
       description:
-        "Preview replacement markup for a selected element's subtree. The original is kept in " +
-        "memory and restored on reset. A framework re-render discards this preview, so prefer " +
-        "try_style where a style change can express the same thing.",
+        "Preview replacement markup for a selected element's subtree, by swapping in raw HTML " +
+        "behind the framework's back. The original is kept in memory and restored on reset. This " +
+        "is a visual mockup, not a faithful preview: the replacement carries no framework " +
+        "identity, component state, or event bindings from React/Vue/Svelte, so anything " +
+        "interactive in it will not behave like the real component even before a re-render " +
+        "discards it outright. Good for showing layout or content changes; do not use it to " +
+        "demonstrate behavior, and prefer try_style wherever a style change can express the " +
+        "same thing.",
       schema: {
         ref: { type: "number", description: "Selection ref to replace" },
         html: { type: "string", description: "Replacement outerHTML" },

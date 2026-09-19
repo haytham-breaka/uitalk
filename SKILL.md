@@ -82,8 +82,8 @@ The panel's messages reach you as ordinary user messages. The page tools are:
 | `read_selection` | Always first. Selections are numbered in pick order. |
 | `capture` | See the selection. Call again after a change to check it. |
 | `scan_region` | Identify something a capture left ambiguous. |
-| `try_style` | Preview CSS. Writes nothing. |
-| `try_markup` | Preview replacement markup. A re-render discards it. |
+| `try_style` | Preview CSS. Writes nothing. Faithful — the element stays framework-owned. |
+| `try_markup` | Preview replacement markup. A visual mockup, not functional — no component state or event bindings, and a re-render discards it. |
 | `show_options` | Offer alternatives, then end your turn. |
 | `ask_choice` | Ask a plain question with no visual preview. Ends your turn too. |
 | `reset_preview` | Drop every preview. |

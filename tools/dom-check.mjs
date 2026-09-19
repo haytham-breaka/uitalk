@@ -175,6 +175,23 @@ check("chosen option carries identity + page", chosen.label === "Bold" && chosen
 UITalk.resetPreview();
 check("reset drops every preview sheet", window.document.adoptedStyleSheets.length === 0, String(window.document.adoptedStyleSheets.length));
 
+// --- try_markup is a visual mockup, not a faithful preview, and must say so
+{
+  const card = window.document.createElement("div");
+  card.className = "throwaway-card";
+  window.document.body.appendChild(card);
+  const picked = UITalk.pick(card);
+
+  const result = UITalk.tryMarkup({ ref: picked.ref, html: "<div>replaced</div>" });
+  const replacement = window.document.querySelector(`[data-uitalk-ref="${picked.ref}"]`);
+  check("try_markup does replace the element", result.applied === true && card.parentElement === null);
+  check("and is honest that this is a mockup, not a functional preview",
+    /visual mockup/.test(result.note) && /event bindings/.test(result.note), result.note);
+
+  UITalk.unpick(picked.ref);
+  replacement?.remove();
+}
+
 // --- which rules actually style an element
 {
   // a stylesheet with two competing rules and a media block
