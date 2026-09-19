@@ -9,7 +9,7 @@
 [![test](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml/badge.svg)](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
-[![Version 0.6.3](https://img.shields.io/badge/version-0.6.3-informational.svg)](.claude-plugin/plugin.json)
+[![Version 0.6.4](https://img.shields.io/badge/version-0.6.4-informational.svg)](.claude-plugin/plugin.json)
 
 <p align="center">
   <img src="docs/media/story.gif" alt="Talk to your UI, not about it: five acts in one session — centring one button on another by number, fixing a headline that wraps on phones from inside the split-screen frame, a colour change that stays scoped to the selected button, five live style options before anything is written, and a one-click undo" width="100%">
@@ -228,7 +228,7 @@ Ask for options and the agent mounts them as live CSS on the real page — flip 
 
 ### Undo, backed by git
 
-Before the agent writes, the bridge snapshots the working tree with `git stash create`. An **↩ undo** button appears beside the tray; reverting restores exactly the files that changed since. Projects without git history get no undo button rather than a broken one — better to admit there's nothing to revert to than to pretend there is.
+Before the agent writes, the bridge snapshots the working tree with `git stash create`. An **↩ undo** button appears beside the tray; reverting restores the files the agent actually changed — new files it created are removed too, and if you've edited one of those files again yourself since, undo leaves it alone rather than clobbering your work. Projects without git history get no undo button rather than a broken one — better to admit there's nothing to revert to than to pretend there is.
 
 ![Approving a headline resize, seeing it committed, then clicking undo and watching the reverted note appear](docs/media/feature-undo.gif)
 

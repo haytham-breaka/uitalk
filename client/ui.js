@@ -1187,7 +1187,11 @@
           return say(f.ok
             ? "note"
             : "warn", f.ok
-              ? `reverted "${f.label}"${f.files?.length ? ` · ${f.files.join(", ")}` : ""}`
+              ? `reverted "${f.label}"` +
+                (f.files?.length ? ` · restored ${f.files.join(", ")}` : "") +
+                (f.removed?.length ? ` · removed ${f.removed.join(", ")}` : "") +
+                (f.skipped?.length ? ` · left alone (edited again since): ${f.skipped.join(", ")}` : "") +
+                (!f.files?.length && !f.removed?.length && !f.skipped?.length ? " · nothing to undo" : "")
               : `could not revert: ${f.text}`);
 
         case "client_updated":
