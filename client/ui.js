@@ -17,7 +17,12 @@
   if (embedded) return;
 
   const shell = globalThis.UITalkShell ?? null;
-  const SOCKET = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/__uitalk/socket`;
+  // The bridge handed this page a capability token (on the injecting <script> tag,
+  // or set by the bookmarklet); the socket handshake is refused without it.
+  const token = globalThis.__UITALK_TOKEN__ ?? null;
+  const SOCKET =
+    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/__uitalk/socket` +
+    (token ? `?token=${encodeURIComponent(token)}` : "");
 
   // In the shell the API lives in the frame, and the frame can be mid-navigation,
   // so every call goes through an accessor with an inert stand-in behind it.

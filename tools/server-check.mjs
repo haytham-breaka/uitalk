@@ -182,18 +182,22 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   registry.add({ pid: process.pid, port: 8500, appHost: "127.0.0.1", appPort: 5173, project: projA });
   registry.add({ pid: process.ppid, port: 8501, appHost: "127.0.0.1", appPort: 5174, project: projB });
 
-  check("with one matching project, discovery finds its bridge",
-    bridgeUrl({ project: projA }) === "ws://127.0.0.1:8500/__uitalk/socket", bridgeUrl({ project: projA }));
+  // The socket is token-gated, so a discovered URL carries this project's token.
+  const { projectToken } = await import("../server/token.mjs");
+  const urlFor = (port, project) => `ws://127.0.0.1:${port}/__uitalk/socket?token=${projectToken(project)}`;
+
+  check("with one matching project, discovery finds its bridge (with its token)",
+    bridgeUrl({ project: projA }) === urlFor(8500, projA), bridgeUrl({ project: projA }));
   check("with several registered, the exact project still wins",
-    bridgeUrl({ project: projB }) === "ws://127.0.0.1:8501/__uitalk/socket", bridgeUrl({ project: projB }));
+    bridgeUrl({ project: projB }) === urlFor(8501, projB), bridgeUrl({ project: projB }));
 
   check("a trailing separator does not defeat the match",
-    bridgeUrl({ project: projA + "/" }) === "ws://127.0.0.1:8500/__uitalk/socket", bridgeUrl({ project: projA + "/" }));
+    bridgeUrl({ project: projA + "/" }) === urlFor(8500, projA), bridgeUrl({ project: projA + "/" }));
 
   const linkToA = join(sandbox, "link-to-a");
   symlinkSync(projA, linkToA);
-  check("a symlink to the project resolves to the same bridge",
-    bridgeUrl({ project: linkToA }) === "ws://127.0.0.1:8500/__uitalk/socket", bridgeUrl({ project: linkToA }));
+  check("a symlink to the project resolves to the same bridge and token",
+    bridgeUrl({ project: linkToA }) === urlFor(8500, projA), bridgeUrl({ project: linkToA }));
 
   check("canonical normalizes a trailing separator away",
     canonical(projA + "/") === canonical(projA), `${canonical(projA + "/")} vs ${canonical(projA)}`);
@@ -206,9 +210,12 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("and the error names what is registered, to diagnose the mismatch",
     noMatch?.includes(projA) && noMatch?.includes(":8500"), noMatch);
 
-  check("an explicit port wins outright, no registry lookup",
+  check("an explicit port to an unregistered bridge is honoured without a token",
     bridgeUrl({ port: 9999, project: join(sandbox, "not-registered") }) === "ws://127.0.0.1:9999/__uitalk/socket",
     bridgeUrl({ port: 9999, project: join(sandbox, "not-registered") }));
+  check("an explicit port to a registered bridge still carries that bridge's token",
+    bridgeUrl({ port: 8500, project: join(sandbox, "irrelevant") }) === urlFor(8500, projA),
+    bridgeUrl({ port: 8500 }));
 
   registry.remove(process.pid);
   registry.remove(process.ppid);
@@ -1175,9 +1182,11 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   await new Promise((resolve) => bridge.http.listen(0, "127.0.0.1", resolve));
   const port = bridge.http.address().port;
 
-  const tryConnect = (origin) => new Promise((resolve) => {
+  const TOKEN = bridge.socketToken;
+  const tryConnect = ({ origin, token = TOKEN } = {}) => new Promise((resolve) => {
     const opts = origin ? { headers: { Origin: origin } } : {};
-    const sock = new WebSocket(`ws://127.0.0.1:${port}/__uitalk/socket`, opts);
+    const query = token === null ? "" : `?token=${token}`;
+    const sock = new WebSocket(`ws://127.0.0.1:${port}/__uitalk/socket${query}`, opts);
     sock.on("open", () => {
       resolve({ ok: true });
       sock.close();
@@ -1186,21 +1195,42 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     sock.on("error", () => resolve({ ok: false, status: null }));
   });
 
-  const evil = await tryConnect("https://evil.example");
+  // Origin is checked first: a remote origin is refused even with a valid token.
+  const evil = await tryConnect({ origin: "https://evil.example" });
   check("a socket upgrade from an untrusted remote origin is refused",
     evil.ok === false && evil.status === 403, JSON.stringify(evil));
 
-  const none = await tryConnect(null);
-  check("a socket upgrade with no Origin header (MCP and other non-browser clients) is allowed",
+  // The capability token gates every connection, whatever the (allowed) origin.
+  const noToken = await tryConnect({ origin: `http://127.0.0.1:${port}`, token: null });
+  check("a loopback socket upgrade with no token is refused",
+    noToken.ok === false && noToken.status === 403, JSON.stringify(noToken));
+
+  const wrongToken = await tryConnect({ origin: `http://127.0.0.1:${port}`, token: "deadbeef".repeat(6) });
+  check("a loopback socket upgrade with the wrong token is refused",
+    wrongToken.ok === false && wrongToken.status === 403, JSON.stringify(wrongToken));
+
+  // Another local app cannot connect: it has a loopback origin but not the token.
+  const otherApp = await tryConnect({ origin: "http://localhost:3000", token: null });
+  check("another localhost app (loopback origin, no token) cannot open the socket",
+    otherApp.ok === false && otherApp.status === 403, JSON.stringify(otherApp));
+
+  // With the real token, the legitimate clients all still connect.
+  const none = await tryConnect({ origin: null });
+  check("no Origin (MCP and other non-browser clients) with the token is allowed",
     none.ok === true, JSON.stringify(none));
 
-  const own = await tryConnect(`http://127.0.0.1:${port}`);
-  check("a socket upgrade whose origin is the bridge's own address is allowed",
+  const own = await tryConnect({ origin: `http://127.0.0.1:${port}` });
+  check("the bridge's own origin with the token is allowed",
     own.ok === true, JSON.stringify(own));
 
-  const bookmarklet = await tryConnect("http://localhost:5173");
-  check("a socket upgrade from another loopback port (the bookmarklet's own dev server) is allowed",
+  const bookmarklet = await tryConnect({ origin: "http://localhost:5173" });
+  check("another loopback port (the bookmarklet's dev server) with the token is allowed",
     bookmarklet.ok === true, JSON.stringify(bookmarklet));
+
+  // The token must never travel in the shared bundle — it is only readable from
+  // the injecting tag, so a cross-origin <script src> of client.js cannot harvest it.
+  check("the token is not baked into the served client.js bundle",
+    !bridge.readClient().body.includes(TOKEN), "token found in bundle body");
 
   await new Promise((resolve) => bridge.http.close(resolve));
 }
