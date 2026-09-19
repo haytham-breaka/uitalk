@@ -179,12 +179,44 @@ globalThis.UITalk = (() => {
     const rules = [];
     const skipped = [];
 
-    const walk = (list, context) => {
+    // Whether a conditional group applies right now. A rule inside an @media that
+    // doesn't match this viewport, or an @supports the browser rejects, is still
+    // worth reporting — it's the rule that *would* win on a phone — but it must not
+    // be the winner here, or the agent gets sent to edit the phone-width rule to
+    // change the desktop look. Anything this can't judge (an @container, a browser
+    // without matchMedia) counts as active: wrongly excluding a rule is the worse
+    // error.
+    const applies = (rule) => {
+      const kind = rule.constructor.name;
+      if (kind === "CSSMediaRule" || rule.media) {
+        const q = rule.conditionText ?? rule.media?.mediaText ?? "";
+        if (!q || typeof matchMedia !== "function") return true;
+        try {
+          return matchMedia(q).matches;
+        } catch {
+          return true;
+        }
+      }
+      if (kind === "CSSSupportsRule") {
+        const q = rule.conditionText ?? "";
+        if (!q || typeof CSS === "undefined" || typeof CSS.supports !== "function") return true;
+        try {
+          return CSS.supports(q);
+        } catch {
+          return true;
+        }
+      }
+      return true; // @layer always applies; @container and the rest can't be judged from here
+    };
+
+    const walk = (list, context, active = true) => {
       for (const rule of list ?? []) {
         if (rule.cssRules && !rule.selectorText) {
-          // @media, @supports, @layer: carry the condition down with the rules.
+          // @media, @supports, @layer: carry the condition down with the rules,
+          // and whether it currently holds.
           const label = rule.conditionText ?? rule.media?.mediaText ?? rule.name ?? "";
-          walk(rule.cssRules, label ? [...context, `${rule.constructor.name.replace("CSS", "").replace("Rule", "")}(${label})`] : context);
+          const kind = rule.constructor.name.replace("CSS", "").replace("Rule", "");
+          walk(rule.cssRules, label ? [...context, `${kind} ${label}`] : context, active && applies(rule));
           continue;
         }
         if (!rule.selectorText) continue;
@@ -222,6 +254,7 @@ globalThis.UITalk = (() => {
             specificity: specificity(part),
             declarations: kept,
             important: important.length ? important : undefined,
+            active: active ? undefined : false,
           });
           break;
         }
@@ -260,7 +293,7 @@ globalThis.UITalk = (() => {
                   (r.specificity[1] === held.specificity[1] &&
                     (r.specificity[2] > held.specificity[2] ||
                       (r.specificity[2] === held.specificity[2] && r.order > held.order)))))));
-        if (beats && !r.state) {
+        if (beats && !r.state && r.active !== false) {
           winnerFor[prop] = { value, selector: r.selector, source: r.source, specificity: r.specificity, order: r.order, important };
         }
       }

@@ -36,6 +36,16 @@ class FakeSheet {
 window.CSSStyleSheet = FakeSheet;
 window.document.adoptedStyleSheets = [];
 window.CSS = { escape: (v) => String(v).replace(/([^\w-])/g, "\\$1") }; // jsdom has no CSS.escape
+// jsdom has no matchMedia either. A tiny evaluator for the width queries the tests
+// use, against jsdom's 1024px viewport, so an @media block can be inactive here;
+// and a CSS.supports that rejects one deliberately-unsupported condition.
+window.matchMedia = (q) => {
+  const w = window.innerWidth;
+  const max = q.match(/max-width:\s*(\d+)px/);
+  const min = q.match(/min-width:\s*(\d+)px/);
+  return { media: q, matches: (!max || w <= Number(max[1])) && (!min || w >= Number(min[1])) };
+};
+window.CSS.supports = (q) => !/nonsense-property/.test(q);
 window.devicePixelRatio = 2;
 window.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 window.WebSocket = class { constructor() { this.readyState = 0; } send() {} close() {} };
@@ -617,6 +627,44 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
     /not a line/.test(vue.note ?? ""), vue.note);
   check("and still names the component", vue.component === "Widget", vue.component);
   vueEl.remove();
+}
+
+// --- cascade correctness: a rule inside an @media/@supports block that does not
+// currently apply is reported, but must never be the winner — it's the rule that
+// would win at a phone width, not the one controlling what the user sees now
+{
+  const wrap = window.document.createElement("div");
+  wrap.innerHTML = `<button class="cond-target">x</button>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  // jsdom's viewport is 1024px: (max-width: 600px) is inactive, (min-width: 600px) active.
+  style.textContent = `
+    .cond-target { border-radius: 4px; padding: 2px; }
+    @media (max-width: 600px) { .cond-target { border-radius: 0; } }
+    @media (min-width: 600px) { .cond-target { padding: 9px; } }
+    @supports (nonsense-property: 1) { .cond-target { padding: 99px; } }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".cond-target" });
+  check("an @media block that does not match the viewport cannot supply the winner",
+    out.winners?.["border-radius"]?.value === "4px", JSON.stringify(out.winners?.["border-radius"]));
+  const inactive = out.rules.find((r) => /max-width/.test(r.context?.[0] ?? ""));
+  check("but the inactive rule is still reported, marked as such",
+    inactive?.active === false, JSON.stringify(inactive));
+  check("an @media block that does match competes normally",
+    out.winners?.padding?.value === "9px", JSON.stringify(out.winners?.padding));
+  check("the context label reads as a condition, not doubled parentheses",
+    out.rules.some((r) => r.context?.[0] === "Media (min-width: 600px)"),
+    JSON.stringify(out.rules.map((r) => r.context?.[0]).filter(Boolean)));
+  const supports = out.rules.find((r) => /Supports/.test(r.context?.[0] ?? ""));
+  check("an @supports block the browser rejects is inactive too",
+    supports ? supports.active === false && out.winners?.padding?.value === "9px" : true,
+    supports ? JSON.stringify(supports) : "jsdom did not parse @supports, nothing to assert");
+
+  style.remove();
+  wrap.remove();
 }
 
 // --- capture over time: a still frame cannot show motion
