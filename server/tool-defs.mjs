@@ -18,8 +18,9 @@ export const failed = (err) => ({
  * @param {(method: string, params?: unknown, timeout?: number) => Promise<any>} callPage
  * @param {(method: string, message: string) => void} report
  * @param {((path: string, needles: string[]) => any) | null} findInHtml
+ * @param {((name: string, definingFile: string) => any) | null} countUsages
  */
-export function toolDefinitions(callPage, report = () => {}, findInHtml = null) {
+export function toolDefinitions(callPage, report = () => {}, findInHtml = null, countUsages = null) {
   const ask = async (method, params) => {
     try {
       return text(await callPage(method, params));
@@ -161,30 +162,53 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
         "of the answer — 'exact' (this element, file and line), 'component' (the right file, " +
         "not necessarily the right line — always true for Vue), or 'candidate' (a served-HTML " +
         "text match) — and the evidence behind it. Treat anything short of 'exact' as a lead to " +
-        "confirm, not a location to edit blind. Use this before hunting with grep.",
+        "confirm, not a location to edit blind. When the resolved component is also rendered " +
+        "elsewhere in the project, a 'reuse' field says how many other files — see ask_choice " +
+        "for what to do about it. Use this before hunting with grep.",
       schema: {
         ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
         selector: { type: "string", description: "A CSS selector, when nothing is selected" },
       },
       run: async (args) => {
         try {
-          const found = await callPage("locateSource", args);
-          if (found.confidence !== "none" || !findInHtml) return text(found);
-          const id = found.element ?? {};
-          const guess = findInHtml(found.page?.path ?? "/", [
-            id.id && `id="${id.id}"`,
-            id.testId && `data-testid="${id.testId}"`,
-            id.aria && `aria-label="${id.aria}"`,
-            id.text,
-            id.classes?.[0] && `class="${id.classes[0]}`,
-          ]);
-          if (!guess.found) return text(found);
-          return text({
-            ...found,
-            confidence: "candidate",
-            evidence: [{ kind: "served-html-search", line: guess.line, column: guess.column, matched: guess.matched, excerpt: guess.excerpt }],
-            note: "a text match in the HTML the bridge served, not a source file — confirm it before editing",
-          });
+          let found = await callPage("locateSource", args);
+
+          if (found.confidence === "none" && findInHtml) {
+            const id = found.element ?? {};
+            const guess = findInHtml(found.page?.path ?? "/", [
+              id.id && `id="${id.id}"`,
+              id.testId && `data-testid="${id.testId}"`,
+              id.aria && `aria-label="${id.aria}"`,
+              id.text,
+              id.classes?.[0] && `class="${id.classes[0]}`,
+            ]);
+            if (guess.found) {
+              found = {
+                ...found,
+                confidence: "candidate",
+                evidence: [{ kind: "served-html-search", line: guess.line, column: guess.column, matched: guess.matched, excerpt: guess.excerpt }],
+                note: "a text match in the HTML the bridge served, not a source file — confirm it before editing",
+              };
+            }
+          }
+
+          if (found.component && found.source?.file && countUsages) {
+            const reuse = countUsages(found.component, found.source.file);
+            if (reuse && reuse.otherFiles > 0) {
+              found = {
+                ...found,
+                reuse: {
+                  otherFiles: reuse.otherFiles,
+                  note:
+                    `also rendered in ${reuse.otherFiles}${reuse.capped ? "+" : ""} other file(s) in this ` +
+                    `project — a change to the component itself would affect it everywhere. If the request ` +
+                    `doesn't already say which is meant, ask_choice before deciding.`,
+                },
+              };
+            }
+          }
+
+          return text(found);
         } catch (err) {
           report("locate_source", err.message);
           return failed(err);
