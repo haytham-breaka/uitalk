@@ -176,6 +176,33 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     countUsages(proj, "MyWidget", "src/components/Button.tsx")?.otherFiles === 1);
 }
 
+// -------------------------------------------------- project-source candidates
+{
+  const { findSourceCandidates } = await import("../server/candidates.mjs");
+  const proj = join(sandbox, "candidates-project");
+  mkdirSync(join(proj, "src", "components"), { recursive: true });
+  mkdirSync(join(proj, "node_modules", "some-lib"), { recursive: true });
+
+  writeFileSync(
+    join(proj, "src", "components", "CheckoutButton.tsx"),
+    'export function CheckoutButton() {\n  return <button data-testid="checkout" className="btn">Checkout</button>;\n}\n',
+  );
+  writeFileSync(join(proj, "src", "components", "Other.tsx"), "export const x = 'checkout'; // just a mention\n");
+  writeFileSync(join(proj, "node_modules", "some-lib", "fake.tsx"), 'data-testid="checkout"\n');
+
+  const hits = findSourceCandidates(proj, ['data-testid="checkout"', 'id="checkout"', "Checkout"]);
+  check("the strongest identifier wins over a weaker one",
+    hits.length === 1 && hits[0].file.includes("CheckoutButton"), JSON.stringify(hits));
+  check("reports the matching line", hits[0]?.line === 2, JSON.stringify(hits));
+  check("node_modules is excluded", !hits.some((h) => h.file.includes("node_modules")), JSON.stringify(hits));
+
+  const fallback = findSourceCandidates(proj, ['id="not-there"', "Checkout"]);
+  check("falls back to a weaker identifier when the strongest finds nothing everywhere",
+    fallback.length >= 1 && fallback.every((h) => h.matched === "Checkout"), JSON.stringify(fallback));
+
+  check("an empty needle list finds nothing", findSourceCandidates(proj, [undefined, null, ""]).length === 0);
+}
+
 // --------------------------------------------------------------- snapshots
 {
   const snapshots = await import("../server/snapshots.mjs");
@@ -465,6 +492,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   let answer = { ok: true };
   let htmlGuess = { found: true, line: 7, column: 1, matched: "go", excerpt: "<button>" };
   let usageAnswer = null;
+  let sourceCandidates = [];
 
   const srv = createPageServer(
     async (method, params) => {
@@ -475,6 +503,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     (method, message) => failures.push({ method, message }),
     (path, needles) => (typeof htmlGuess === "function" ? htmlGuess(path, needles) : htmlGuess),
     (name, file) => (typeof usageAnswer === "function" ? usageAnswer(name, file) : usageAnswer),
+    (needles) => (typeof sourceCandidates === "function" ? sourceCandidates(needles) : sourceCandidates),
   );
 
   const tools = srv.instance._registeredTools;
@@ -508,16 +537,27 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   const loc = await run("locate_source", { ref: 1 });
   check("locate_source reports the confidence that answered", /"confidence": "exact"/.test(loc.content[0].text));
 
-  answer = { confidence: "none", source: null, evidence: [], element: { testId: "go" }, page: { path: "/about" } };
+  // no framework metadata: the project's own source is searched before the
+  // served HTML is, since it points at a file worth opening
+  answer = { confidence: "none", source: null, evidence: [], element: { testId: "checkout" }, page: { path: "/about" } };
+  sourceCandidates = [{ file: "src/components/CheckoutButton.tsx", line: 5, matched: 'data-testid="checkout"', excerpt: "<button data-testid=\"checkout\">" }];
+  const viaSource = await run("locate_source", { ref: 1 });
+  check("the project's own source is preferred over the served html",
+    /"confidence": "candidate"/.test(viaSource.content[0].text) && /"kind": "project-source-search"/.test(viaSource.content[0].text),
+    viaSource.content[0].text);
+  check("the served html is not even consulted once source candidates answer",
+    !/"kind": "served-html-search"/.test(viaSource.content[0].text), viaSource.content[0].text);
+  sourceCandidates = [];
+
   const fallback = await run("locate_source", { ref: 1 });
-  check("with no framework metadata it falls back to the served html",
+  check("with no source match either, it falls back to the served html",
     /"confidence": "candidate"/.test(fallback.content[0].text), fallback.content[0].text.slice(0, 80));
   check("carrying the served-html evidence that answered it",
     /"kind": "served-html-search"/.test(fallback.content[0].text), fallback.content[0].text);
 
   htmlGuess = { found: false, reason: "none of 1 identifiers appear in the served HTML" };
   const stillNone = await run("locate_source", { ref: 1 });
-  check("and stays 'none' when even the served html has no match",
+  check("and stays 'none' when neither the source nor the served html has a match",
     /"confidence": "none"/.test(stillNone.content[0].text), stillNone.content[0].text.slice(0, 80));
   htmlGuess = { found: true, line: 7, column: 1, matched: "go", excerpt: "<button>" };
 
