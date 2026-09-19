@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, existsSync } from "node:fs";
 import { resolve, relative, join, dirname, sep, isAbsolute } from "node:path";
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
+import { countUsages } from "./usage.mjs";
 
 const DEFAULT_MODEL = {
   openai: "gpt-5",
@@ -416,7 +417,10 @@ export function createAdapter({
   const model = config.agentModel || DEFAULT_MODEL[name];
   const cfg = { base: (config.agentBaseUrl ?? "").replace(/\/$/, "") };
 
-  const defs = [...toolDefinitions(callPage, report, null), ...fileTools(project, report)];
+  const defs = [
+    ...toolDefinitions(callPage, report, null, (name, file) => countUsages(project, name, file)),
+    ...fileTools(project, report),
+  ];
   const system =
     `${systemPrompt}\n\n` +
     `You are driving this page through tools over an HTTP API. You also have file tools ` +

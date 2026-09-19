@@ -47,9 +47,10 @@ function toZod(def) {
  *   panel too. Without it a tool failure is visible only to the agent, and the user
  *   sees whatever the agent decides to say about it — which may be a guess.
  * @param {((path: string, needles: string[]) => any) | null} [findInHtml]
+ * @param {((name: string, definingFile: string) => any) | null} [countUsages]
  */
-export function createPageServer(callPage, report = () => {}, findInHtml = null) {
-  const defs = toolDefinitions(callPage, report, findInHtml);
+export function createPageServer(callPage, report = () => {}, findInHtml = null, countUsages = null) {
+  const defs = toolDefinitions(callPage, report, findInHtml, countUsages);
 
   return createSdkMcpServer({
     name: "page",
