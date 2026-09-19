@@ -92,5 +92,82 @@ check("a region past the container's edge is clamped to what exists",
   `sx+sw=${over.cut.sx + over.cut.sw} of ${over.width}`);
 check("and says so", over.warnings.some((w) => /cropped/.test(w)), over.warnings.join(" | ") || "no warning");
 
+// An SVG/foreignObject loads no external resource, so a CSS background url or a
+// responsive <img> source that is not embedded renders blank. These assert the
+// output is self-contained (and that a failure is reported, not swallowed).
+{
+  const savedGCS = window.getComputedStyle;
+  const savedFetch = window.fetch;
+  const restore = () => { window.getComputedStyle = savedGCS; window.fetch = savedFetch; };
+
+  window.document.body.innerHTML =
+    `<div class="card">` +
+    `<img class="photo" src="http://127.0.0.1:8400/a.png" srcset="http://127.0.0.1:8400/a-2x.png 2x">` +
+    `<picture><source srcset="http://127.0.0.1:8400/s.webp"><img class="pic" src="http://127.0.0.1:8400/p.png"></picture>` +
+    `</div>`;
+  window.getComputedStyle = (el) => ({
+    getPropertyValue: (p) =>
+      p === "background-image" && el.classList?.contains("card")
+        ? `url("http://127.0.0.1:8400/bg.png"), linear-gradient(rgb(255,255,255), rgb(0,0,0))`
+        : ({ display: "block" }[p] ?? ""),
+    position: "static", display: "block", backgroundColor: "rgb(0,0,0)", visibility: "visible", opacity: "1",
+  });
+  const card = window.document.querySelector(".card");
+
+  // Everything embeds cleanly.
+  window.fetch = async () => ({ ok: true, headers: { get: () => "image/png" }, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer });
+  {
+    const out = await window.UITalkRaster.compose(card, {});
+    check("a CSS background url is embedded as a data URI", /url\(data:image\/png;base64,/.test(out.svg),
+      out.svg.match(/background-image:[^;"]*/)?.[0]?.slice(0, 80));
+    check("the external background url is gone from the output", !/bg\.png/.test(out.svg));
+    check("a gradient layer beside the url survives", /linear-gradient/.test(out.svg));
+    check("a responsive <img> srcset is dropped so it cannot override the embedded src",
+      !/srcset/.test(out.svg), out.svg.slice(0, 0));
+    check("a <picture> <source> is removed for the same reason", !/<source/.test(out.svg));
+    check("the <img> src itself is embedded as a data URI", /<img[^>]*src="data:image\/png/.test(out.svg));
+    check("clean embedding reports no warnings", out.warnings.length === 0, out.warnings.join(" | "));
+  }
+
+  // A data: background is already self-contained: left as-is, never refetched.
+  // No <img> here, so a fetch of any kind would be a bug we want to catch.
+  window.document.body.innerHTML = `<div class="card"></div>`;
+  const cardOnly = window.document.querySelector(".card");
+  window.getComputedStyle = (el) => ({
+    getPropertyValue: (p) =>
+      p === "background-image" && el.classList?.contains("card")
+        ? `url("data:image/png;base64,QUJD")`
+        : ({ display: "block" }[p] ?? ""),
+    position: "static", display: "block", backgroundColor: "rgb(0,0,0)", visibility: "visible", opacity: "1",
+  });
+  window.fetch = async () => { throw new Error("a data: url must not be refetched"); };
+  {
+    const out = await window.UITalkRaster.compose(cardOnly, {});
+    check("a background that is already a data URI is kept without refetching",
+      /data:image\/png;base64,QUJD/.test(out.svg) && out.warnings.length === 0, out.warnings.join(" | "));
+  }
+
+  // A background that cannot be fetched is reported, not silently dropped.
+  window.document.body.innerHTML = `<div class="card"></div>`;
+  const failCard = window.document.querySelector(".card");
+  window.getComputedStyle = (el) => ({
+    getPropertyValue: (p) =>
+      p === "background-image" && el.classList?.contains("card")
+        ? `url("http://evil.example/x.png")`
+        : ({ display: "block" }[p] ?? ""),
+    position: "static", display: "block", backgroundColor: "rgb(0,0,0)", visibility: "visible", opacity: "1",
+  });
+  window.fetch = async () => { throw new Error("offline"); };
+  {
+    const out = await window.UITalkRaster.compose(failCard, {});
+    check("a background that fails to embed is warned about, not swallowed",
+      out.warnings.some((w) => /could not embed background/.test(w)), out.warnings.join(" | "));
+    check("and the failed url is not left dangling in the output", !/evil\.example/.test(out.svg));
+  }
+
+  restore();
+  window.document.body.innerHTML = "";
+}
+
 console.log(fail.length ? `\n${fail.length} failing` : "\nall checks passed");
 process.exit(fail.length ? 1 : 0);

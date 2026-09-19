@@ -83,6 +83,18 @@ globalThis.UITalkRaster = (() => {
     clone.setAttribute("style", css);
     clone.removeAttribute("class"); // styles are flattened; class rules cannot apply inside the SVG
 
+    if (source.tagName === "IMG") {
+      // Inside the SVG the browser still runs srcset/<picture> selection, but the
+      // candidate it picks was never embedded, so it renders blank and overrides
+      // the data URI we put on src. Pin the clone to whatever the page actually
+      // shows (currentSrc), then drop the responsive attributes so nothing else
+      // can win. The matching <source> elements are removed in embedImages().
+      const chosen = source.currentSrc || source.getAttribute("src");
+      if (chosen) clone.setAttribute("src", chosen);
+      clone.removeAttribute("srcset");
+      clone.removeAttribute("sizes");
+    }
+
     const sourceKids = [...source.childNodes];
     const cloneKids = [...clone.childNodes];
     for (let i = 0; i < sourceKids.length; i++) {
@@ -90,7 +102,41 @@ globalThis.UITalkRaster = (() => {
     }
   }
 
+  // The url() references inside one inline style, embedded as data URIs. Used for
+  // background-image, which flatten() copies onto the clone but which the isolated
+  // SVG would otherwise try — and fail — to fetch. Gradients and other non-url
+  // values are left untouched; a url that cannot be embedded is dropped to `none`
+  // (rather than left dangling) and reported, the same as a missing <img>.
+  async function embedStyleUrls(el, kind, warnings) {
+    let style = el.getAttribute("style") ?? "";
+    if (!style.includes("url(")) return;
+    for (const raw of style.match(/url\(["']?([^"')]+)["']?\)/g) ?? []) {
+      const url = raw.replace(/^url\(["']?|["']?\)$/g, "");
+      if (url.startsWith("data:")) continue;
+      try {
+        style = style.replace(raw, `url(${await fetchAsDataUri(new URL(url, location.href).href)})`);
+      } catch (err) {
+        style = style.replace(raw, "none");
+        warnings.push(
+          err?.name === "AbortError"
+            ? `${kind} ${url.slice(0, 60)} was still loading; captured without it`
+            : `could not embed ${kind} ${url.slice(0, 60)} (likely cross-origin); it renders blank`,
+        );
+      }
+    }
+    el.setAttribute("style", style);
+  }
+
+  async function embedBackgrounds(clone, warnings) {
+    const els = [clone, ...clone.querySelectorAll("*")];
+    await Promise.all(els.map((el) => embedStyleUrls(el, "background", warnings)));
+  }
+
   async function embedImages(clone, warnings) {
+    // A <source> carries its own srcset that the isolated SVG would prefer over
+    // the <img> we embed, so drop them; the flattened <img src> is authoritative.
+    for (const s of clone.querySelectorAll("source")) s.remove();
+
     const jobs = [...clone.querySelectorAll("img")].map(async (img) => {
       const src = img.getAttribute("src");
       if (!src || src.startsWith("data:")) return;
@@ -177,6 +223,7 @@ globalThis.UITalkRaster = (() => {
     const clone = el.cloneNode(true);
     flatten(el, clone, warnings, true);
     await embedImages(clone, warnings);
+    await embedBackgrounds(clone, warnings);
     const fontCss = await embedFonts(warnings);
 
     const w = Math.ceil(rect.width) + pad * 2;
