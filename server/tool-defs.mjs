@@ -189,9 +189,13 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
       always: true,
       description:
         "Which CSS rules actually style an element, in cascade order, with the stylesheet each " +
-        "came from and which rule wins each property. Computed values say what a property ended " +
-        "up as, never what set it — the difference between editing the right line and editing " +
-        "one that loses the cascade. Call this before writing CSS to source.",
+        "came from and which rule most likely wins each property by specificity, !important, " +
+        "and source order. Computed values say what a property ended up as, never what set it — " +
+        "the difference between editing the right line and editing one that loses the cascade. " +
+        "This is not a full CSS engine: cascade layers, multiple stylesheet origins, CSS nesting, " +
+        "and the exact specificity of :is()/:not() arguments are not modeled, so treat the named " +
+        "winner as a strong hint, not a guarantee, when a selector uses those. Call this before " +
+        "writing CSS to source.",
       schema: {
         ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
         selector: { type: "string", description: "A CSS selector, when nothing is selected" },
