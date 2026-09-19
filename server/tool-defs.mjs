@@ -170,9 +170,11 @@ export function toolDefinitions(
         "answer — 'exact' (this element, file and line), 'component' (the right file, not " +
         "necessarily the right line — always true for Vue), or 'candidate' (a text match, in " +
         "source or served HTML) — and the evidence behind it. Treat anything short of 'exact' " +
-        "as a lead to confirm, not a location to edit blind. When the resolved component is " +
-        "also rendered elsewhere in the project, a 'reuse' field says how many other files — " +
-        "see ask_choice for what to do about it. Use this before hunting with grep.",
+        "as a lead to confirm, not a location to edit blind. When the resolved component also " +
+        "appears elsewhere, a 'reuse' field breaks that into 'confirmedFiles' (other files that " +
+        "actually import this exact component) and 'possibleFiles' (a same-named tag whose " +
+        "import couldn't be verified) — see ask_choice for what to do with a confirmed one. " +
+        "Use this before hunting with grep.",
       schema: {
         ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
         selector: { type: "string", description: "A CSS selector, when nothing is selected" },
@@ -232,15 +234,23 @@ export function toolDefinitions(
 
           if (found.component && found.source?.file && countUsages) {
             const reuse = countUsages(found.component, found.source.file);
-            if (reuse && reuse.otherFiles > 0) {
+            if (reuse && (reuse.confirmedFiles > 0 || reuse.possibleFiles > 0)) {
+              const confirmedNote = reuse.confirmedFiles
+                ? `confirmed in ${reuse.confirmedFiles}${reuse.capped ? "+" : ""} other file(s) that import ` +
+                  `this exact component — a change to the component itself would affect it everywhere. If ` +
+                  `the request doesn't already say which is meant, ask_choice before deciding.`
+                : null;
+              const possibleNote = reuse.possibleFiles
+                ? `${reuse.possibleFiles} other file(s) render a same-named tag, but the import couldn't be ` +
+                  `confirmed as this same component (a namesake elsewhere, a path alias, or no import found) ` +
+                  `— worth a look before assuming they're the same, not decisive on its own.`
+                : null;
               found = {
                 ...found,
                 reuse: {
-                  otherFiles: reuse.otherFiles,
-                  note:
-                    `also rendered in ${reuse.otherFiles}${reuse.capped ? "+" : ""} other file(s) in this ` +
-                    `project — a change to the component itself would affect it everywhere. If the request ` +
-                    `doesn't already say which is meant, ask_choice before deciding.`,
+                  confirmedFiles: reuse.confirmedFiles,
+                  possibleFiles: reuse.possibleFiles,
+                  note: [confirmedNote, possibleNote].filter(Boolean).join(" "),
                 },
               };
             }
