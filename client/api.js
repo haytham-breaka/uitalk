@@ -99,16 +99,53 @@ globalThis.UITalk = (() => {
   // decided it. That is the difference between editing the right line and editing a
   // line that loses the cascade, so the rules themselves have to be reported.
 
+  // A selector list's commas, but only the ones not inside a nested (...) —
+  // :is(.a, :not(.b, .c)) has one top-level argument, not four.
+  const splitSelectorList = (list) => {
+    const parts = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
+      if (c === "(") depth++;
+      else if (c === ")") depth--;
+      else if (c === "," && depth === 0) {
+        parts.push(list.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(list.slice(start));
+    return parts.map((s) => s.trim()).filter(Boolean);
+  };
+
+  const higherSpecificity = (a, b) => {
+    if (a[0] !== b[0]) return a[0] > b[0] ? a : b;
+    if (a[1] !== b[1]) return a[1] > b[1] ? a : b;
+    return a[2] >= b[2] ? a : b;
+  };
+
   const specificity = (selector) => {
     // Good enough to order rules and explain why one won; not a full CSS engine —
-    // :is()/:not() are scored as an ordinary pseudo-class plus their argument's own
-    // selectors, rather than by the spec's "most specific argument" rule, and cascade
-    // layers, multiple stylesheet origins, and CSS nesting aren't modeled at all.
-    const bare = selector.replace(/:where\((?:[^()]|\([^()]*\))*\)/g, ""); // :where() is always zero-specificity
+    // cascade layers, multiple stylesheet origins, and CSS nesting aren't modeled,
+    // and :is()/:not() nested more than one level deep falls back to the same
+    // approximation as before (scored as an ordinary pseudo-class).
+    let bare = selector.replace(/:where\((?:[^()]|\([^()]*\))*\)/g, ""); // :where() is always zero-specificity
+
+    // :is()/:not() take the specificity of their most specific argument, not
+    // the sum of everything inside plus one for the pseudo-class itself.
+    let extra = [0, 0, 0];
+    bare = bare.replace(/:(?:is|not)\((?:[^()]|\([^()]*\))*\)/g, (match) => {
+      const inner = match.slice(match.indexOf("(") + 1, -1);
+      const args = splitSelectorList(inner).map(specificity);
+      const best = args.reduce(higherSpecificity, [0, 0, 0]);
+      extra = [extra[0] + best[0], extra[1] + best[1], extra[2] + best[2]];
+      return "";
+    });
+
     const ids = (bare.match(/#[\w-]+/g) ?? []).length;
     const classes = (bare.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g) ?? []).length;
     const types = (bare.match(/(^|[\s>+~])[a-zA-Z][\w-]*/g) ?? []).length;
-    return [ids, classes, types];
+    return [ids + extra[0], classes + extra[1], types + extra[2]];
   };
 
   /** Where a stylesheet came from, including Vite's dev-time marker. */
@@ -152,8 +189,11 @@ globalThis.UITalk = (() => {
         }
         if (!rule.selectorText) continue;
 
-        // A rule's selector list matches if any part does; report the part that did.
-        for (const part of rule.selectorText.split(",").map((x) => x.trim())) {
+        // A rule's selector list matches if any part does; report the part that
+        // did. A plain split(",") would also break on the comma inside a single
+        // :is(#a, .b) argument list, turning it into two invalid fragments that
+        // throw on .matches() and silently drop the whole rule.
+        for (const part of splitSelectorList(rule.selectorText)) {
           // Strip pseudo-elements and state pseudo-classes so the rule that styles a
           // hover is still reported as applying to this element.
           const testable = part.replace(/::[\w-]+(\([^)]*\))?/g, "").replace(

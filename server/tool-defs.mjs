@@ -272,10 +272,11 @@ export function toolDefinitions(
         "came from and which rule most likely wins each property by specificity, !important, " +
         "and source order. Computed values say what a property ended up as, never what set it — " +
         "the difference between editing the right line and editing one that loses the cascade. " +
-        "This is not a full CSS engine: cascade layers, multiple stylesheet origins, CSS nesting, " +
-        "and the exact specificity of :is()/:not() arguments are not modeled, so treat the named " +
-        "winner as a strong hint, not a guarantee, when a selector uses those. Call this before " +
-        "writing CSS to source.",
+        "This is not a full CSS engine: cascade layers, multiple stylesheet origins, and CSS " +
+        "nesting are not modeled, so treat the named winner as a strong hint, not a guarantee, " +
+        "when a selector uses those. :is()/:not()/:where() are scored correctly one level deep " +
+        "(the specificity of the most specific argument, :where() always zero); nested more than " +
+        "that, they fall back to the same approximation. Call this before writing CSS to source.",
       schema: {
         ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
         selector: { type: "string", description: "A CSS selector, when nothing is selected" },
