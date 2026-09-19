@@ -195,6 +195,52 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("a snapshot of a dirty tree restores the dirty state",
     readFileSync(join(repo, "style.css"), "utf8").includes("rebeccapurple"),
     readFileSync(join(repo, "style.css"), "utf8").trim());
+
+  // Once the agent's turn has ended, captureAfter() freezes what it actually did,
+  // so revert can be scoped to that instead of "everything that now differs."
+  writeFileSync(join(repo, "style.css"), ".a { color: red }\n");
+  writeFileSync(join(repo, "kept.css"), ".k { color: gray }\n");
+  git("add", ".");
+  git("commit", "-qm", "baseline for the capture tests");
+
+  {
+    const snap0 = await snapshots.snapshot(repo, "agent creates a file in a new directory");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "NewButton.tsx"), "brand new\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("a file the agent created is now cleaned up on revert",
+      out.removed.includes(join("src", "NewButton.tsx")), JSON.stringify(out));
+    check("and actually removed from disk", !existsSync(join(repo, "src", "NewButton.tsx")));
+    check("its now-empty directory is cleaned up too", !existsSync(join(repo, "src")));
+  }
+
+  {
+    const snap0 = await snapshots.snapshot(repo, "restyle style.css");
+    writeFileSync(join(repo, "style.css"), ".a { color: blue }\n");
+    const snap = await snapshots.captureAfter(repo, snap0); // the agent's turn ends here
+    writeFileSync(join(repo, "style.css"), ".a { color: green } /* user kept editing */\n");
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("a file edited again after the agent is skipped, not clobbered",
+      out.skipped.includes("style.css") && !out.reverted.includes("style.css"), JSON.stringify(out));
+    check("the user's later edit survives untouched",
+      readFileSync(join(repo, "style.css"), "utf8").includes("user kept editing"));
+  }
+
+  {
+    const snap0 = await snapshots.snapshot(repo, "restyle style.css again");
+    writeFileSync(join(repo, "style.css"), ".a { color: teal }\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+    writeFileSync(join(repo, "kept.css"), ".k { color: cornflowerblue } /* unrelated work */\n");
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("revert is scoped to files the agent touched, not everything since",
+      out.reverted.includes("style.css") && !out.reverted.includes("kept.css"), JSON.stringify(out));
+    check("an unrelated file the agent never touched is left alone",
+      readFileSync(join(repo, "kept.css"), "utf8").includes("unrelated work"));
+  }
 }
 
 // ------------------------------------------------------------------- proxy

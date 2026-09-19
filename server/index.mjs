@@ -386,17 +386,36 @@ wss.on("connection", (ws) => {
           }
           try {
             const out = await snapshots.revertTo(PROJECT, lastChange.snap);
-            log(`reverted ${out.reverted.length} file(s) to before "${lastChange.label}"`);
-            toPanel({ kind: "reverted", ok: true, files: out.reverted, note: out.note, label: lastChange.label });
+            log(
+              `revert of "${lastChange.label}": restored ${out.reverted.length}, ` +
+                `removed ${out.removed.length}, left ${out.skipped.length} alone (edited again since)`,
+            );
+            toPanel({
+              kind: "reverted",
+              ok: true,
+              files: out.reverted,
+              removed: out.removed,
+              skipped: out.skipped,
+              note: out.note,
+              label: lastChange.label,
+            });
+            const summary =
+              [
+                out.reverted.length ? `restored: ${out.reverted.join(", ")}` : null,
+                out.removed.length ? `removed: ${out.removed.join(", ")}` : null,
+                out.skipped.length
+                  ? `left alone because they were edited again since: ${out.skipped.join(", ")}`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(". ") || "nothing changed";
             notifyAgents(
-              `The user reverted the last change ("${lastChange.label}"). These files went back to ` +
-                `how they were before it: ${out.reverted.join(", ") || "(none changed)"}. ` +
+              `The user reverted the last change ("${lastChange.label}"). ${summary}. ` +
                 `Do not re-apply it unless asked.`,
             );
             pushToAgent(
-              `I reverted the last change ("${lastChange.label}") in the working tree. ` +
-                `These files went back to how they were before you edited them: ` +
-                `${out.reverted.join(", ") || "(none changed)"}. Do not re-apply it unless I ask.`,
+              `I reverted the last change ("${lastChange.label}") in the working tree. ${summary}. ` +
+                `Do not re-apply it unless I ask.`,
             );
             lastChange = null;
           } catch (err) {
@@ -527,6 +546,18 @@ function noteTokens(total) {
   if (total > context.tokens) context.tokens = total;
   context.percent = Math.round((context.tokens / config.contextTokens) * 1000) / 10;
   toPanel({ kind: "context", tokens: context.tokens, percent: context.percent, limit: config.contextTokens });
+}
+
+/**
+ * Turn-end, shared across every agent mode. Also where the undo snapshot's
+ * post-edit state gets frozen, once, before a later user edit could otherwise
+ * be mistaken for the agent's own change. See snapshots.mjs's captureAfter().
+ */
+async function noteTurnEnded() {
+  if (lastChange?.snap && !lastChange.snap.postCaptured) {
+    lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap);
+  }
+  maybeCompact();
 }
 
 /** Compact between turns, never inside one: mid-turn the history is still in use. */
@@ -760,7 +791,7 @@ function runAdapter() {
       toPanel,
       record,
       onUsage: noteTokens,
-      onTurnEnd: maybeCompact,
+      onTurnEnd: () => void noteTurnEnded(),
       log,
       systemPrompt: GUIDANCE,
     });
@@ -905,7 +936,7 @@ async function runOpencode() {
     if (t.quiet) return t.resolve(t.said.trim());
     if (t.said.trim()) record("agent", t.said.trim());
     toPanel({ kind: "turn_end" });
-    maybeCompact();
+    void noteTurnEnded();
   }
 
   function failTurn(message) {
@@ -1101,7 +1132,7 @@ function relay(event) {
       record("agent", turnText.trim());
       turnText = "";
       toPanel({ kind: "turn_end", text: event.subtype === "success" ? undefined : event.subtype });
-      maybeCompact();
+      void noteTurnEnded();
       return;
     }
   }
