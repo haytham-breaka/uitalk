@@ -28,12 +28,35 @@ To try changes against a real app, `npm run install-plugin` symlinks the checkou
 live in the next session.
 
 ```
-.claude-plugin/   plugin and marketplace manifests
-bin/               launcher (cross-platform Node, no bash dependency)
-server/            proxy, socket, page-tool definitions, per-agent-mode runners
-client/            the injected panel, concatenated and served as one file
-tools/             test suites and agent-driven probes — see Testing below
-docs/media/        the demo clips linked from the README
+.claude-plugin/
+  plugin.json     plugin manifest
+SKILL.md          the skill Claude Code invokes as /uitalk
+bin/
+  uitalk          launcher (Node, cross-platform); on PATH while the plugin is enabled
+  uitalk.cmd      Windows shim for the same
+server/
+  index.mjs       proxy + socket + whichever session is answering
+  tool-defs.mjs   the 12 page tools, defined once, owned by no agent SDK
+  page-tools.mjs  those definitions shaped for the Claude Agent SDK
+  adapter.mjs     the same tools driven by your own key, plus file tools
+  mcp.mjs         the same tools over stdio, for any MCP client
+  registry.mjs    which bridges are running, on which ports
+  settings.mjs    layered per-app settings, validated and clamped; key lookup
+  snapshots.mjs   git-backed snapshot and revert of a committed change
+  usage.mjs       how widely a component is reused, for the ask-before-rippling check
+  candidates.mjs  project-source search behind locate_source's last fallback
+  proxy.mjs       HTML-response injection, CSP strip, websocket passthrough
+client/           concatenated and served at /__uitalk/client.js
+  api.js          identity, geometry, selection, preview layer
+  raster.js       element/region -> PNG via foreignObject, fonts and images embedded
+  native.js       real screen pixels via getDisplayMedia, cropped to the selection
+  shell.js        split screen: device frame, presets, rotate, dock
+  ui.js           launcher, tool palette, tray, chat, option flipper
+tools/            test suites and agent-driven probes — see Testing below
+docs/
+  architecture.mmd  source of the README's diagram; media/ holds its two SVGs and the demo clips
+  agent-modes.md    the four agent modes in full, keys, OpenCode and MCP setup
+  configuration.md  every setting and environment variable
 ```
 
 ## Coding conventions

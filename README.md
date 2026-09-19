@@ -9,12 +9,12 @@
 [![test](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml/badge.svg)](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
-[![Version 0.6.16](https://img.shields.io/badge/version-0.6.16-informational.svg)](.claude-plugin/plugin.json)
+[![Version 0.6.17](https://img.shields.io/badge/version-0.6.17-informational.svg)](.claude-plugin/plugin.json)
 
 <p align="center">
-  <img src="docs/media/story.gif" alt="Talk to your UI, not about it: five acts in one session — centring one button on another by number, fixing a headline that wraps on phones from inside the split-screen frame, a colour change that stays scoped to the selected button, five live style options before anything is written, and a one-click undo" width="100%">
+  <img src="docs/media/hero.gif" alt="Selecting a pricing card, asking for five style options, flipping through Accent border, Soft tint, Gradient fill, Lifted and Glow ring live on the page, approving Lifted, and the agent committing it to style.css" width="100%">
 </p>
-<p align="center"><sub>A few things you stop explaining once you can point at them. <a href="docs/media/story.mp4">Full-quality video</a>.</sub></p>
+<p align="center"><sub>Point at the card, ask, flip through the options live, approve one — it lands in <code>style.css</code>. <a href="docs/media/story.mp4">Watch a full session</a> for the rest: positioning by number, a phone-width fix from inside the device frame, a change scoped to one element, undo.</sub></p>
 
 Nothing is written into your project to install it, and no credentials live in the page.
 By default the agent is the Claude Code session you are already logged into — no second
@@ -25,9 +25,9 @@ any MCP-capable editor can answer instead.
 
 - [Why uitalk](#why-uitalk)
 - [Install](#install)
-- [Who answers: agent modes](#who-answers-agent-modes)
 - [Usage](#usage)
 - [Features](#features)
+- [Who answers: agent modes](#who-answers-agent-modes)
 - [Other editors (MCP)](#other-editors-mcp)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -44,7 +44,7 @@ any MCP-capable editor can answer instead.
 
 ## Install
 
-**Fastest path:** in Claude Code, `/plugin marketplace add haytham-breaka/uitalk` then `/plugin install uitalk@uitalk`; in your app's directory, `claude` then `/uitalk`. That's a panel open on your running app in about a minute. Everything below is for when the default agent, or the default install route, isn't the one you want.
+**Fastest path:** in Claude Code, `/plugin marketplace add haytham-breaka/uitalk` then `/plugin install uitalk@uitalk`; in your app's directory, `claude` then `/uitalk`. That's a panel open on your running app in about a minute. The rest of this section is for when the default install route isn't the one you want; [agent modes](#who-answers-agent-modes) is for when the default agent isn't.
 
 Requires **Node 20.11+** and, for native screen capture, a Chromium browser. The launcher is plain Node, so it runs the same way on Linux, macOS and native Windows (cmd.exe or PowerShell) — no bash, WSL or Git Bash required.
 
@@ -78,99 +78,6 @@ cd ~/src/uitalk && npm install && npm link
 
 All three routes give you the same `uitalk` binary and the same panel.
 
-## Who answers: agent modes
-
-The page half of uitalk is model-agnostic. What varies is who reads your message. One setting chooses:
-
-| `agent` | Who answers | Costs |
-| --- | --- | --- |
-| `builtin` *(default)* | the Claude Code session the bridge runs itself | your existing subscription, no API key |
-| `adapter` | any model you hold a key for — OpenAI, Anthropic, Gemini, or anything OpenAI-compatible, including a local one | that provider's per-token price, or nothing for a local server |
-| `opencode` | an OpenCode session, driven over its own HTTP API | whatever OpenCode is already configured with |
-| `off` | nobody here: an MCP client drives the page tools from your editor | whatever your editor already costs |
-
-```bash
-uitalk                                     # built-in Claude session
-uitalk --no-agent                          # MCP client drives it
-uitalk --agent adapter                     # your key, OpenAI by default
-uitalk --agent adapter --provider gemini --model gemini-2.5-pro
-uitalk --agent adapter --base-url http://127.0.0.1:8080/v1 --model qwen2.5-coder   # local, no key
-uitalk --agent opencode                    # an OpenCode session you already have configured
-```
-
-Or commit the choice to the project, in `.uitalk.json`:
-
-```json
-{ "agent": "adapter", "agentProvider": "anthropic", "agentModel": "claude-opus-5" }
-```
-
-What each mode can and cannot do:
-
-| | `builtin` | `adapter` | `opencode` | `off` |
-| --- | --- | --- | --- | --- |
-| The 12 page tools | ✅ | ✅ | ⚠️ only if `opencode.jsonc` points at uitalk's MCP server — see below | ✅ |
-| Edits source after an approval | ✅ Claude Code's own file tools | ✅ `read_file`, `edit_file`, `write_file`, `list_dir`, `search_files`, scoped to the project | ✅ OpenCode's own file tools | ✅ your editor's |
-| Chat in the panel | ✅ | ✅ | ✅ | ❌ — type in your editor; the panel says so instead of swallowing it |
-| Context meter, compaction, New session | ✅ | ✅ | ✅ | ❌ — the conversation is in your editor |
-| Undo a committed change | ✅ | ✅ | ✅ | ✅ — and the MCP client is told, so it will not re-apply it |
-| Streams the reply token by token | ✅ | ❌ — a turn arrives whole | ✅ | n/a |
-
-`builtin` needs `@anthropic-ai/claude-agent-sdk` and `opencode` needs `@opencode-ai/sdk` — both **optional** dependencies, so neither is required by the other. `npm install --omit=optional` gives you a uitalk that runs the adapter and MCP modes with neither installed.
-
-### Your own key, or no key at all
-
-The adapter never takes a key as an argument — that would put it in your shell history. It reads, in order: `$UITALK_API_KEY`, then the provider's own variable (`$OPENAI_API_KEY`, `$ANTHROPIC_API_KEY`, `$GEMINI_API_KEY`), then `~/.uitalk/credentials.json`:
-
-```json
-{ "openai": "sk-…", "gemini": "…" }
-```
-
-That file is written `0600`, and a key is never a setting: it cannot go in `.uitalk.json` (which is meant to be committed) and is never sent to the page.
-
-`agentBaseUrl` points the OpenAI shape at something else — a local llama.cpp, Ollama or vLLM server, OpenRouter, Groq, an internal gateway. **When a base URL is set, no key is required**, so a self-hosted open-weights model works with nothing to configure but the URL and the model name. `agentModel` defaults to a current model per provider; if the provider answers `404`, the error names the setting to change.
-
-### Setting up `opencode` mode
-
-uitalk doesn't bundle or manage OpenCode — it only talks to an existing installation over HTTP, the same way `builtin` talks to your existing Claude Code login.
-
-1. **Install OpenCode and configure a provider**, if you haven't already:
-
-   ```bash
-   npm install -g opencode-ai
-   opencode auth login   # or however you've already set up a model with it
-   ```
-
-2. **Give uitalk its optional dependency** — `@opencode-ai/sdk` ships as an `optionalDependencies` entry, so a plain install picks it up:
-
-   ```bash
-   cd ~/src/uitalk && npm install
-   ```
-
-3. **Start uitalk pointed at it:**
-
-   ```bash
-   uitalk --agent opencode
-   ```
-
-   This finds an `opencode serve` already running on its default port (`4096`) and uses it, or starts one itself if nothing answers there. To use one already running elsewhere, set `opencodeServerUrl` in `.uitalk.json`.
-
-4. **Let it see the page.** OpenCode has no way to receive custom tools programmatically — a session only gets tools from its own config — so add uitalk's MCP server to this project's `opencode.jsonc`:
-
-   ```jsonc
-   {
-     "$schema": "https://opencode.ai/config.json",
-     "mcp": {
-       "uitalk": {
-         "type": "local",
-         "command": ["uitalk-mcp"],
-         "environment": { "UITALK_PROJECT": "/path/to/this/project" }
-       }
-     }
-   }
-   ```
-
-   Without this step, `opencode` mode still chats in the panel and edits files — it just can't select elements, screenshot, or preview, since it never sees those tools. uitalk checks for this at startup and logs a warning if it looks missing, but never writes to `opencode.jsonc` itself — comments in a hand-edited JSONC file would not survive a parse-and-rewrite round-trip.
-
 ## Usage
 
 ### From Claude Code
@@ -195,7 +102,7 @@ uitalk --list                 # every bridge running
 uitalk --fg                   # foreground instead (Ctrl-C to stop)
 ```
 
-**It detaches by default, and that matters.** A bridge has to outlive the shell that started it. Run as a background job of an agent's shell, it gets reaped when that shell goes away — which kills the live session mid-edit. `uitalk` puts the server in its own session (a new process group on Linux/macOS; a console-detached process on Windows), so a signal aimed at the caller cannot reach it, then waits for it to claim a port and prints the real URL. Logs go to `~/.uitalk/logs/<project>.log` (`%USERPROFILE%\.uitalk\logs\` on Windows). Starting it again while one is already up for the same project just prints that URL, so it is safe to re-run.
+**It detaches by default, and that matters.** A bridge has to outlive the shell that started it — run as a background job of an agent's shell, it would be reaped along with that shell, mid-edit. `uitalk` puts the server in its own process group (a console-detached process on Windows), waits for it to claim a port, and prints the real URL. Logs go to `~/.uitalk/logs/<project>.log`; running it again while one is already up for the same project just prints that URL, so it is safe to re-run.
 
 ### The panel
 
@@ -222,9 +129,7 @@ Refer to selections by number: "align element 2 to the top of element 1", "make 
 
 ### Live variants and approval
 
-Ask for options and the agent mounts them as live CSS on the real page — flip through with the arrows or the numbered buttons, compare against **Original**, then approve one. Only then does the agent touch a file. A clear, single-answer request ("make this button a deep purple gradient") skips the preview and edits directly — asking permission to do the obvious thing isn't careful, it's just slow.
-
-![Asking for five style options on a pricing card, flipping through Accent border, Soft tint, Gradient fill, Lifted and Glow ring, then approving Lifted, which lands in the stylesheet](docs/media/feature-variants.gif)
+Ask for options and the agent mounts them as live CSS on the real page — flip through with the arrows or the numbered buttons, compare against **Original**, then approve one. Only then does the agent touch a file. That loop is the clip at the top of this page. A clear, single-answer request ("make this button a deep purple gradient") skips the preview and edits directly — asking permission to do the obvious thing isn't careful, it's just slow.
 
 ### Undo, backed by git
 
@@ -277,11 +182,33 @@ uitalk --list
 
 **Several tabs on one bridge** is fine: each announces itself, and page calls follow whichever you last used. A background tab is never asked — its `requestAnimationFrame` is paused, which used to make captures hang. Instances are recorded in `~/.uitalk/instances.json`, removed on exit, and pruned if a process dies, so `--list` never shows a phantom.
 
+## Who answers: agent modes
+
+The page half of uitalk is model-agnostic. What varies is who reads your message. One setting chooses:
+
+| `agent` | Who answers | Costs |
+| --- | --- | --- |
+| `builtin` *(default)* | the Claude Code session the bridge runs itself | your existing subscription, no API key |
+| `adapter` | any model you hold a key for — OpenAI, Anthropic, Gemini, or anything OpenAI-compatible, including a local one | that provider's per-token price, or nothing for a local server |
+| `opencode` | an OpenCode session, driven over its own HTTP API | whatever OpenCode is already configured with |
+| `off` | nobody here: an MCP client drives the page tools from your editor | whatever your editor already costs |
+
+```bash
+uitalk                                     # built-in Claude session
+uitalk --no-agent                          # MCP client drives it
+uitalk --agent adapter                     # your key, OpenAI by default
+uitalk --agent adapter --provider gemini --model gemini-2.5-pro
+uitalk --agent adapter --base-url http://127.0.0.1:8080/v1 --model qwen2.5-coder   # local, no key
+uitalk --agent opencode                    # an OpenCode session you already have configured
+```
+
+Or commit the choice to the project: `{ "agent": "adapter", "agentProvider": "anthropic" }` in `.uitalk.json`.
+
+[docs/agent-modes.md](docs/agent-modes.md) has the rest: what each mode can and cannot do, where a key is read from (never a setting, never an argument) and how a local model needs none, and setting up OpenCode step by step.
+
 ## Other editors (MCP)
 
-A standalone MCP server exposes all of the page tools over stdio, so Cursor, Cline, Windsurf, Zed, Continue, OpenCode — any MCP client — can select elements, capture, preview and offer variants. Start the bridge with `--no-agent` so it is not also running a session you are not using, then point your editor at `uitalk-mcp`.
-
-Cursor, Cline, Windsurf, Continue, and most others read a config shaped like this:
+A standalone MCP server exposes all of the page tools over stdio, so Cursor, Cline, Windsurf, Zed, Continue, OpenCode — any MCP client — can select elements, capture, preview and offer variants. Start the bridge with `--no-agent`, then point your editor at `uitalk-mcp`:
 
 ```json
 {
@@ -294,13 +221,7 @@ Cursor, Cline, Windsurf, Continue, and most others read a config shaped like thi
 }
 ```
 
-OpenCode's `opencode.jsonc` shape differs — the server key is `mcp`, the command is an array, and the environment key is `environment` (see the block in [Setting up `opencode` mode](#setting-up-opencode-mode)).
-
-Start the bridge as usual (`uitalk --dev "npm run dev"`); the MCP server finds it through the registry, or takes `UITALK_PORT` if you would rather be explicit.
-
-**One thing changes shape.** With the built-in session, your choice of variant — or your answer to a plain question — arrives as a *message*. MCP is request/response and a server cannot push one, so there are two extra tools: after `show_options`, the client calls **`await_choice`**; after `ask_choice`, it calls **`await_answer`**. Each blocks until you pick and returns what you chose. Everything else is identical.
-
-What stays behind with the built-in session: the in-panel chat, context compaction, the context meter, transcript replay, and the unprompted "that edit did not take effect" nudge — all of which need an agent the bridge can push messages into. The panel hides those controls rather than leaving them to do nothing. The other direction has the same problem and is solved the same way: when you undo a change or start a new session, the message waits and is prepended to the next tool result the client asks for, so it cannot re-apply an edit you have just reverted.
+The MCP server finds the running bridge through the registry, or takes `UITALK_PORT` if you would rather be explicit. One thing changes shape: MCP is request/response, so your choice of variant arrives through **`await_choice`** rather than as a pushed message — that, OpenCode's differently-shaped config, and what the panel hides in this mode are in [docs/agent-modes.md](docs/agent-modes.md#off-any-mcp-editor).
 
 ## Architecture
 
@@ -313,72 +234,15 @@ The bridge sits between your browser and your dev server. It proxies every reque
 
 **Two agents, not one.** The session you type `/uitalk` into and the session behind the panel are **different agents with separate contexts**. The skill only launches the bridge; the bridge runs its own agent against the same project. That keeps your terminal session free, and it means the panel's context meter and compaction settings apply to the panel's agent alone.
 
-**Localhost only, with no flag to widen that.** The bridge binds to `127.0.0.1` — nothing else, no exceptions, and there is no `--host` option or setting that changes it. That's a real invariant to lean on, not just a default: the proxy also strips the app's CSP and CSP-Report-Only headers from every response so the injected script and its socket aren't blocked, which is fine for a tool that only your own machine can reach, and would not be fine on a network anyone else is on. `UITALK_APP_HOST` in the table below configures where your *dev server* lives, not where the bridge itself listens.
+**Localhost only, with no flag to widen that.** The bridge binds to `127.0.0.1` — nothing else, no exceptions, and there is no `--host` option or setting that changes it. That's a real invariant to lean on, not just a default: the proxy also strips the app's CSP and CSP-Report-Only headers from every response so the injected script and its socket aren't blocked, which is fine for a tool that only your own machine can reach, and would not be fine on a network anyone else is on. `UITALK_APP_HOST` configures where your *dev server* lives, not where the bridge itself listens.
 
 Prefer your own URL? `curl http://127.0.0.1:8400/__uitalk/bookmarklet` prints a bookmarklet that loads the same client. It needs re-clicking after each reload, and a strict app CSP can block it.
 
-### Layout
-
-```
-.claude-plugin/
-  plugin.json     plugin manifest
-SKILL.md          the skill Claude Code invokes as /uitalk
-bin/
-  uitalk          launcher (Node, cross-platform); on PATH while the plugin is enabled
-  uitalk.cmd      Windows shim for the same
-server/
-  index.mjs       proxy + socket + whichever session is answering
-  tool-defs.mjs   the 12 page tools, defined once, owned by no agent SDK
-  page-tools.mjs  those definitions shaped for the Claude Agent SDK
-  adapter.mjs     the same tools driven by your own key, plus file tools
-  mcp.mjs         the same tools over stdio, for any MCP client
-  registry.mjs    which bridges are running, on which ports
-  settings.mjs    layered per-app settings, validated and clamped; key lookup
-  snapshots.mjs   git-backed snapshot and revert of a committed change
-  proxy.mjs       HTML-response injection, CSP strip, websocket passthrough
-client/           concatenated and served at /__uitalk/client.js
-  api.js          identity, geometry, selection, preview layer
-  raster.js       element/region -> PNG via foreignObject, fonts and images embedded
-  native.js       real screen pixels via getDisplayMedia, cropped to the selection
-  shell.js        split screen: device frame, presets, rotate, dock
-  ui.js           launcher, tool palette, tray, chat, option flipper
-tools/            test suites and agent-driven probes — see CONTRIBUTING.md
-docs/
-  architecture.mmd  source of the diagram above; media/ holds its two SVGs and the demo (story.gif, story.mp4)
-```
+The file-by-file layout is in [CONTRIBUTING.md](CONTRIBUTING.md#development-setup).
 
 ## Configuration
 
-Settings live behind the ⚙ in the meter row and persist to `.uitalk.json` in the project — per app, so each can have its own budget. Precedence: defaults < `~/.uitalk/settings.json` < `<project>/.uitalk.json` < env (`UITALK_COMPACT_AT_PERCENT`, `UITALK_CONTEXT_TOKENS`, …).
-
-| Setting | Default | Means |
-|---|---|---|
-| `agent` | `builtin` | Who answers: `builtin`, `adapter`, `opencode` or `off` |
-| `agentProvider` | `openai` | Adapter provider: `openai`, `anthropic` or `gemini` |
-| `agentModel` | *provider default* | Adapter model name |
-| `agentBaseUrl` | *unset* | An OpenAI-compatible endpoint that is not OpenAI's own. Set, no key is needed |
-| `opencodeServerUrl` | *auto* | An `opencode serve` to use instead of discovering one on `:4096` |
-| `nativeCapture` | `true` | Capture real screen pixels via the Screen Capture API (asks once) |
-| `reloadAfterEdit` | `auto` | Reload the app after an edit: `auto` only when no live reload is detected, or `always` / `never` |
-| `autoCompact` | `true` | Compact automatically at the threshold |
-| `compactAtPercent` | `20` | Percent of the window that triggers compaction |
-| `contextTokens` | `200000` | Your window size. **Raise to `1000000` on a 1M-context setup** |
-| `compactCooldownTurns` | `2` | Turns to wait before compacting again |
-| `replayLimit` | `200` | Transcript entries kept for replay |
-| `inventoryWithCapture` | `true` | Ship the element inventory with screenshots |
-| `inventoryMaxNodes` | `150` | Cap on inventory size |
-
-Changing `agent*` or `opencodeServerUrl` takes effect on the next bridge start. A key is never a setting — see [Your own key](#your-own-key-or-no-key-at-all).
-
-| Env var | Default | Meaning |
-|---|---|---|
-| `UITALK_PROJECT` | `cwd` | Project root the agent reads and edits |
-| `UITALK_APP_PORT` | `5173` | Your dev server's port |
-| `UITALK_APP_HOST` | `127.0.0.1` | Your dev server's host — not the bridge's; the bridge itself always binds to `127.0.0.1` |
-| `UITALK_PORT` | *first free from 8400* | Pin the bridge's port. Leave unset to run several at once |
-| `UITALK_HOME` | `~/.uitalk` | Where the instance registry, logs and credentials live |
-| `UITALK_RPC_TIMEOUT` | `5000` | Milliseconds before a page call is abandoned |
-| `UITALK_DEBUG` | unset | `1` logs agent events, `2` dumps them |
+Settings live behind the ⚙ in the meter row and persist to `.uitalk.json` in the project — per app, so each can have its own context budget, capture mode and reload behaviour. Environment variables cover what has to be known before the bridge starts: the project root, the dev server's port, a pinned bridge port. Every setting and variable, with its default, is in [docs/configuration.md](docs/configuration.md).
 
 ## Contributing
 
