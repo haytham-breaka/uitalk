@@ -188,8 +188,67 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   check("and is honest that this is a mockup, not a functional preview",
     /visual mockup/.test(result.note) && /event bindings/.test(result.note), result.note);
 
+  // unpicking drops the still-active markup preview as a side effect, which
+  // swaps the original element back in — so it is `card`, not `replacement`,
+  // that ends up back in the document afterward.
   UITalk.unpick(picked.ref);
-  replacement?.remove();
+  check("unpicking restores the original element in place of the preview",
+    card.isConnected && !replacement.isConnected, { card: card.isConnected, replacement: replacement.isConnected });
+  check("and the restored original carries no leftover ref attribute",
+    !card.hasAttribute("data-uitalk-ref"), card.outerHTML);
+  card.remove();
+}
+
+// --- try_markup parses relative to the target's real position, not a
+// detached <div>, since generic-element parsing silently strips content that
+// is only valid in a specific context (a table row outside a table, ...)
+{
+  const table = window.document.createElement("table");
+  table.innerHTML = "<tbody><tr><td>old</td></tr></tbody>";
+  window.document.body.appendChild(table);
+  const row = table.querySelector("tr");
+  const rowPick = UITalk.pick(row);
+
+  const rowResult = UITalk.tryMarkup({ ref: rowPick.ref, html: "<tr><td>new</td></tr>" });
+  const newRow = window.document.querySelector(`[data-uitalk-ref="${rowPick.ref}"]`);
+  check("a <tr> is not stripped down to a detached <div>'s liking", rowResult.applied === true);
+  check("the replacement is a real <tr>, still inside the table",
+    newRow?.tagName === "TR" && newRow.closest("table") === table,
+    newRow ? `${newRow.tagName} in table? ${newRow.closest("table") === table}` : "no element");
+  check("its own content survived the parse", newRow?.textContent === "new", newRow?.textContent);
+
+  UITalk.unpick(rowPick.ref);
+  table.remove();
+
+  const select = window.document.createElement("select");
+  select.innerHTML = "<option>old</option>";
+  window.document.body.appendChild(select);
+  const option = select.querySelector("option");
+  const optionPick = UITalk.pick(option);
+
+  const optionResult = UITalk.tryMarkup({ ref: optionPick.ref, html: "<option>new</option>" });
+  const newOption = window.document.querySelector(`[data-uitalk-ref="${optionPick.ref}"]`);
+  check("an <option> parses correctly too", optionResult.applied === true && newOption?.tagName === "OPTION");
+
+  UITalk.unpick(optionPick.ref);
+  select.remove();
+
+  // more than one top-level element is refused outright, not silently truncated
+  const solo = window.document.createElement("div");
+  window.document.body.appendChild(solo);
+  const soloPick = UITalk.pick(solo);
+  let multiError = null;
+  try {
+    UITalk.tryMarkup({ ref: soloPick.ref, html: "<div>A</div><div>B</div>" });
+  } catch (e) {
+    multiError = e.message;
+  }
+  check("more than one top-level element is refused, not silently truncated to the first",
+    /2 top-level elements/.test(multiError ?? ""), multiError);
+  check("the original element is untouched after the refusal", solo.isConnected && solo.parentElement === window.document.body);
+
+  UITalk.unpick(soloPick.ref);
+  solo.remove();
 }
 
 // --- which rules actually style an element
