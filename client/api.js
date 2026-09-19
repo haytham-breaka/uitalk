@@ -579,12 +579,15 @@ globalThis.UITalk = (() => {
   }
 
   function unpick(ref) {
-    const el = picked[ref - 1];
-    if (!el) return null;
+    if (!picked[ref - 1]) return null;
 
     remember();
     const previewCleared = dropPreview(); // while the numbering is still intact
-    el.removeAttribute(REF_ATTR);
+    // A try_markup preview swaps the original element back in as a side effect
+    // of dropping it (see resetPreview) — read picked[] again rather than the
+    // node captured above, or the ref attribute gets removed from the now-
+    // detached replacement while the restored original keeps a stale one.
+    picked[ref - 1].removeAttribute(REF_ATTR);
     picked.splice(ref - 1, 1);
     picked.forEach((node, i) => stamp(node, i + 1));
 
@@ -745,10 +748,23 @@ globalThis.UITalk = (() => {
     }
     if (!originals.has(ref)) originals.set(ref, el);
 
-    const host = document.createElement("div");
-    host.innerHTML = html;
-    const replacement = host.firstElementChild;
-    if (!replacement) throw new Error("the html did not contain an element");
+    // A detached <div> parses html under whatever insertion-mode rules apply to
+    // a generic element, which silently discards context-specific content: a
+    // <tr> assigned via div.innerHTML loses its own tag entirely, because a
+    // table row is not valid content there. Anchoring a Range at the element
+    // being replaced gives the parser its real insertion context — inside a
+    // <table>, a <select> — the same way the browser would parse it in place.
+    const range = document.createRange();
+    range.selectNode(el);
+    const fragment = range.createContextualFragment(html);
+    const elements = [...fragment.children];
+    if (elements.length === 0) throw new Error("the html did not contain an element");
+    if (elements.length > 1) {
+      throw new Error(
+        `the html has ${elements.length} top-level elements; try_markup replaces one element with one element`,
+      );
+    }
+    const replacement = elements[0];
 
     stamp(replacement, ref);
     el.replaceWith(replacement);
