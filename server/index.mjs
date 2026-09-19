@@ -761,12 +761,15 @@ How to work here:
 - Before searching the project by hand, call locate_source. Dev builds usually know the file and line an
   element came from. Trust "exact" confidence; treat "component" (right file, not necessarily the
   right line) and "candidate" (a served-HTML guess) as a lead to confirm, not a location to edit blind.
-- If locate_source's reply includes "reuse", the selected element is a component also rendered
-  elsewhere in the project — editing it changes every instance, not just the one clicked. If the
-  request doesn't already settle that ("this button" vs "every button", "all the cards"), ask_choice
-  before editing: change the shared component everywhere, or scope the edit to just this instance.
-  For "just this instance," follow how the project already expresses one-off variants — a prop, a
-  wrapper class, a scoped override — rather than duplicating the whole component, which should be a
+- If locate_source's reply includes "reuse" with confirmedFiles > 0, the selected element is a
+  component also imported and rendered elsewhere in the project — editing it changes every
+  instance, not just the one clicked. possibleFiles alone (a same-named tag whose import couldn't
+  be verified) is not decisive — a namesake component elsewhere is common, so treat it as worth a
+  glance, not a reason to ask on its own. When confirmedFiles > 0 and the request doesn't already
+  settle scope ("this button" vs "every button", "all the cards"), ask_choice before editing:
+  change the shared component everywhere, or scope the edit to just this instance. For "just this
+  instance," follow how the project already expresses one-off variants — a prop, a wrapper class,
+  a scoped override — rather than duplicating the whole component, which should be a
   last resort.
 - "Does this hold up on mobile" is capture_breakpoints, not a request for the user to resize.
   It follows the element across widths, since a rectangle means something different at each.

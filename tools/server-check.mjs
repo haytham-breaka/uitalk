@@ -152,28 +152,51 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   const { countUsages } = await import("../server/usage.mjs");
   const proj = join(sandbox, "usage-project");
   mkdirSync(join(proj, "src", "components"), { recursive: true });
+  mkdirSync(join(proj, "src", "legacy"), { recursive: true });
   mkdirSync(join(proj, "src", "pages"), { recursive: true });
   mkdirSync(join(proj, "node_modules", "some-lib"), { recursive: true });
 
   writeFileSync(join(proj, "src", "components", "Button.tsx"), "export function Button() { return <button/>; }\n");
-  writeFileSync(join(proj, "src", "pages", "Home.tsx"), "import { Button } from '../components/Button';\nexport default () => <div><Button/></div>;\n");
-  writeFileSync(join(proj, "src", "pages", "Settings.tsx"), "import { Button } from '../components/Button';\nexport default () => <Button label=\"Save\"/>;\n");
+  // a same-named component elsewhere in the project — its own usages must
+  // never be counted as reuse of the real one
+  writeFileSync(join(proj, "src", "legacy", "Button.tsx"), "export function Button() { return <button className='old'/>; }\n");
+
+  writeFileSync(join(proj, "src", "pages", "Home.tsx"),
+    "import { Button } from '../components/Button';\nexport default () => <div><Button/></div>;\n");
+  writeFileSync(join(proj, "src", "pages", "Settings.tsx"),
+    "import { Button } from '../components/Button';\nexport default () => <Button label=\"Save\"/>;\n");
+  // imports and renders the *legacy* Button — a tag match, but not this component
+  writeFileSync(join(proj, "src", "pages", "Old.tsx"),
+    "import { Button } from '../legacy/Button';\nexport default () => <Button/>;\n");
+  // mentions the tag with no import at all — a comment and a string, not usage
+  writeFileSync(join(proj, "src", "pages", "Docs.tsx"),
+    "// example: <Button label=\"Save\" />\nconst snippet = \"<Button/>\";\nexport default () => null;\n");
   writeFileSync(join(proj, "node_modules", "some-lib", "Button.tsx"), "<Button/><Button/><Button/>\n");
+
   mkdirSync(join(proj, "src", "vue"), { recursive: true });
-  writeFileSync(join(proj, "src", "vue", "Card.vue"), "<template><my-widget/></template>\n");
+  writeFileSync(join(proj, "src", "vue", "MyWidget.vue"), "<template><div/></template>\n");
+  writeFileSync(join(proj, "src", "vue", "Card.vue"),
+    "<script>import MyWidget from './MyWidget.vue'</script><template><my-widget/></template>\n");
 
   const found = countUsages(proj, "Button", "src/components/Button.tsx");
-  check("counts distinct files that render the component", found?.otherFiles === 2, JSON.stringify(found));
-  check("node_modules is not counted", found?.otherFiles !== 3, JSON.stringify(found));
+  check("counts a genuine import as confirmed", found?.confirmedFiles === 2, JSON.stringify(found));
+  check("a same-named component elsewhere is not confirmed as reuse of this one",
+    found?.confirmedFiles === 2, JSON.stringify(found)); // Old.tsx must not inflate this
+  check("an unimported tag mention (comment, string, a different import) is possible, not confirmed",
+    found?.possibleFiles === 2, JSON.stringify(found)); // Old.tsx + Docs.tsx
+  check("node_modules is not counted at all", !JSON.stringify(found).includes("node_modules"), JSON.stringify(found));
   check("a small count is not reported as capped", found?.capped === false, JSON.stringify(found));
+
+  check("a single-word name's kebab-case does not degenerate into the native HTML tag",
+    countUsages(proj, "Button", "src/components/Button.tsx")?.confirmedFiles === 2);
 
   check("a non-component-shaped name is not counted",
     countUsages(proj, "onClick", "src/components/Button.tsx") === null);
   check("a missing name is not counted", countUsages(proj, null, "src/components/Button.tsx") === null);
   check("a defining file outside the project is refused",
     countUsages(proj, "Button", "../../etc/passwd") === null);
-  check("Vue's kebab-case template spelling is matched too",
-    countUsages(proj, "MyWidget", "src/components/Button.tsx")?.otherFiles === 1);
+  check("Vue's kebab-case template spelling is matched and its import confirmed",
+    countUsages(proj, "MyWidget", "src/vue/MyWidget.vue")?.confirmedFiles === 1);
 }
 
 // -------------------------------------------------- project-source candidates
@@ -569,15 +592,22 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     evidence: [{ kind: "react-debug-source", exact: true }],
     component: "Button",
   };
-  usageAnswer = { otherFiles: 6, capped: false };
+  usageAnswer = { confirmedFiles: 6, possibleFiles: 0, capped: false };
   const reused = await run("locate_source", { ref: 1 });
-  check("a component rendered elsewhere carries a reuse field",
-    /"reuse"/.test(reused.content[0].text) && /"otherFiles": 6/.test(reused.content[0].text),
+  check("a component confirmed elsewhere carries a reuse field",
+    /"reuse"/.test(reused.content[0].text) && /"confirmedFiles": 6/.test(reused.content[0].text),
     reused.content[0].text);
 
-  usageAnswer = { otherFiles: 0, capped: false };
+  usageAnswer = { confirmedFiles: 0, possibleFiles: 3, capped: false };
+  const possibleOnly = await run("locate_source", { ref: 1 });
+  check("a component with only unconfirmed matches still reports them, but distinctly",
+    /"reuse"/.test(possibleOnly.content[0].text) && /"possibleFiles": 3/.test(possibleOnly.content[0].text) &&
+      /"confirmedFiles": 0/.test(possibleOnly.content[0].text),
+    possibleOnly.content[0].text);
+
+  usageAnswer = { confirmedFiles: 0, possibleFiles: 0, capped: false };
   const notReused = await run("locate_source", { ref: 1 });
-  check("a component that is not reused carries no reuse field",
+  check("a component that is not reused at all carries no reuse field",
     !/"reuse"/.test(notReused.content[0].text), notReused.content[0].text);
 
   answer = { confidence: "exact", source: { file: "src/App.jsx", line: 44, column: null }, evidence: [{ kind: "react-debug-source", exact: true }] };
