@@ -22,6 +22,7 @@ import { resolve } from "node:path";
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
 import * as registry from "./registry.mjs";
 import { isFrame } from "./protocol.mjs";
+import { projectToken } from "./token.mjs";
 import { countUsages } from "./usage.mjs";
 import { findSourceCandidates } from "./candidates.mjs";
 
@@ -52,9 +53,21 @@ export function canonical(p) {
  * first would leave the file tools on this project and the page tools on an
  * unrelated app — the confusing split this refuses to create.
  */
+// The socket is token-gated. The token is per project, kept in the uitalk home,
+// so it is derived from the bridge's own project rather than guessed — a bridge
+// we cannot find in the registry (an explicit port to something not registered,
+// e.g. a test) simply connects without one.
+const socketFor = (port, project) => {
+  const token = project ? projectToken(project) : null;
+  return `ws://127.0.0.1:${port}/__uitalk/socket${token ? `?token=${token}` : ""}`;
+};
+
 export function bridgeUrl({ port = PORT, project = PROJECT } = {}) {
-  if (port) return `ws://127.0.0.1:${port}/__uitalk/socket`;
   const running = registry.list();
+  if (port) {
+    const entry = running.find((e) => e.port === port);
+    return socketFor(port, entry?.project ?? null);
+  }
   const me = canonical(project);
   const mine = running.find((e) => canonical(e.project) === me);
   if (!mine) {
@@ -65,7 +78,7 @@ export function bridgeUrl({ port = PORT, project = PROJECT } = {}) {
         (running.length ? `\n(running elsewhere: ${elsewhere})` : ""),
     );
   }
-  return `ws://127.0.0.1:${mine.port}/__uitalk/socket`;
+  return socketFor(mine.port, mine.project);
 }
 
 // ------------------------------------------------------------ the page link

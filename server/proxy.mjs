@@ -11,6 +11,13 @@ import { connect } from "node:net";
 
 const CLIENT_TAG = `<script src="/__uitalk/client.js" data-uitalk></script>`;
 
+// The capability token rides on the script *tag*, not inside client.js — the
+// bundle is served to anyone and can be loaded cross-origin, so a token baked
+// into it would leak. On the tag it is only readable by same-origin script,
+// which a cross-origin attacker is not. Hex only, so it is attribute-safe.
+const clientTagWith = (token) =>
+  token ? `<script src="/__uitalk/client.js" data-uitalk data-uitalk-token="${token}"></script>` : CLIENT_TAG;
+
 // Dev-only, and only for responses this proxy is already rewriting: a strict app
 // CSP would otherwise refuse both the injected script and its socket.
 const CSP_HEADERS = ["content-security-policy", "content-security-policy-report-only"];
@@ -37,18 +44,18 @@ const mayBeDocument = (req) => {
 const CONDITIONAL_HEADERS = ["if-none-match", "if-modified-since", "if-match", "if-unmodified-since"];
 const VALIDATOR_HEADERS = ["etag", "last-modified"];
 
-function injectInto(html) {
+function injectInto(html, tag) {
   if (html.includes("data-uitalk")) return html;
   const head = html.search(/<\/head\s*>/i);
-  if (head !== -1) return html.slice(0, head) + CLIENT_TAG + html.slice(head);
+  if (head !== -1) return html.slice(0, head) + tag + html.slice(head);
   const body = html.search(/<\/body\s*>/i);
-  if (body !== -1) return html.slice(0, body) + CLIENT_TAG + html.slice(body);
+  if (body !== -1) return html.slice(0, body) + tag + html.slice(body);
   const open = html.search(/<html[^>]*>/i);
   if (open !== -1) {
     const at = html.indexOf(">", open) + 1;
-    return html.slice(0, at) + CLIENT_TAG + html.slice(at);
+    return html.slice(0, at) + tag + html.slice(at);
   }
-  return CLIENT_TAG + html;
+  return tag + html;
 }
 
 /** Ask upstream for a full body when we mean to rewrite it, never a 304. */
@@ -66,7 +73,8 @@ export function upstreamHeaders(req, target) {
  * @param {{ target: {host: string, port: number}, onInject?: (url: string) => void }} opts
  * @returns {(req, res) => void}
  */
-export function createProxy({ target, onInject, onHtml }) {
+export function createProxy({ target, onInject, onHtml, token }) {
+  const clientTag = clientTagWith(token);
   return function proxy(req, res) {
     const upstream = httpRequest(
       {
@@ -95,7 +103,7 @@ export function createProxy({ target, onInject, onHtml }) {
           // rendered one it still locates the block. It is the only source signal
           // that needs nothing from the framework.
           onHtml?.(req.url, original);
-          const html = injectInto(original);
+          const html = injectInto(original, clientTag);
           const body = Buffer.from(html, "utf8");
 
           // We buffered and rewrote the body, so it is no longer chunked and no
@@ -124,7 +132,7 @@ export function createProxy({ target, onInject, onHtml }) {
       // bare ECONNREFUSED gives no hint of it. Look before reporting.
       const elsewhere = await findDevServers(target.port);
       res.writeHead(502, { "content-type": "text/html; charset=utf-8" });
-      res.end(diagnosis({ target, err, elsewhere }));
+      res.end(diagnosis({ target, err, elsewhere, clientTag }));
     });
 
     req.pipe(upstream);
@@ -150,7 +158,7 @@ async function findDevServers(exclude) {
   return found.filter(Boolean);
 }
 
-function diagnosis({ target, err, elsewhere }) {
+function diagnosis({ target, err, elsewhere, clientTag = CLIENT_TAG }) {
   const shell = (cmd) =>
     `<pre style="background:#f4f4f5;padding:10px 12px;border-radius:8px;overflow:auto">${cmd}</pre>`;
 
@@ -174,7 +182,7 @@ function diagnosis({ target, err, elsewhere }) {
     // The panel rides on this page too. Losing the dev server should not also mean
     // losing the agent: leaving split screen lands here, and a page with no panel
     // looks like the tool itself vanished.
-    CLIENT_TAG
+    clientTag
   );
 }
 

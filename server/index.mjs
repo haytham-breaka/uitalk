@@ -28,6 +28,8 @@ import * as snapshots from "./snapshots.mjs";
 import { countUsages } from "./usage.mjs";
 import { findSourceCandidates } from "./candidates.mjs";
 import { isFrame } from "./protocol.mjs";
+import { projectToken } from "./token.mjs";
+import { timingSafeEqual } from "node:crypto";
 
 // A fixed port would stop the second bridge from ever starting. An explicit
 // UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
@@ -43,6 +45,17 @@ const SOCKET_PATH = "/__uitalk/socket";
 const here = dirname(fileURLToPath(import.meta.url));
 const log = (...a) => console.log(`[uitalk]`, ...a);
 
+// The capability token for this project's bridge. Injected into the pages this
+// bridge serves and required on the control socket, so another app on the same
+// machine cannot open one. See token.mjs.
+const TOKEN = projectToken(PROJECT);
+
+/** Constant-time token compare, tolerant of a missing or wrong-length candidate. */
+function tokenOk(candidate) {
+  if (typeof candidate !== "string" || candidate.length !== TOKEN.length) return false;
+  return timingSafeEqual(Buffer.from(candidate), Buffer.from(TOKEN));
+}
+
 let config = settings.load(PROJECT);
 
 // The injected client, served as one file so the page needs a single tag.
@@ -55,7 +68,7 @@ let config = settings.load(PROJECT);
 const CLIENT_FILES = ["api.js", "raster.js", "native.js", "shell.js", "ui.js"]
   .map((f) => join(here, "..", "client", f));
 const SERVER_FILES = ["index.mjs", "page-tools.mjs", "tool-defs.mjs", "proxy.mjs",
-                      "settings.mjs", "registry.mjs", "snapshots.mjs", "protocol.mjs"]
+                      "settings.mjs", "registry.mjs", "snapshots.mjs", "protocol.mjs", "token.mjs"]
   .map((f) => join(here, f));
 
 const stamp = (files) =>
@@ -72,7 +85,15 @@ function readClient() {
     log(`client rebuilt: ${clientCache.build} -> ${build} (reload any open page)`);
     toPanel({ kind: "client_updated", build });
   }
-  clientCache = { key, body: `globalThis.__UITALK_BUILD__ = ${JSON.stringify(build)};\n${source}`, build };
+  // The token is read from the loading <script> tag's data attribute (or a global
+  // a bookmarklet set) at load time, when document.currentScript is still valid —
+  // it is never baked into this bundle, which is served to anyone and can be
+  // loaded cross-origin.
+  const prelude =
+    `globalThis.__UITALK_BUILD__ = ${JSON.stringify(build)};\n` +
+    `globalThis.__UITALK_TOKEN__ = (typeof document !== "undefined" && document.currentScript && ` +
+    `document.currentScript.dataset.uitalkToken) || globalThis.__UITALK_TOKEN__ || null;\n`;
+  clientCache = { key, body: `${prelude}${source}`, build };
   return clientCache;
 }
 
@@ -95,6 +116,7 @@ const servedHtml = new Map();
 
 const appProxy = createProxy({
   target: { host: APP_HOST, port: APP_PORT },
+  token: TOKEN,
   onHtml: (url, html) => {
     const path = url.split("?")[0];
     servedHtml.set(path, html);
@@ -165,7 +187,7 @@ const http = createServer((req, res) => {
       `<!doctype html><html data-uitalk-shell="1"><head><meta charset="utf-8">` +
         `<title>uitalk</title></head><body>` +
         `<script>window.__UITALK_SHELL__ = true;</script>` +
-        `<script src="/__uitalk/client.js"></script>` +
+        `<script src="/__uitalk/client.js" data-uitalk-token="${TOKEN}"></script>` +
         `</body></html>`,
     );
     return;
@@ -174,8 +196,9 @@ const http = createServer((req, res) => {
   if (req.url === "/__uitalk/bookmarklet") {
     res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
     res.end(
-      `javascript:(function(){var s=document.createElement('script');` +
-        `s.src='http://127.0.0.1:${PORT}/__uitalk/client.js';document.documentElement.appendChild(s);})()`,
+      `javascript:(function(){window.__UITALK_TOKEN__=${JSON.stringify(TOKEN)};` +
+        `var s=document.createElement('script');` +
+        `s.src='http://127.0.0.1:${port}/__uitalk/client.js';document.documentElement.appendChild(s);})()`,
     );
     return;
   }
@@ -208,14 +231,21 @@ function originIsTrusted(originHeader) {
   return LOOPBACK_HOSTNAMES.has(hostname);
 }
 
+const refuse = (socket, why) => {
+  log(`rejected a socket upgrade: ${why}`);
+  socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+  socket.destroy();
+};
+
 http.on("upgrade", (req, socket, head) => {
-  if (req.url === SOCKET_PATH) {
-    if (!originIsTrusted(req.headers.origin)) {
-      log(`rejected a socket upgrade from an untrusted origin: ${req.headers.origin}`);
-      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-      socket.destroy();
-      return;
-    }
+  // Only the path decides whether this is ours; the query carries the token.
+  const url = new URL(req.url, "http://127.0.0.1");
+  if (url.pathname === SOCKET_PATH) {
+    if (!originIsTrusted(req.headers.origin)) return refuse(socket, `untrusted origin ${req.headers.origin}`);
+    // The capability token gates every connection, so another local app cannot
+    // open one — and an unauthorized socket is closed here, before the connection
+    // handler would send it the project state and transcript.
+    if (!tokenOk(url.searchParams.get("token"))) return refuse(socket, "missing or wrong capability token");
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
     return;
   }
@@ -1412,6 +1442,7 @@ export {
   setSessionForTest,
   setSnapshotForTest,
   approvalPhaseForTest,
+  TOKEN as socketToken,
 };
 
 let closing = false;
