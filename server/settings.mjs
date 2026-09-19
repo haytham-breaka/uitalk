@@ -114,7 +114,12 @@ export function validate(patch) {
       continue;
     }
     if (field.type === "boolean") {
-      clean[key] = Boolean(raw);
+      // A real JSON boolean only. Boolean("false") is true, so coercing would read
+      // a hand-edited "nativeCapture": "false" as on — the opposite of the intent,
+      // and the opposite of how the same value parses as an env var. Reject the
+      // wrong type out loud instead, and let the layer below stand.
+      if (typeof raw === "boolean") clean[key] = raw;
+      else rejected.push(`${key}: must be true or false, not ${JSON.stringify(raw)}`);
       continue;
     }
     if (field.type === "text") {
