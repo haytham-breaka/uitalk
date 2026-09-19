@@ -9,7 +9,7 @@
 [![test](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml/badge.svg)](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
-[![Version 0.6.7](https://img.shields.io/badge/version-0.6.7-informational.svg)](.claude-plugin/plugin.json)
+[![Version 0.6.8](https://img.shields.io/badge/version-0.6.8-informational.svg)](.claude-plugin/plugin.json)
 
 <p align="center">
   <img src="docs/media/story.gif" alt="Talk to your UI, not about it: five acts in one session — centring one button on another by number, fixing a headline that wraps on phones from inside the split-screen frame, a colour change that stays scoped to the selected button, five live style options before anything is written, and a one-click undo" width="100%">
@@ -313,6 +313,8 @@ The bridge sits between your browser and your dev server. It proxies every reque
 
 **Two agents, not one.** The session you type `/uitalk` into and the session behind the panel are **different agents with separate contexts**. The skill only launches the bridge; the bridge runs its own agent against the same project. That keeps your terminal session free, and it means the panel's context meter and compaction settings apply to the panel's agent alone.
 
+**Localhost only, with no flag to widen that.** The bridge binds to `127.0.0.1` — nothing else, no exceptions, and there is no `--host` option or setting that changes it. That's a real invariant to lean on, not just a default: the proxy also strips the app's CSP and CSP-Report-Only headers from every response so the injected script and its socket aren't blocked, which is fine for a tool that only your own machine can reach, and would not be fine on a network anyone else is on. `UITALK_APP_HOST` in the table below configures where your *dev server* lives, not where the bridge itself listens.
+
 Prefer your own URL? `curl http://127.0.0.1:8400/__uitalk/bookmarklet` prints a bookmarklet that loads the same client. It needs re-clicking after each reload, and a strict app CSP can block it.
 
 ### Layout
@@ -372,7 +374,7 @@ Changing `agent*` or `opencodeServerUrl` takes effect on the next bridge start. 
 |---|---|---|
 | `UITALK_PROJECT` | `cwd` | Project root the agent reads and edits |
 | `UITALK_APP_PORT` | `5173` | Your dev server's port |
-| `UITALK_APP_HOST` | `127.0.0.1` | Your dev server's host |
+| `UITALK_APP_HOST` | `127.0.0.1` | Your dev server's host — not the bridge's; the bridge itself always binds to `127.0.0.1` |
 | `UITALK_PORT` | *first free from 8400* | Pin the bridge's port. Leave unset to run several at once |
 | `UITALK_HOME` | `~/.uitalk` | Where the instance registry, logs and credentials live |
 | `UITALK_RPC_TIMEOUT` | `5000` | Milliseconds before a page call is abandoned |
