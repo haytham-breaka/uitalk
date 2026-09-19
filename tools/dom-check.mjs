@@ -367,6 +367,84 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   wrap.remove();
 }
 
+// --- cascade correctness: :is()/:not() take their most specific argument's
+// specificity, not a flat pseudo-class count plus everything inside
+{
+  const wrap = window.document.createElement("div");
+  wrap.innerHTML = `<div class="app"><div class="page"><button class="bar special" id="special">x</button></div></div>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  // :is(#app, .page) button -> id:1 (from #app) + type:1 (button) = (1,0,1),
+  // which beats .bar.special's two classes (0,2,0) on the id alone.
+  style.textContent = `
+    :is(#app, .page) button { color: red; }
+    .bar.special { color: blue; }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: "#special" });
+  check("a single :is(...) selector is matched at all, not shredded by a naive comma split",
+    out.rules.some((r) => r.selector === ":is(#app, .page) button"),
+    JSON.stringify(out.rules.map((r) => r.selector)));
+  check(":is() takes its most specific argument's specificity, beating two classes with one id",
+    out.winners?.color?.from?.startsWith(":is(#app, .page) button"), out.winners?.color?.from);
+
+  style.remove();
+  wrap.remove();
+}
+
+{
+  const wrap = window.document.createElement("div");
+  wrap.innerHTML = `<div class="page"><button class="bar" id="special">x</button></div>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  // :not(#special) .bar -> id:1 (from :not's argument) + class:1 (.bar) = (1,1,0),
+  // which beats a lone .bar.other with two classes (0,2,0) on the id alone.
+  style.textContent = `
+    .bar.other { color: red; }
+    :not(#nope) .bar { color: blue; }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".bar" });
+  check(":not() contributes its argument's specificity on top of what's outside it",
+    out.winners?.color?.from?.startsWith(":not(#nope) .bar"), out.winners?.color?.from);
+  check("as exactly (1,1,0), not the old class-per-token approximation",
+    JSON.stringify(out.rules.find((r) => r.selector === ":not(#nope) .bar")?.specificity) === "[1,1,0]",
+    JSON.stringify(out.rules.find((r) => r.selector === ":not(#nope) .bar")?.specificity));
+
+  style.remove();
+  wrap.remove();
+}
+
+{
+  const wrap = window.document.createElement("div");
+  wrap.innerHTML = `<div class="app"><div class="page"><button class="bar" id="special">x</button></div></div>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  // A :where() nested inside :is() must still contribute zero: the effective
+  // specificity of :is(:where(.app), .page) is .page's alone, (0,1,0), plus
+  // "button" (0,0,1) = (0,1,1) — less specific than three plain classes.
+  style.textContent = `
+    :is(:where(.app), .page) button { color: red; }
+    .app .page .bar { color: blue; }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".bar" });
+  check(":where() nested inside :is() still contributes zero",
+    out.winners?.color?.from?.startsWith(".app .page .bar"), out.winners?.color?.from);
+  check("as exactly (0,1,1), not the old approximation that also counts :is() and :where()'s own tokens",
+    JSON.stringify(out.rules.find((r) => r.selector === ":is(:where(.app), .page) button")?.specificity) === "[0,1,1]",
+    JSON.stringify(out.rules.find((r) => r.selector === ":is(:where(.app), .page) button")?.specificity));
+
+  style.remove();
+  wrap.remove();
+}
+
 // --- source location: confidence tiers, not a flat "found it or didn't"
 {
   const none = UITalk.locateSource({ selector: ".notify-button" });
