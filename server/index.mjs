@@ -27,6 +27,7 @@ import * as settings from "./settings.mjs";
 import * as snapshots from "./snapshots.mjs";
 import { countUsages } from "./usage.mjs";
 import { findSourceCandidates } from "./candidates.mjs";
+import { isFrame } from "./protocol.mjs";
 
 // A fixed port would stop the second bridge from ever starting. An explicit
 // UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
@@ -54,7 +55,7 @@ let config = settings.load(PROJECT);
 const CLIENT_FILES = ["api.js", "raster.js", "native.js", "shell.js", "ui.js"]
   .map((f) => join(here, "..", "client", f));
 const SERVER_FILES = ["index.mjs", "page-tools.mjs", "tool-defs.mjs", "proxy.mjs",
-                      "settings.mjs", "registry.mjs", "snapshots.mjs"]
+                      "settings.mjs", "registry.mjs", "snapshots.mjs", "protocol.mjs"]
   .map((f) => join(here, f));
 
 const stamp = (files) =>
@@ -411,6 +412,7 @@ wss.on("connection", (ws) => {
     } catch {
       return log("dropped a frame that was not JSON");
     }
+    if (!isFrame(frame)) return log("dropped a frame with no valid kind");
 
     switch (frame.kind) {
       case "rpc_result":

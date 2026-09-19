@@ -147,6 +147,63 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("listing an empty registry is empty, not an error", registry.list().length === 0);
 }
 
+// ---------------------------------------------------------- protocol boundary
+{
+  const { isFrame } = await import("../server/protocol.mjs");
+  check("a plain object with a string kind is a frame", isFrame({ kind: "chat" }));
+  check("null is not a frame", !isFrame(null));
+  check("a bare primitive is not a frame", !isFrame(123) && !isFrame(true) && !isFrame("chat"));
+  check("an array is not a frame", !isFrame([{ kind: "chat" }]));
+  check("an object whose kind is not a string is not a frame", !isFrame({ kind: 123 }));
+}
+
+// -------------------------------------------------- MCP bridge discovery
+// The standalone MCP server must connect only to the bridge serving *its* project
+// — never fall back to an unrelated one — while an explicit port still wins.
+{
+  const registry = await import("../server/registry.mjs");
+  const { bridgeUrl, canonical } = await import("../server/mcp.mjs");
+  const { mkdtempSync, symlinkSync } = await import("node:fs");
+
+  const projA = mkdtempSync(join(sandbox, "projA-"));
+  const projB = mkdtempSync(join(sandbox, "projB-"));
+  // Two live pids: the registry keys by pid and prunes dead ones, so both entries
+  // need a process that is actually running to survive list().
+  registry.add({ pid: process.pid, port: 8500, appHost: "127.0.0.1", appPort: 5173, project: projA });
+  registry.add({ pid: process.ppid, port: 8501, appHost: "127.0.0.1", appPort: 5174, project: projB });
+
+  check("with one matching project, discovery finds its bridge",
+    bridgeUrl({ project: projA }) === "ws://127.0.0.1:8500/__uitalk/socket", bridgeUrl({ project: projA }));
+  check("with several registered, the exact project still wins",
+    bridgeUrl({ project: projB }) === "ws://127.0.0.1:8501/__uitalk/socket", bridgeUrl({ project: projB }));
+
+  check("a trailing separator does not defeat the match",
+    bridgeUrl({ project: projA + "/" }) === "ws://127.0.0.1:8500/__uitalk/socket", bridgeUrl({ project: projA + "/" }));
+
+  const linkToA = join(sandbox, "link-to-a");
+  symlinkSync(projA, linkToA);
+  check("a symlink to the project resolves to the same bridge",
+    bridgeUrl({ project: linkToA }) === "ws://127.0.0.1:8500/__uitalk/socket", bridgeUrl({ project: linkToA }));
+
+  check("canonical normalizes a trailing separator away",
+    canonical(projA + "/") === canonical(projA), `${canonical(projA + "/")} vs ${canonical(projA)}`);
+
+  let noMatch = null;
+  try { bridgeUrl({ project: join(sandbox, "not-registered") }); }
+  catch (e) { noMatch = e.message; }
+  check("no bridge for this project fails loudly instead of picking another",
+    /no uitalk is running for/.test(noMatch ?? ""), noMatch);
+  check("and the error names what is registered, to diagnose the mismatch",
+    noMatch?.includes(projA) && noMatch?.includes(":8500"), noMatch);
+
+  check("an explicit port wins outright, no registry lookup",
+    bridgeUrl({ port: 9999, project: join(sandbox, "not-registered") }) === "ws://127.0.0.1:9999/__uitalk/socket",
+    bridgeUrl({ port: 9999, project: join(sandbox, "not-registered") }));
+
+  registry.remove(process.pid);
+  registry.remove(process.ppid);
+}
+
 // ------------------------------------------------------------ usage counting
 {
   const { countUsages } = await import("../server/usage.mjs");
@@ -665,6 +722,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       on: (type, fn) => (handlers[type] = fn),
       send: (data) => sent.push(JSON.parse(data)),
       deliver: (frame) => handlers.message?.(Buffer.from(JSON.stringify(frame))),
+      deliverRaw: (bytes) => handlers.message?.(Buffer.from(bytes)),
       close: () => handlers.close?.(),
     };
     bridge.wss.emit("connection", ws, {});
@@ -718,6 +776,20 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
 
   page.deliver({ kind: "nonsense" });
   check("an unknown frame is ignored rather than crashing the bridge", true);
+
+  // Valid JSON that is not a protocol frame — a bare null, primitive, or array —
+  // must be dropped at the edge, not reach a handler that reads .kind on it. A
+  // literal `null` used to throw straight out of the message handler.
+  for (const bytes of ["null", "true", "123", '"a string"', "[]", "{}", '{"kind":123}', "not json{"]) {
+    page.deliverRaw(bytes);
+  }
+  check("malformed frames are dropped without crashing the bridge", true);
+  // ...and a valid frame delivered right after still works, so the connection
+  // was not poisoned by the junk before it.
+  bridge.transcript.length = 0;
+  page.deliver({ kind: "chat", text: "still alive" });
+  check("a valid frame after malformed ones is still handled",
+    bridge.transcript.some((t) => t.text?.includes("still alive")), JSON.stringify(bridge.transcript));
 
   // settings arrive from the panel and come back merged
   newer.sent.length = 0;

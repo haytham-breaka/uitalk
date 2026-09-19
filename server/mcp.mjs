@@ -17,22 +17,52 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
 import * as registry from "./registry.mjs";
+import { isFrame } from "./protocol.mjs";
 import { countUsages } from "./usage.mjs";
 import { findSourceCandidates } from "./candidates.mjs";
 
 const PORT = Number(process.env.UITALK_PORT ?? 0);
 const PROJECT = process.env.UITALK_PROJECT ?? process.cwd();
 
-/** Find the bridge to talk to: an explicit port, or the one serving this project. */
-function bridgeUrl() {
-  if (PORT) return `ws://127.0.0.1:${PORT}/__uitalk/socket`;
-  const mine = registry.list().find((e) => e.project === PROJECT) ?? registry.list()[0];
+/**
+ * A project path in the one form two spellings of the same directory share:
+ * symlinks resolved, relative made absolute, trailing separator dropped. On
+ * Windows the filesystem is case-insensitive, so the drive letter and the rest
+ * are lowercased there too. realpathSync needs the path to exist; a path that
+ * does not (a stale registry entry, say) still normalizes enough to compare.
+ */
+export function canonical(p) {
+  let out;
+  try {
+    out = realpathSync.native ? realpathSync.native(p) : realpathSync(p);
+  } catch {
+    out = resolve(p);
+  }
+  return process.platform === "win32" ? out.toLowerCase() : out;
+}
+
+/**
+ * The bridge to talk to: an explicit port wins outright; otherwise only the
+ * bridge serving *this* project, never someone else's. The registry is built
+ * for several projects at once, so connecting to whichever happened to start
+ * first would leave the file tools on this project and the page tools on an
+ * unrelated app — the confusing split this refuses to create.
+ */
+export function bridgeUrl({ port = PORT, project = PROJECT } = {}) {
+  if (port) return `ws://127.0.0.1:${port}/__uitalk/socket`;
+  const running = registry.list();
+  const me = canonical(project);
+  const mine = running.find((e) => canonical(e.project) === me);
   if (!mine) {
+    const elsewhere = running.map((e) => `${e.project} (:${e.port})`).join(", ");
     throw new Error(
-      "no uitalk is running. Start one in your project first:\n" +
-        "  uitalk --dev \"npm run dev\"",
+      `no uitalk is running for ${project}. Start one in your project first:\n` +
+        `  uitalk --dev "npm run dev"` +
+        (running.length ? `\n(running elsewhere: ${elsewhere})` : ""),
     );
   }
   return `ws://127.0.0.1:${mine.port}/__uitalk/socket`;
@@ -62,6 +92,7 @@ function connect() {
     } catch {
       return;
     }
+    if (!isFrame(frame)) return;
 
     if (frame.kind === "call_result") {
       const entry = pending.get(frame.id);
@@ -257,4 +288,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-await server.connect(new StdioServerTransport());
+// Importing this module for a test must not hijack stdio with a live MCP server.
+if (process.env.UITALK_IMPORT_ONLY !== "1") {
+  await server.connect(new StdioServerTransport());
+}
