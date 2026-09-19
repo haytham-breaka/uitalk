@@ -171,6 +171,13 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   // mentions the tag with no import at all — a comment and a string, not usage
   writeFileSync(join(proj, "src", "pages", "Docs.tsx"),
     "// example: <Button label=\"Save\" />\nconst snippet = \"<Button/>\";\nexport default () => null;\n");
+  // imports the real Button under a different local name — never contains the
+  // literal text "<Button" anywhere, so this only confirms if imports are
+  // resolved before searching for the original name, not after
+  writeFileSync(join(proj, "src", "pages", "Renamed.tsx"),
+    "import { Button as PrimaryButton } from '../components/Button';\nexport default () => <PrimaryButton/>;\n");
+  writeFileSync(join(proj, "src", "pages", "DefaultAs.tsx"),
+    "import Whatever from '../components/Button';\nexport default () => <Whatever/>;\n");
   writeFileSync(join(proj, "node_modules", "some-lib", "Button.tsx"), "<Button/><Button/><Button/>\n");
 
   mkdirSync(join(proj, "src", "vue"), { recursive: true });
@@ -179,16 +186,23 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     "<script>import MyWidget from './MyWidget.vue'</script><template><my-widget/></template>\n");
 
   const found = countUsages(proj, "Button", "src/components/Button.tsx");
-  check("counts a genuine import as confirmed", found?.confirmedFiles === 2, JSON.stringify(found));
+  check("counts a genuine import as confirmed", found?.confirmedFiles === 4, JSON.stringify(found));
   check("a same-named component elsewhere is not confirmed as reuse of this one",
-    found?.confirmedFiles === 2, JSON.stringify(found)); // Old.tsx must not inflate this
+    found?.confirmedFiles === 4, JSON.stringify(found)); // Old.tsx must not inflate this
   check("an unimported tag mention (comment, string, a different import) is possible, not confirmed",
     found?.possibleFiles === 2, JSON.stringify(found)); // Old.tsx + Docs.tsx
   check("node_modules is not counted at all", !JSON.stringify(found).includes("node_modules"), JSON.stringify(found));
   check("a small count is not reported as capped", found?.capped === false, JSON.stringify(found));
 
   check("a single-word name's kebab-case does not degenerate into the native HTML tag",
-    countUsages(proj, "Button", "src/components/Button.tsx")?.confirmedFiles === 2);
+    countUsages(proj, "Button", "src/components/Button.tsx")?.confirmedFiles === 4);
+
+  check("a renamed named import is confirmed, even though the file never contains the literal text '<Button'",
+    !readFileSync(join(proj, "src", "pages", "Renamed.tsx"), "utf8").includes("<Button") && found?.confirmedFiles === 4,
+    readFileSync(join(proj, "src", "pages", "Renamed.tsx"), "utf8"));
+  check("a default import under an unrelated local name is confirmed the same way",
+    !readFileSync(join(proj, "src", "pages", "DefaultAs.tsx"), "utf8").includes("<Button") && found?.confirmedFiles === 4,
+    readFileSync(join(proj, "src", "pages", "DefaultAs.tsx"), "utf8"));
 
   check("a non-component-shaped name is not counted",
     countUsages(proj, "onClick", "src/components/Button.tsx") === null);
