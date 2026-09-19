@@ -1031,6 +1031,55 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
   await tick();
 
+  // The agent's reply is rendered as markdown into innerHTML, so a crafted link
+  // must not be able to smuggle HTML or attributes past the escaper. These assert
+  // on the live DOM, not on the output string, because the real question is what
+  // the browser builds — a quote that closes href would appear as a genuine
+  // event-handler attribute on the <a>, not merely as text in the markup.
+  {
+    sock.onmessage({ data: JSON.stringify({ kind: "delta",
+      text: "see [the docs](https://example.com/guide) for more" }) });
+    await new Promise((r) => setTimeout(r, 50));
+    const link = [...root.querySelectorAll(".msg.agent")].at(-1).querySelector("a");
+    check("a normal https link renders as an anchor to its URL",
+      link?.getAttribute("href") === "https://example.com/guide" && link.textContent === "the docs",
+      link?.outerHTML);
+    check("and keeps target=_blank with a noopener/noreferrer rel",
+      link?.target === "_blank" && link?.rel === "noopener noreferrer", link?.outerHTML);
+    sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+    await tick();
+  }
+
+  {
+    // A quote in the URL (no whitespace, so it survives the link regex) would,
+    // unescaped, close href and let onmouseover become a real attribute.
+    sock.onmessage({ data: JSON.stringify({ kind: "delta",
+      text: `click [x](https://example.com/"onmouseover="alert(1))` }) });
+    await new Promise((r) => setTimeout(r, 50));
+    const link = [...root.querySelectorAll(".msg.agent")].at(-1).querySelector("a");
+    check("a quote in a link URL cannot open a new attribute",
+      link !== null && !link.hasAttribute("onmouseover"),
+      link ? link.outerHTML : "no anchor rendered");
+    check("the whole crafted URL, quote and all, stays inside the href value",
+      link?.getAttribute("href") === `https://example.com/"onmouseover="alert(1`,
+      link?.getAttribute("href"));
+    sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+    await tick();
+  }
+
+  {
+    // Raw HTML in a reply is content, not markup: it must render as visible text.
+    sock.onmessage({ data: JSON.stringify({ kind: "delta",
+      text: `before <img src=x onerror="alert(1)"> after` }) });
+    await new Promise((r) => setTimeout(r, 50));
+    const bubble = [...root.querySelectorAll(".msg.agent")].at(-1);
+    check("raw HTML in a reply is shown as text, not built into DOM",
+      bubble.querySelector("img") === null && bubble.textContent.includes("<img src=x"),
+      bubble.innerHTML.slice(0, 160));
+    sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+    await tick();
+  }
+
   sock.onmessage({ data: JSON.stringify({ kind: "agent_absent", text: "nobody is here to read that" }) });
   await tick();
   check("a message the bridge could not deliver is reported in the log",

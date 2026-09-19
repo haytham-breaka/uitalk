@@ -496,8 +496,13 @@
     out = out.replace(/`([^`\n]+)`/g, (_, code) => `<code>${code}</code>`);
     out = out.replace(/\*\*([^*\n]+)\*\*/g, (_, b) => `<strong>${b}</strong>`);
     out = out.replace(/\*([^*\n]+)\*/g, (_, i) => `<em>${i}</em>`);
+    // The line has already been through escapeHtml, so <, > and & in the URL are
+    // entities by now — but escapeHtml leaves " alone (it is harmless in text),
+    // and here the URL sits inside a double-quoted attribute, where an unescaped "
+    // would close href and let the rest become new attributes (onmouseover=…).
+    // The protocol restriction to http(s) is what keeps javascript: out.
     out = out.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
-      (_, text, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`);
+      (_, text, url) => `<a href="${url.replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer">${text}</a>`);
     return out;
   }
 
