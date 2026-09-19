@@ -318,6 +318,12 @@ function setSnapshotForTest(fn) {
   snapshotFn = fn ?? ((label) => snapshots.snapshot(PROJECT, label));
 }
 
+/** captureAfter() sends no panel frame of its own, so a test polls this instead
+ * of sleeping for a duration a slower machine may not honour. */
+function approvalPhaseForTest() {
+  return approvalPhase;
+}
+
 const AGENT_MODES = {
   builtin: "the built-in Claude session",
   adapter: "your own model",
@@ -1403,6 +1409,7 @@ export {
   askAgent,
   setSessionForTest,
   setSnapshotForTest,
+  approvalPhaseForTest,
 };
 
 let closing = false;

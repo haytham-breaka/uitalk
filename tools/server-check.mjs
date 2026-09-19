@@ -834,6 +834,17 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   execFileSync("git", ["add", "."], { cwd: process.env.UITALK_PROJECT });
   execFileSync("git", ["commit", "-qm", "init"], { cwd: process.env.UITALK_PROJECT });
 
+  // The snapshot and captureAfter are real git subprocess calls; how long they
+  // take is the machine's business, so wait for the state rather than a duration.
+  const until = async (cond, what) => {
+    for (let i = 0; i < 400; i++) {
+      if (cond()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+  const untilPhase = (phase) => until(() => bridge.approvalPhaseForTest() === phase, `approval phase "${phase}"`);
+
   {
     // adapter/opencode mode calls session.send() synchronously inside
     // pushToAgent(), with no await in between — so if the old fire-and-forget
@@ -848,7 +859,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     check("the agent is not pushed the edit instruction before the pre-edit snapshot exists",
       sent.length === 0, `pushed ${sent.length} time(s) synchronously`);
 
-    await new Promise((r) => setTimeout(r, 60));
+    await untilPhase("editing");
     check("...and receives it once the snapshot has actually been taken",
       sent.length === 1 && /Now commit this to source/.test(sent[0]), JSON.stringify(sent));
     check("the panel is told the change is revertable no earlier than that",
@@ -870,7 +881,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       p.sent.some((f) => f.kind === "approval_rejected" && f.label === "second"),
       JSON.stringify(p.sent.map((f) => f.kind)));
 
-    await new Promise((r) => setTimeout(r, 60));
+    await untilPhase("editing");
     check("the first approval's own snapshot still completed undisturbed",
       p.sent.some((f) => f.kind === "revertable" && f.label === "first"),
       JSON.stringify(p.sent.filter((f) => f.kind === "revertable")));
@@ -893,23 +904,23 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
 
     p.sent.length = 0;
     p.deliver({ kind: "approval", label: "first change", ref: 1, declarations: "color:red", element: {} });
-    await new Promise((r) => setTimeout(r, 60)); // let the pre-edit snapshot resolve
+    await untilPhase("editing"); // the pre-edit snapshot has resolved
     writeFileSync(join(proj, "a.css"), ".a{color:blue}\n"); // the "agent" makes the edit
     bridge.relay({ type: "result", subtype: "success" }); // its turn ends
-    await new Promise((r) => setTimeout(r, 60)); // let captureAfter (and the phase reset) resolve
+    await untilPhase("idle"); // captureAfter has run
 
     p.sent.length = 0;
     p.deliver({ kind: "approval", label: "second change", ref: 2, declarations: "color:green", element: {} });
     check("a second approval is accepted once the first one's turn has genuinely ended",
       !p.sent.some((f) => f.kind === "approval_rejected"), JSON.stringify(p.sent.map((f) => f.kind)));
-    await new Promise((r) => setTimeout(r, 60));
+    await untilPhase("editing");
     writeFileSync(join(proj, "a.css"), ".a{color:green}\n"); // the "agent" makes the second edit
     bridge.relay({ type: "result", subtype: "success" });
-    await new Promise((r) => setTimeout(r, 60));
+    await untilPhase("idle");
 
     p.sent.length = 0;
     p.deliver({ kind: "revert" });
-    await new Promise((r) => setTimeout(r, 60));
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the revert to answer");
     const reverted = p.sent.find((f) => f.kind === "reverted");
     check("undo after two sequential approvals names the most recent one",
       reverted?.ok === true && reverted.label === "second change", JSON.stringify(reverted));
@@ -946,10 +957,10 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     });
 
     p.deliver({ kind: "approval", label: "third change", ref: 1, declarations: "color:purple", element: {} });
-    await new Promise((r) => setTimeout(r, 60));
+    await untilPhase("editing");
     writeFileSync(join(proj, "a.css"), ".a{color:purple}\n");
     bridge.relay({ type: "result", subtype: "success" });
-    await new Promise((r) => setTimeout(r, 60));
+    await untilPhase("idle");
 
     p.sent.length = 0;
     p.deliver({ kind: "revert" });
@@ -962,7 +973,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       p.sent.filter((f) => f.kind === "reverted" && f.ok === false && /already undoing/.test(f.text ?? "")).length === 1,
       JSON.stringify(p.sent));
 
-    await new Promise((r) => setTimeout(r, 60));
+    await until(() => p.sent.some((f) => f.kind === "reverted" && f.ok === true), "the first revert to finish");
     check("the original revert still completes normally",
       p.sent.some((f) => f.kind === "reverted" && f.ok === true), JSON.stringify(p.sent));
 
