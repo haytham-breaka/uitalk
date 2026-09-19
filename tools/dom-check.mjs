@@ -309,6 +309,52 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   root.remove();
 }
 
+// --- a selector-targeted preview is attached by a stamped attribute, not the
+// selector itself — a re-render that replaces the element leaves an already-
+// adopted preview rule matching nothing, unless the target is reconciled
+{
+  const root = window.document.createElement("div");
+  const oldBtn = window.document.createElement("button");
+  oldBtn.className = "checkout-target";
+  root.appendChild(oldBtn);
+  window.document.body.appendChild(root);
+
+  UITalk.tryStyle({ selector: ".checkout-target", declarations: "color: red" });
+  const token = oldBtn.getAttribute("data-uitalk-target");
+  check("the selector target is stamped with a handle", typeof token === "string" && token.length > 0, token);
+
+  const newBtn = window.document.createElement("button");
+  newBtn.className = "checkout-target";
+  root.replaceChild(newBtn, oldBtn);
+  check("the fresh node carries no handle before reconciliation", !newBtn.hasAttribute("data-uitalk-target"));
+
+  UITalk.reconcileTargets(); // what ui.js's serve() calls before every RPC
+  check("reconciliation re-stamps the same token onto the node the selector now matches",
+    newBtn.getAttribute("data-uitalk-target") === token, newBtn.getAttribute("data-uitalk-target"));
+  check("the already-adopted preview rule matches the new node again, without touching its CSS text",
+    newBtn.matches(window.document.adoptedStyleSheets[0].text.match(/^([^{]+)\{/)[1].trim()));
+
+  UITalk.resetPreview();
+  root.remove();
+
+  // a selector that stops matching anything at all must not throw
+  const gone = window.document.createElement("div");
+  window.document.body.appendChild(gone);
+  const target = window.document.createElement("button");
+  target.className = "vanishing-target";
+  gone.appendChild(target);
+  UITalk.tryStyle({ selector: ".vanishing-target", declarations: "color: blue" });
+  gone.remove(); // the whole subtree, selector included, is gone now
+  let reconcileError = null;
+  try {
+    UITalk.reconcileTargets();
+  } catch (e) {
+    reconcileError = e.message;
+  }
+  check("reconciling a selector that now matches nothing does not throw", reconcileError === null, reconcileError);
+  UITalk.resetPreview();
+}
+
 // --- which rules actually style an element
 {
   // a stylesheet with two competing rules and a media block
@@ -626,8 +672,10 @@ UITalk.clearSelection();
 const bySel = UITalk.tryStyle({ selector: ".notify-button", declarations: "border-radius: 999px" });
 check("try_style accepts a CSS selector", bySel.applied === true, JSON.stringify(bySel.target?.classes));
 const adopted = () => window.document.adoptedStyleSheets.map((x) => x.text).join("\n");
+const targetToken = button.getAttribute("data-uitalk-target");
 check("it stamps a preview handle and doubles it for specificity",
-  /\[data-uitalk-target="1"\]\[data-uitalk-target="1"\]/.test(adopted()), adopted().slice(0, 60));
+  Boolean(targetToken) && adopted().includes(`[data-uitalk-target="${targetToken}"][data-uitalk-target="${targetToken}"]`),
+  adopted().slice(0, 60));
 check("the element carries the handle", button.hasAttribute("data-uitalk-target"));
 check("it reports which element it matched", bySel.target?.classes?.includes("notify-button"));
 
