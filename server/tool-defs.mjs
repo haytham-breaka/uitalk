@@ -19,8 +19,15 @@ export const failed = (err) => ({
  * @param {(method: string, message: string) => void} report
  * @param {((path: string, needles: string[]) => any) | null} findInHtml
  * @param {((name: string, definingFile: string) => any) | null} countUsages
+ * @param {((needles: string[]) => any[]) | null} findSourceCandidates
  */
-export function toolDefinitions(callPage, report = () => {}, findInHtml = null, countUsages = null) {
+export function toolDefinitions(
+  callPage,
+  report = () => {},
+  findInHtml = null,
+  countUsages = null,
+  findSourceCandidates = null,
+) {
   const ask = async (method, params) => {
     try {
       return text(await callPage(method, params));
@@ -158,13 +165,14 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null, 
       description:
         "Where an element came from in the codebase. Dev builds carry this: React and Svelte " +
         "record the file and line of each element, Vue records the component's file. Failing " +
-        "that, the bridge searches the HTML it actually served. The reply names the confidence " +
-        "of the answer — 'exact' (this element, file and line), 'component' (the right file, " +
-        "not necessarily the right line — always true for Vue), or 'candidate' (a served-HTML " +
-        "text match) — and the evidence behind it. Treat anything short of 'exact' as a lead to " +
-        "confirm, not a location to edit blind. When the resolved component is also rendered " +
-        "elsewhere in the project, a 'reuse' field says how many other files — see ask_choice " +
-        "for what to do about it. Use this before hunting with grep.",
+        "that, the bridge searches the project's own source for the element's identifiers, and " +
+        "failing that, the HTML it actually served. The reply names the confidence of the " +
+        "answer — 'exact' (this element, file and line), 'component' (the right file, not " +
+        "necessarily the right line — always true for Vue), or 'candidate' (a text match, in " +
+        "source or served HTML) — and the evidence behind it. Treat anything short of 'exact' " +
+        "as a lead to confirm, not a location to edit blind. When the resolved component is " +
+        "also rendered elsewhere in the project, a 'reuse' field says how many other files — " +
+        "see ask_choice for what to do about it. Use this before hunting with grep.",
       schema: {
         ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
         selector: { type: "string", description: "A CSS selector, when nothing is selected" },
@@ -173,22 +181,52 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null, 
         try {
           let found = await callPage("locateSource", args);
 
-          if (found.confidence === "none" && findInHtml) {
+          if (found.confidence === "none") {
             const id = found.element ?? {};
-            const guess = findInHtml(found.page?.path ?? "/", [
-              id.id && `id="${id.id}"`,
+            // Most distinctive first: a test id or id is close to unique, a class or
+            // plain text is common enough to land on the wrong file.
+            const needles = [
               id.testId && `data-testid="${id.testId}"`,
+              id.id && `id="${id.id}"`,
               id.aria && `aria-label="${id.aria}"`,
-              id.text,
+              id.href,
+              id.src,
               id.classes?.[0] && `class="${id.classes[0]}`,
-            ]);
-            if (guess.found) {
-              found = {
-                ...found,
-                confidence: "candidate",
-                evidence: [{ kind: "served-html-search", line: guess.line, column: guess.column, matched: guess.matched, excerpt: guess.excerpt }],
-                note: "a text match in the HTML the bridge served, not a source file — confirm it before editing",
-              };
+              id.text,
+            ].filter(Boolean);
+
+            // The project's own source points at a file worth opening; served HTML
+            // is often a rendered, sometimes-transformed artifact that isn't one.
+            if (needles.length && findSourceCandidates) {
+              const candidates = findSourceCandidates(needles);
+              if (candidates.length) {
+                found = {
+                  ...found,
+                  confidence: "candidate",
+                  evidence: candidates.map((c) => ({
+                    kind: "project-source-search",
+                    file: c.file,
+                    line: c.line,
+                    matched: c.matched,
+                    excerpt: c.excerpt,
+                  })),
+                  note:
+                    "a text match in the project's own source, not confirmed by any framework " +
+                    "metadata — read the file before trusting it",
+                };
+              }
+            }
+
+            if (found.confidence === "none" && findInHtml) {
+              const guess = findInHtml(found.page?.path ?? "/", needles);
+              if (guess.found) {
+                found = {
+                  ...found,
+                  confidence: "candidate",
+                  evidence: [{ kind: "served-html-search", line: guess.line, column: guess.column, matched: guess.matched, excerpt: guess.excerpt }],
+                  note: "a text match in the HTML the bridge served, not a source file — confirm it before editing",
+                };
+              }
             }
           }
 

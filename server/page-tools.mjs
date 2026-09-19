@@ -48,9 +48,10 @@ function toZod(def) {
  *   sees whatever the agent decides to say about it — which may be a guess.
  * @param {((path: string, needles: string[]) => any) | null} [findInHtml]
  * @param {((name: string, definingFile: string) => any) | null} [countUsages]
+ * @param {((needles: string[]) => any[]) | null} [findSourceCandidates]
  */
-export function createPageServer(callPage, report = () => {}, findInHtml = null, countUsages = null) {
-  const defs = toolDefinitions(callPage, report, findInHtml, countUsages);
+export function createPageServer(callPage, report = () => {}, findInHtml = null, countUsages = null, findSourceCandidates = null) {
+  const defs = toolDefinitions(callPage, report, findInHtml, countUsages, findSourceCandidates);
 
   return createSdkMcpServer({
     name: "page",

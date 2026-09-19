@@ -80,6 +80,10 @@ globalThis.UITalk = (() => {
       aria: el.getAttribute("aria-label") || undefined,
       role: el.getAttribute("role") || undefined,
       name: el.getAttribute("name") || undefined,
+      // The literal attribute, not el.href/el.src, which the DOM resolves to an
+      // absolute URL — source files contain the string as written, not that.
+      href: el.getAttribute("href") || undefined,
+      src: el.getAttribute("src") || undefined,
       data: dataAttrs(el),
       text: label(el),
       selector: ref ? `[${REF_ATTR}="${ref}"]` : cssPath(el),

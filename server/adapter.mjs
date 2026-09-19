@@ -17,6 +17,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, exist
 import { resolve, relative, join, dirname, sep, isAbsolute } from "node:path";
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
 import { countUsages } from "./usage.mjs";
+import { findSourceCandidates } from "./candidates.mjs";
 
 const DEFAULT_MODEL = {
   openai: "gpt-5",
@@ -418,7 +419,13 @@ export function createAdapter({
   const cfg = { base: (config.agentBaseUrl ?? "").replace(/\/$/, "") };
 
   const defs = [
-    ...toolDefinitions(callPage, report, null, (name, file) => countUsages(project, name, file)),
+    ...toolDefinitions(
+      callPage,
+      report,
+      null,
+      (name, file) => countUsages(project, name, file),
+      (needles) => findSourceCandidates(project, needles),
+    ),
     ...fileTools(project, report),
   ];
   const system =
