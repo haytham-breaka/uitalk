@@ -530,6 +530,11 @@ export function createAdapter({
           log(`adapter turn failed: ${err.message}`);
           toPanel({ kind: "error", text: err.message });
           toPanel({ kind: "turn_end", text: "error" });
+          // A failed turn may still have written files before it errored — the
+          // undo snapshot's post-edit capture needs to run here too, or a revert
+          // after a partial failure falls back to the coarser whole-file behavior
+          // right when the safer, scoped one matters most.
+          onTurnEnd();
         }
       });
     },

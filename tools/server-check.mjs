@@ -596,6 +596,78 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     newer.sent.some((f) => f.kind === "reverted" && f.ok === false),
     JSON.stringify(newer.sent.find((f) => f.kind === "reverted")));
 
+  // a page that disconnects mid-call leaves a promise with nothing to answer it —
+  // that should fail fast, not sit until the generic timeout
+  {
+    newer.sent.length = 0;
+    newer.deliver({ kind: "focus", url: "http://127.0.0.1:8400/", visible: true }); // re-activate it
+    const inflight2 = bridge.callPage("capture", {}, 5000).then(() => null, (e) => e.message);
+    newer.close();
+    const msg = await inflight2;
+    check("a call rejects immediately when its page disconnects, not after the timeout",
+      /disconnected/.test(msg ?? ""), msg);
+  }
+
+  // New Session (or Compact now) used to be able to fire while an ordinary turn was
+  // still open: the SDK's next "result" event — belonging to that real turn — got
+  // mistaken for the internal ask's own answer, silently dropping the real turn's
+  // transcript entry, its turn_end, and its undo-safety capture.
+  {
+    const p2 = makePage();
+    p2.deliver({ kind: "focus", url: "http://127.0.0.1:8400/", visible: true });
+    p2.sent.length = 0;
+    bridge.setSessionForTest({
+      mode: "builtin",
+      label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    bridge.transcript.length = 0;
+
+    bridge.pushToAgent("what changed?"); // a real, ordinary turn starts
+    bridge.relay({ type: "assistant", message: { content: [] } });
+    bridge.relay({ type: "stream_event", event: { delta: { type: "text_delta", text: "I edited Button.tsx." } } });
+
+    const cleared = bridge.clearSession(); // New Session, while that turn is still open
+    cleared.catch(() => {}); // its own internal ask never gets a real answer in this test
+
+    bridge.relay({ type: "result", subtype: "success" }); // the real turn finally finishes
+    await new Promise((r) => setTimeout(r, 20));
+
+    check("the real turn's completion still reaches the panel despite the concurrent New Session",
+      p2.sent.some((f) => f.kind === "turn_end"), JSON.stringify(p2.sent.map((f) => f.kind)));
+    check("and is still recorded, rather than being swallowed by the internal ask",
+      bridge.transcript.some((t) => t.role === "agent" && /edited Button/.test(t.text)),
+      JSON.stringify(bridge.transcript));
+
+    bridge.setSessionForTest(null);
+    p2.close();
+  }
+
+  // undo must not race a turn that is still writing: postCaptured only appears
+  // once the turn that made a change has genuinely finished (see snapshots.mjs).
+  {
+    execFileSync("git", ["init", "-q"], { cwd: process.env.UITALK_PROJECT });
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: process.env.UITALK_PROJECT });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: process.env.UITALK_PROJECT });
+    writeFileSync(join(process.env.UITALK_PROJECT, "style.css"), ".a{color:red}\n");
+    execFileSync("git", ["add", "."], { cwd: process.env.UITALK_PROJECT });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd: process.env.UITALK_PROJECT });
+
+    page.sent.length = 0;
+    page.deliver({ kind: "approval", label: "make it bold", ref: 1, declarations: "font-weight:700", element: {} });
+    await new Promise((r) => setTimeout(r, 30));
+
+    page.sent.length = 0;
+    page.deliver({ kind: "revert" });
+    await new Promise((r) => setTimeout(r, 30));
+    const refused = page.sent.find((f) => f.kind === "reverted");
+    check("undo refuses while the approved edit's turn is still open, rather than racing it",
+      refused?.ok === false && /hasn't finished/.test(refused.text ?? ""), JSON.stringify(refused));
+
+    await bridge.clearSession(); // drop lastChange before the tests that follow
+  }
+
   const openBefore = bridge.clients.size;
   page.close();
   check("a page that disconnects is forgotten", bridge.clients.size === openBefore - 1,

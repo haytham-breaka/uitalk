@@ -240,11 +240,13 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
   // is the likeliest first-run failure and the message is all the user gets.
   const { fetchImpl } = fakeProvider([{ status: 404, body: '{"error":{"message":"model not found"}}' }]);
   const panel = [];
+  let turnEnded = 0;
   const adapter = createAdapter({
     config: { agentProvider: "openai", agentModel: "nope-5" },
     project: process.cwd(),
     callPage: async () => ({}),
     toPanel: (f) => panel.push(f),
+    onTurnEnd: () => turnEnded++,
     fetchImpl,
   });
   adapter.useCredentials(() => ({ key: "k", from: "$TEST" }));
@@ -256,6 +258,8 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
     err?.text?.slice(0, 90) ?? "no error frame");
   check("and the turn still ends, so the panel is not left spinning",
     panel.at(-1).kind === "turn_end", panel.at(-1).kind);
+  check("and onTurnEnd still runs on a failed turn, so undo's post-edit capture isn't skipped",
+    turnEnded === 1, `onTurnEnd called ${turnEnded} time(s)`);
 }
 
 {

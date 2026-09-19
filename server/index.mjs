@@ -231,7 +231,7 @@ function callPage(method, params = {}, timeoutMs = RPC_TIMEOUT) {
     const timer = setTimeout(() => {
       if (pending.delete(id)) reject(new Error(`${method} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, { resolve, reject, timer, page, method });
   });
 }
 
@@ -244,12 +244,29 @@ function settleRpc({ id, result, error }) {
   else entry.resolve(result);
 }
 
+/** A page that disconnects mid-call leaves nothing to ever answer it — reject those
+ * calls right away instead of leaving the caller to wait out the generic timeout. */
+function rejectPending(page) {
+  for (const [id, entry] of pending) {
+    if (entry.page !== page) continue;
+    pending.delete(id);
+    clearTimeout(entry.timer);
+    entry.reject(new Error(`${entry.method}: the page disconnected before answering`));
+  }
+}
+
 // ------------------------------------------------- agent inbox (in-bound push)
 
 // Set once the session starts. The panel's chat, compaction and New-session
 // controls all go through this, so they behave the same whichever mode is running
 // and report honestly when the answer is "nobody is listening".
 let session = null;
+
+/** The three run* functions construct this themselves in production; a test stands
+ * in for one to exercise compact()/clearSession() without a real SDK. */
+function setSessionForTest(s) {
+  session = s;
+}
 
 const AGENT_MODES = {
   builtin: "the built-in Claude session",
@@ -260,6 +277,19 @@ const AGENT_MODES = {
 
 let wake = null;
 const backlog = [];
+
+// Builtin mode feeds one long-lived query() call through a single async
+// generator, so exactly one prompt is in flight at a time — but nothing
+// stopped an internal ask (compaction's summary request, "/clear") from being
+// pushed while an ordinary turn was still running. Since only one "result"
+// event can be waited on at once (see `internal` below), that made the
+// ordinary turn's own completion get mistaken for the internal ask's answer,
+// dropping its transcript entry, its turn_end, and its undo-safety capture
+// entirely. Tracking whether a turn is currently open lets askAgent() wait its
+// turn instead, the same way adapter and opencode already serialize their own
+// summarize()/clear() behind send() with a promise-chain queue.
+let builtinTurnOpen = false;
+const afterBuiltinTurn = [];
 
 function pushToAgent(content) {
   // Both drive their own HTTP-shaped conversation rather than the Claude SDK's
@@ -276,6 +306,7 @@ function pushToAgent(content) {
     });
     return;
   }
+  builtinTurnOpen = true;
   const msg = { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
   if (wake) {
     const resume = wake;
@@ -384,6 +415,18 @@ wss.on("connection", (ws) => {
             toPanel({ kind: "reverted", ok: false, text: "there is nothing to go back to" });
             return;
           }
+          // postCaptured is only set once the turn that made this change has
+          // genuinely finished (see noteTurnEnded()). Reverting before then would
+          // race that turn's own writes with git checkout — safer to say so than
+          // to interleave with a file the agent may still be in the middle of.
+          if (!lastChange.snap.postCaptured) {
+            toPanel({
+              kind: "reverted",
+              ok: false,
+              text: "the agent hasn't finished making this change yet — wait for it to finish, then undo",
+            });
+            return;
+          }
           try {
             const out = await snapshots.revertTo(PROJECT, lastChange.snap);
             log(
@@ -469,6 +512,7 @@ wss.on("connection", (ws) => {
     clients.delete(ws);
     agents.delete(ws);
     if (activePage === ws) activePage = null;
+    rejectPending(ws);
     log(`page disconnected (${clients.size} open)`);
   });
   ws.on("error", (err) => log("socket error:", err.message));
@@ -635,19 +679,25 @@ let internal = null;
 
 function askAgent(text, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      internal = null;
-      reject(new Error("the agent did not finish in time"));
-    }, timeoutMs);
-    internal = {
-      buffer: "",
-      done: (value) => {
-        clearTimeout(timer);
+    const arm = () => {
+      const timer = setTimeout(() => {
         internal = null;
-        resolve(value);
-      },
+        reject(new Error("the agent did not finish in time"));
+      }, timeoutMs);
+      internal = {
+        buffer: "",
+        done: (value) => {
+          clearTimeout(timer);
+          internal = null;
+          resolve(value);
+        },
+      };
+      pushToAgent(text);
     };
-    pushToAgent(text);
+    // An ordinary turn already has the SDK's one "result" event spoken for;
+    // arming here too would steal it. Wait for that turn to finish first.
+    if (builtinTurnOpen) afterBuiltinTurn.push(arm);
+    else arm();
   });
 }
 
@@ -946,6 +996,11 @@ async function runOpencode() {
     if (t.quiet) return t.reject(new Error(message));
     toPanel({ kind: "error", text: message });
     toPanel({ kind: "turn_end", text: "error" });
+    // A failed turn may still have written files before it errored — the undo
+    // snapshot's post-edit capture needs to run here too, or a revert after a
+    // partial failure falls back to the coarser whole-file behavior right when
+    // the safer, scoped one matters most.
+    void noteTurnEnded();
   }
 
   (async () => {
@@ -1123,16 +1178,21 @@ function relay(event) {
 
     case "result": {
       if (event.subtype !== "success") log(`turn ended abnormally: ${event.subtype}`);
+      builtinTurnOpen = false;
 
       if (internal) {
         internal.done(internal.buffer.trim());
-        return;
+      } else {
+        record("agent", turnText.trim());
+        turnText = "";
+        toPanel({ kind: "turn_end", text: event.subtype === "success" ? undefined : event.subtype });
+        void noteTurnEnded();
       }
 
-      record("agent", turnText.trim());
-      turnText = "";
-      toPanel({ kind: "turn_end", text: event.subtype === "success" ? undefined : event.subtype });
-      void noteTurnEnded();
+      // An internal ask that arrived while this turn was open was queued
+      // rather than dropped; run it now that the SDK is free to take it.
+      const next = afterBuiltinTurn.shift();
+      if (next) next();
       return;
     }
   }
@@ -1228,6 +1288,8 @@ export {
   noteTokens,
   maybeCompact,
   AGENT_MODES,
+  askAgent,
+  setSessionForTest,
 };
 
 let closing = false;
