@@ -337,6 +337,28 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("the upgrade forwarder is exported", typeof proxyUpgrade === "function");
 }
 
+// --------------------------------------------------- the bridge only binds loopback
+{
+  // Real end-to-end coverage of this would mean starting the actual bridge and
+  // probing it from off-box, which this offline suite cannot do — and stripping CSP
+  // headers the way the proxy test above confirms is only safe because nothing but
+  // this machine can ever reach the bridge. That combination (CSP removal + writing
+  // to the project + a coding agent) is exactly what makes an accidental network
+  // bind dangerous, so the invariant is asserted directly against the source: there
+  // must be exactly one .listen() call, and it must bind 127.0.0.1 literally, with
+  // no CLI flag or setting anywhere that can widen it.
+  const src = readFileSync(new URL("../server/index.mjs", import.meta.url), "utf8");
+  const listens = [...src.matchAll(/\.listen\(\s*[^,]+,\s*(['"])([^'"]*)\1/g)];
+  check("the bridge has exactly one place it starts listening", listens.length === 1,
+    String(listens.length));
+  check("and it binds 127.0.0.1 literally, not a variable or 0.0.0.0",
+    listens[0]?.[2] === "127.0.0.1", listens[0]?.[2]);
+
+  const bin = readFileSync(new URL("../bin/uitalk", import.meta.url), "utf8");
+  check("there is no --host (or similar) flag that could widen the bind",
+    !/--host|--bind|--allow-network/.test(bin));
+}
+
 // -------------------------------------------- the message the agent receives
 {
   const bridge = await import("../server/index.mjs");
