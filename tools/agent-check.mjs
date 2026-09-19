@@ -3,7 +3,7 @@
 // costs nothing and needs no key.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
@@ -40,6 +40,30 @@ const check = (n, ok, d) => {
   const escape = await ran("read_file", { path: "../../../etc/passwd" });
   check("a path outside the project is refused, not read",
     escape.failed && /outside the project/.test(escape.text), escape.text.slice(0, 70));
+
+  // A lexical check alone (resolve()+relative()) is fooled by a symlink inside
+  // the project pointing outside it: the path string still looks contained,
+  // but a read or write actually lands wherever the link points.
+  const outsideDir = mkdtempSync(join(tmpdir(), "uitalk-outside-"));
+  writeFileSync(join(outsideDir, "secret.txt"), "not part of this project");
+  symlinkSync(outsideDir, join(root, "escape"));
+  symlinkSync(join(outsideDir, "secret.txt"), join(root, "linkfile.txt"));
+
+  const readThroughLink = await ran("read_file", { path: "escape/secret.txt" });
+  check("read_file does not follow a symlink out of the project",
+    readThroughLink.failed && /outside the project/.test(readThroughLink.text), readThroughLink.text.slice(0, 70));
+
+  await ran("write_file", { path: "escape/newfile.txt", content: "pwned" });
+  check("write_file does not create a new file through a symlinked directory",
+    !existsSync(join(outsideDir, "newfile.txt")));
+
+  await ran("write_file", { path: "linkfile.txt", content: "clobbered" });
+  check("write_file does not follow a symlink onto a file outside the project",
+    readFileSync(join(outsideDir, "secret.txt"), "utf8") === "not part of this project");
+
+  const listThroughLink = await ran("list_dir", { path: "escape" });
+  check("list_dir does not follow a symlink out of the project",
+    listThroughLink.failed && /outside the project/.test(listThroughLink.text));
 
   const edited = await ran("edit_file", { path: "src/app.css", find: "padding: 14px", replace: "padding: 20px" });
   check("edit_file replaces an exact span", !edited.failed &&

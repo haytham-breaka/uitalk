@@ -13,8 +13,8 @@
 // rather than token by token. Everything else the panel shows — tool names, the
 // context meter, compaction — works the same as with the built-in session.
 
-import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { resolve, relative, join } from "node:path";
+import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, existsSync } from "node:fs";
+import { resolve, relative, join, dirname, sep, isAbsolute } from "node:path";
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
 
 const DEFAULT_MODEL = {
@@ -36,13 +36,46 @@ const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", ".c
  */
 export function fileTools(project, report = () => {}) {
   const root = resolve(project);
+  const realRoot = realpathSync(root);
+  const outside = (path) => new Error(`${path} is outside the project, so it will not be touched`);
 
-  const inside = (path) => {
+  // resolve()+relative() alone only reject a *lexical* escape (../../.ssh) — a
+  // symlink inside the project pointing outside it (project/data -> /home/you)
+  // resolves to a path string that still looks contained, but the filesystem
+  // follows the link to somewhere real files tools were never meant to reach.
+  // realpathSync resolves every symlink on the way, so it's checked against
+  // where a read or write actually lands, not just what the string looks like.
+  const withinRoot = (real) => {
+    const rel = relative(realRoot, real);
+    return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+  };
+
+  const lexicallyInside = (path) => {
     const full = resolve(root, path);
     const rel = relative(root, full);
-    if (rel.startsWith("..") || resolve(full) === resolve(root, "..")) {
-      throw new Error(`${path} is outside the project, so it will not be touched`);
-    }
+    if (rel.startsWith("..") || isAbsolute(rel)) throw outside(path);
+    return full;
+  };
+
+  // read_file, edit_file and list_dir all require the target to already exist,
+  // so its real location can be checked directly.
+  const inside = (path) => {
+    const full = lexicallyInside(path);
+    if (!withinRoot(realpathSync(full))) throw outside(path);
+    return full;
+  };
+
+  // write_file can create a path that doesn't exist yet, so there is nothing at
+  // `full` to realpath. Walk up to the nearest ancestor that does exist — a
+  // symlinked directory anywhere on the way there is exactly as much an escape
+  // as a symlinked file would be — and check that instead. If `full` itself
+  // already exists (overwriting a file, or a symlink writeFileSync would follow),
+  // that ancestor search starts, and ends, at `full`.
+  const insideForWrite = (path) => {
+    const full = lexicallyInside(path);
+    let check = full;
+    while (!existsSync(check)) check = dirname(check);
+    if (!withinRoot(realpathSync(check))) throw outside(path);
     return full;
   };
 
@@ -114,7 +147,7 @@ export function fileTools(project, report = () => {}) {
       },
       required: ["path", "content"],
       run: guard("write_file", ({ path, content }) => {
-        writeFileSync(inside(path), content);
+        writeFileSync(insideForWrite(path), content);
         return `wrote ${path} (${content.length} bytes)`;
       }),
     },
