@@ -43,6 +43,16 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("a value below the floor is raised to it", clamp.clean.contextTokens === 20000,
     String(clamp.clean.contextTokens));
 
+  // Booleans must be real JSON booleans: Boolean("false") is true, so a coerced
+  // hand-edited "false" would flip the setting on — the opposite of the intent.
+  const boolOk = settings.validate({ nativeCapture: false, autoCompact: true });
+  check("a real JSON boolean passes through unchanged",
+    boolOk.clean.nativeCapture === false && boolOk.clean.autoCompact === true, JSON.stringify(boolOk.clean));
+  const boolStr = settings.validate({ nativeCapture: "false" });
+  check("a string in a boolean field is refused, not read as truthy",
+    !("nativeCapture" in boolStr.clean) && /must be true or false/.test(boolStr.rejected[0] ?? ""),
+    JSON.stringify(boolStr));
+
   const choice = settings.validate({ reloadAfterEdit: "never" });
   check("a valid choice passes", choice.clean.reloadAfterEdit === "never");
   const badChoice = settings.validate({ reloadAfterEdit: "sometimes" });
