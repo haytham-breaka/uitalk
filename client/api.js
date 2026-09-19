@@ -96,10 +96,14 @@ globalThis.UITalk = (() => {
   // line that loses the cascade, so the rules themselves have to be reported.
 
   const specificity = (selector) => {
-    // Good enough to order rules and explain why one won; not a full CSS engine.
-    const ids = (selector.match(/#[\w-]+/g) ?? []).length;
-    const classes = (selector.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g) ?? []).length;
-    const types = (selector.match(/(^|[\s>+~])[a-zA-Z][\w-]*/g) ?? []).length;
+    // Good enough to order rules and explain why one won; not a full CSS engine —
+    // :is()/:not() are scored as an ordinary pseudo-class plus their argument's own
+    // selectors, rather than by the spec's "most specific argument" rule, and cascade
+    // layers, multiple stylesheet origins, and CSS nesting aren't modeled at all.
+    const bare = selector.replace(/:where\((?:[^()]|\([^()]*\))*\)/g, ""); // :where() is always zero-specificity
+    const ids = (bare.match(/#[\w-]+/g) ?? []).length;
+    const classes = (bare.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g) ?? []).length;
+    const types = (bare.match(/(^|[\s>+~])[a-zA-Z][\w-]*/g) ?? []).length;
     return [ids, classes, types];
   };
 
@@ -120,6 +124,13 @@ globalThis.UITalk = (() => {
   const declarationsOf = (rule) => {
     const out = {};
     for (const prop of rule.style) out[prop] = rule.style.getPropertyValue(prop).trim();
+    return out;
+  };
+
+  /** Properties this rule marks !important — these beat any non-important rule outright. */
+  const importantPropsOf = (rule) => {
+    const out = [];
+    for (const prop of rule.style) if (rule.style.getPropertyPriority(prop) === "important") out.push(prop);
     return out;
   };
 
@@ -157,6 +168,8 @@ globalThis.UITalk = (() => {
             : decls;
           if (properties && !Object.keys(kept).length) break;
 
+          const important = importantPropsOf(rule).filter((p) => p in kept);
+
           rules.push({
             selector: part,
             source: sheetSource(rule.parentStyleSheet ?? {}),
@@ -164,6 +177,7 @@ globalThis.UITalk = (() => {
             state: part !== testable ? part.slice(testable.length) : undefined,
             specificity: specificity(part),
             declarations: kept,
+            important: important.length ? important : undefined,
           });
           break;
         }
@@ -181,32 +195,51 @@ globalThis.UITalk = (() => {
     }
 
     // Later and more specific wins, which is what decides where an edit belongs.
+    // !important beats any non-important declaration outright; among peers of the
+    // same importance, specificity is compared id, then class, then type, before
+    // falling back to source order — skipping the type component would let a rule
+    // like ".foo *" beat ".foo div" on order alone, even though it is less specific.
     const ordered = rules.map((r, i) => ({ ...r, order: i }));
     const winnerFor = {};
     for (const r of ordered) {
       for (const [prop, value] of Object.entries(r.declarations)) {
         const held = winnerFor[prop];
+        const important = r.important?.includes(prop) ?? false;
+        const heldImportant = held?.important ?? false;
         const beats =
           !held ||
-          r.specificity[0] > held.specificity[0] ||
-          (r.specificity[0] === held.specificity[0] &&
-            (r.specificity[1] > held.specificity[1] ||
-              (r.specificity[1] === held.specificity[1] && r.order > held.order)));
-        if (beats && !r.state) winnerFor[prop] = { value, selector: r.selector, source: r.source, specificity: r.specificity, order: r.order };
+          (important && !heldImportant) ||
+          (important === heldImportant &&
+            (r.specificity[0] > held.specificity[0] ||
+              (r.specificity[0] === held.specificity[0] &&
+                (r.specificity[1] > held.specificity[1] ||
+                  (r.specificity[1] === held.specificity[1] &&
+                    (r.specificity[2] > held.specificity[2] ||
+                      (r.specificity[2] === held.specificity[2] && r.order > held.order)))))));
+        if (beats && !r.state) {
+          winnerFor[prop] = { value, selector: r.selector, source: r.source, specificity: r.specificity, order: r.order, important };
+        }
       }
     }
 
     const inline = el.getAttribute("style");
+    const importantWinners = Object.keys(winnerFor).filter((k) => winnerFor[k].important);
     return {
       element: identify(el),
       rules: ordered,
       winners: Object.fromEntries(
-        Object.entries(winnerFor).map(([k, v]) => [k, { value: v.value, from: `${v.selector} in ${v.source}` }]),
+        Object.entries(winnerFor).map(([k, v]) => [
+          k,
+          { value: v.value, from: `${v.selector} in ${v.source}`, important: v.important || undefined },
+        ]),
       ),
       inline: inline || undefined,
       inaccessibleSheets: skipped.length ? [...new Set(skipped)] : undefined,
       note: inline
-        ? "an inline style attribute beats every rule here"
+        ? importantWinners.length
+          ? `an inline style attribute beats every rule here except the !important ` +
+            `${importantWinners.length > 1 ? "properties" : "property"} reported in winners (${importantWinners.join(", ")})`
+          : "an inline style attribute beats every rule here"
         : undefined,
     };
   }

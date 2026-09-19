@@ -215,6 +215,82 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   style.remove();
 }
 
+// --- cascade correctness: the type/tag component of specificity must count too
+{
+  const wrap = window.document.createElement("div");
+  wrap.className = "foo";
+  wrap.innerHTML = `<div class="bar">text</div>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  // ".foo div" (0 ids, 1 class, 1 type) is more specific than ".foo *" (0 ids, 1
+  // class, 0 types), even though ".foo *" comes later in source order.
+  style.textContent = `
+    .foo div { color: red; }
+    .foo * { color: blue; }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".bar" });
+  check("the type component of specificity decides the winner, not just source order",
+    /\.foo div/.test(out.winners?.color?.from ?? ""), out.winners?.color?.from);
+  check("and reports its value", out.winners?.color?.value === "red", out.winners?.color?.value);
+
+  style.remove();
+  wrap.remove();
+}
+
+// --- cascade correctness: !important beats specificity and source order
+{
+  const wrap = window.document.createElement("div");
+  wrap.className = "foo";
+  wrap.innerHTML = `<div class="bar baz">text</div>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  style.textContent = `
+    .bar { color: red !important; }
+    .foo .bar.baz { color: blue; }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".bar" });
+  check("!important wins even against a more specific later rule",
+    out.winners?.color?.value === "red" && out.winners?.color?.from?.startsWith(".bar in"),
+    JSON.stringify(out.winners?.color));
+  check("the winner is flagged as important", out.winners?.color?.important === true);
+  check("the important rule itself is flagged too",
+    out.rules.find((r) => r.selector === ".bar")?.important?.includes("color"),
+    JSON.stringify(out.rules.find((r) => r.selector === ".bar")));
+
+  style.remove();
+  wrap.remove();
+}
+
+// --- cascade correctness: :where() always contributes zero specificity
+{
+  const wrap = window.document.createElement("div");
+  wrap.className = "foo";
+  wrap.innerHTML = `<div class="bar">text</div>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  // :where(.foo) .bar has the specificity of ".bar" alone (0,1,0); plain "div.bar"
+  // (0,1,1) is more specific and should win even though it comes first.
+  style.textContent = `
+    div.bar { color: red; }
+    :where(.foo) .bar { color: blue; }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".bar" });
+  check(":where() does not inflate specificity",
+    /div\.bar/.test(out.winners?.color?.from ?? ""), out.winners?.color?.from);
+
+  style.remove();
+  wrap.remove();
+}
+
 // --- capture over time: a still frame cannot show motion
 {
   const t0 = Date.now();
