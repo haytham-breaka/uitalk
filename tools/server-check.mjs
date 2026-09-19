@@ -412,6 +412,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   const calls = [];
   const failures = [];
   let answer = { ok: true };
+  let htmlGuess = { found: true, line: 7, column: 1, matched: "go", excerpt: "<button>" };
 
   const srv = createPageServer(
     async (method, params) => {
@@ -420,7 +421,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       return typeof answer === "function" ? answer(method, params) : answer;
     },
     (method, message) => failures.push({ method, message }),
-    (path, needles) => ({ found: true, line: 7, column: 1, matched: needles[0], excerpt: "<button>" }),
+    (path, needles) => (typeof htmlGuess === "function" ? htmlGuess(path, needles) : htmlGuess),
   );
 
   const tools = srv.instance._registeredTools;
@@ -450,14 +451,22 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("a strip is given a longer budget than a single shot",
     calls.at(-1).method === "capture", calls.at(-1).method);
 
-  answer = { tier: "react", file: "/src/App.jsx", line: 44 };
+  answer = { confidence: "exact", source: { file: "/src/App.jsx", line: 44, column: null }, evidence: [{ kind: "react-debug-source", exact: true }] };
   const loc = await run("locate_source", { ref: 1 });
-  check("locate_source reports the tier that answered", /"tier": "react"/.test(loc.content[0].text));
+  check("locate_source reports the confidence that answered", /"confidence": "exact"/.test(loc.content[0].text));
 
-  answer = { tier: "none", element: { testId: "go" }, page: { path: "/about" } };
+  answer = { confidence: "none", source: null, evidence: [], element: { testId: "go" }, page: { path: "/about" } };
   const fallback = await run("locate_source", { ref: 1 });
   check("with no framework metadata it falls back to the served html",
-    /"tier": "served-html"/.test(fallback.content[0].text), fallback.content[0].text.slice(0, 60));
+    /"confidence": "candidate"/.test(fallback.content[0].text), fallback.content[0].text.slice(0, 80));
+  check("carrying the served-html evidence that answered it",
+    /"kind": "served-html-search"/.test(fallback.content[0].text), fallback.content[0].text);
+
+  htmlGuess = { found: false, reason: "none of 1 identifiers appear in the served HTML" };
+  const stillNone = await run("locate_source", { ref: 1 });
+  check("and stays 'none' when even the served html has no match",
+    /"confidence": "none"/.test(stillNone.content[0].text), stillNone.content[0].text.slice(0, 80));
+  htmlGuess = { found: true, line: 7, column: 1, matched: "go", excerpt: "<button>" };
 
   answer = { frames: [{ png: "A", at: 390, label: "390px · 300×100" }], notes: ["1440px: the element is not present"] };
   const bp = await run("capture_breakpoints", { ref: 1, widths: [390, 1440] });

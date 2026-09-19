@@ -291,6 +291,76 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   wrap.remove();
 }
 
+// --- source location: confidence tiers, not a flat "found it or didn't"
+{
+  const none = UITalk.locateSource({ selector: ".notify-button" });
+  check("no framework metadata is reported as confidence none, not a guess",
+    none.confidence === "none" && none.source === null && Array.isArray(none.evidence) && none.evidence.length === 0,
+    JSON.stringify(none));
+
+  // React: a fake fiber, structured the way the real reconciler shapes one.
+  const reactEl = window.document.createElement("div");
+  window.document.body.appendChild(reactEl);
+  reactEl.__reactFiber$test = {
+    _debugSource: { fileName: "/src/Button.jsx", lineNumber: 12, columnNumber: 3 },
+    _debugOwner: null,
+    type: { name: "Button" },
+  };
+  const react = UITalk.locateSource({ selector: "div:last-child" });
+  check("react debug source on the element itself is exact",
+    react.confidence === "exact" && react.source.file === "/src/Button.jsx" && react.source.line === 12,
+    JSON.stringify(react));
+  check("and names the evidence that produced it",
+    react.evidence?.[0]?.kind === "react-debug-source" && react.evidence[0].exact === true,
+    JSON.stringify(react.evidence));
+  check("and the component name, read off the fiber's own type",
+    react.component === "Button", react.component);
+  reactEl.remove();
+
+  // React: the fiber lives on an ancestor, not the clicked element — still useful,
+  // but not the exact line, so it must not be reported as "exact".
+  const reactParent = window.document.createElement("div");
+  const reactChild = window.document.createElement("span");
+  reactParent.appendChild(reactChild);
+  window.document.body.appendChild(reactParent);
+  reactParent.__reactFiber$test = {
+    _debugSource: { fileName: "/src/Card.jsx", lineNumber: 30, columnNumber: 1 },
+    _debugOwner: null,
+    type: { name: "Card" },
+  };
+  const reactAncestor = UITalk.locateSource({ selector: "span" });
+  check("a fiber found on an ancestor is 'component' confidence, not 'exact'",
+    reactAncestor.confidence === "component" && reactAncestor.evidence?.[0]?.exact === false,
+    JSON.stringify(reactAncestor));
+  check("and says so, rather than implying the line is exact",
+    /nearest ancestor/.test(reactAncestor.note ?? ""), reactAncestor.note);
+  reactParent.remove();
+
+  // Svelte stamps every element in dev.
+  const svelteEl = window.document.createElement("div");
+  window.document.body.appendChild(svelteEl);
+  svelteEl.__svelte_meta = { loc: { file: "/src/Nav.svelte", line: 5, column: 2 } };
+  const svelte = UITalk.locateSource({ selector: "div:last-child" });
+  check("svelte metadata on the element itself is exact",
+    svelte.confidence === "exact" && svelte.source.file === "/src/Nav.svelte" && svelte.evidence?.[0]?.kind === "svelte-meta",
+    JSON.stringify(svelte));
+  svelteEl.remove();
+
+  // Vue names the component's file but never a line within it, so this can never be
+  // "exact" even when the element itself carries the metadata.
+  const vueEl = window.document.createElement("div");
+  window.document.body.appendChild(vueEl);
+  vueEl.__vueParentComponent = { type: { __file: "/src/Widget.vue", __name: "Widget" } };
+  const vue = UITalk.locateSource({ selector: "div:last-child" });
+  check("vue is capped at 'component' confidence even on the element itself",
+    vue.confidence === "component" && vue.source.file === "/src/Widget.vue" && vue.source.line === null,
+    JSON.stringify(vue));
+  check("and explains why, rather than silently omitting the line",
+    /not a line/.test(vue.note ?? ""), vue.note);
+  check("and still names the component", vue.component === "Widget", vue.component);
+  vueEl.remove();
+}
+
 // --- capture over time: a still frame cannot show motion
 {
   const t0 = Date.now();
