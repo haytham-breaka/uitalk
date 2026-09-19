@@ -1229,6 +1229,12 @@
   ui.panel.addEventListener("pointerdown", () => announce("focus"));
 
   async function serve({ id, method, params }) {
+    // A selector-targeted preview's stamped attribute can be sitting on a node
+    // a re-render already replaced — reconciling here, before any tool acts,
+    // catches that on the very next thing that touches the page rather than
+    // needing a continuously-running observer.
+    api().reconcileTargets();
+
     // Named `handlers`, not `api`: a local `api` here shadows the accessor above,
     // and every call became `api()` on an object literal — which broke every page
     // tool the agent has.

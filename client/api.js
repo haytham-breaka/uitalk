@@ -773,7 +773,7 @@ globalThis.UITalk = (() => {
   const dup = (attr, value) => `[${attr}="${value}"][${attr}="${value}"]`;
 
   let targetSeq = 0;
-  const targeted = new Set();
+  const targeted = new Map(); // token -> { el, selector }
 
   /**
    * Either a selection ref or a CSS selector. A selector gets a preview handle
@@ -799,12 +799,40 @@ globalThis.UITalk = (() => {
       if (!token) {
         token = String(++targetSeq);
         el.setAttribute(TARGET_ATTR, token);
-        targeted.add(el);
+        targeted.set(token, { el, selector });
       }
       return { el, sel: dup(TARGET_ATTR, token) };
     }
 
     throw new Error("pass either a selection ref or a CSS selector");
+  }
+
+  /**
+   * A selector-targeted preview is attached to the page by a stamped attribute,
+   * not by the selector itself — so a framework re-render that replaces the
+   * element outright (rather than mutating it in place) leaves an already-
+   * adopted preview rule matching nothing, silently, even though the CSS
+   * selector the caller actually supplied would still match the new node fine.
+   * Called before every RPC (see ui.js's serve()) rather than watched
+   * continuously with a MutationObserver: cheap over the handful of targets
+   * that are ever live at once, and the failure mode being guarded against is
+   * "the preview goes quiet," not "acts on stale data" the way an unresolved
+   * ref would — so reconciling lazily, on the next thing that touches the
+   * page, is enough.
+   */
+  function reconcileTargets() {
+    for (const [token, entry] of targeted) {
+      if (entry.el.isConnected) continue;
+      let fresh;
+      try {
+        fresh = document.querySelector(entry.selector);
+      } catch {
+        continue;
+      }
+      if (!fresh || fresh.hasAttribute(TARGET_ATTR)) continue; // gone, or already claimed by another target
+      fresh.setAttribute(TARGET_ATTR, token);
+      targeted.set(token, { el: fresh, selector: entry.selector });
+    }
   }
 
   function ruleText(sel, declarations, also) {
@@ -925,7 +953,7 @@ globalThis.UITalk = (() => {
       }
     }
     originals.clear();
-    for (const el of targeted) el.removeAttribute(TARGET_ATTR);
+    for (const { el } of targeted.values()) el.removeAttribute(TARGET_ATTR);
     targeted.clear();
     return { reset: true };
   }
@@ -1221,6 +1249,7 @@ globalThis.UITalk = (() => {
     tryMarkup,
     showOptions,
     resetPreview,
+    reconcileTargets,
     flip,
     chosenOption,
     dismissOptions,
