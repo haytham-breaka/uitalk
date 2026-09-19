@@ -20,6 +20,7 @@ import {
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
 import * as registry from "./registry.mjs";
 import { countUsages } from "./usage.mjs";
+import { findSourceCandidates } from "./candidates.mjs";
 
 const PORT = Number(process.env.UITALK_PORT ?? 0);
 const PROJECT = process.env.UITALK_PROJECT ?? process.cwd();
@@ -137,7 +138,13 @@ async function callPage(method, params = {}, timeoutMs = 5000) {
 
 // ------------------------------------------------------------- the MCP face
 
-const defs = toolDefinitions(callPage, () => {}, null, (name, file) => countUsages(PROJECT, name, file));
+const defs = toolDefinitions(
+  callPage,
+  () => {},
+  null,
+  (name, file) => countUsages(PROJECT, name, file),
+  (needles) => findSourceCandidates(PROJECT, needles),
+);
 
 // Request/response cannot receive an unsolicited choice, so it has to be asked for.
 defs.push({

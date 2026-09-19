@@ -26,6 +26,7 @@ import * as registry from "./registry.mjs";
 import * as settings from "./settings.mjs";
 import * as snapshots from "./snapshots.mjs";
 import { countUsages } from "./usage.mjs";
+import { findSourceCandidates } from "./candidates.mjs";
 
 // A fixed port would stop the second bridge from ever starting. An explicit
 // UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
@@ -103,6 +104,11 @@ const appProxy = createProxy({
 /** How many other project files render a resolved component — see usage.mjs. */
 function countComponentUsages(name, definingFile) {
   return countUsages(PROJECT, name, definingFile);
+}
+
+/** Project-source candidates for locate_source when no framework metadata answered. */
+function findProjectCandidates(needles) {
+  return findSourceCandidates(PROJECT, needles);
 }
 
 /** Find a needle in the HTML we served for a path, reporting line and column. */
@@ -799,7 +805,7 @@ async function runBuiltin() {
     ({ query } = await import("@anthropic-ai/claude-agent-sdk"));
     // Also an SDK import: the tools have to be shaped the way it wants them.
     const { createPageServer } = await import("./page-tools.mjs");
-    pageServer = createPageServer(callPage, reportToolFailure, findInServedHtml, countComponentUsages);
+    pageServer = createPageServer(callPage, reportToolFailure, findInServedHtml, countComponentUsages, findProjectCandidates);
   } catch (err) {
     // An install that skipped optional dependencies is the likely cause, and it is
     // recoverable without reinstalling: the other two modes need nothing extra.
