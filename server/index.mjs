@@ -697,8 +697,8 @@ How to work here:
 - If a change you committed did not take effect, the page will tell you so with the values that
   drifted. Do not re-apply the same edit: call describe_styles and fix the rule that is winning.
 - Before searching the project by hand, call locate_source. Dev builds usually know the file and line an
-  element came from. Trust a "react" or "svelte" tier; treat "served-html" or "none" as a lead
-  to confirm, not a location to edit blind.
+  element came from. Trust "exact" confidence; treat "component" (right file, not necessarily the
+  right line) and "candidate" (a served-HTML guess) as a lead to confirm, not a location to edit blind.
 - "Does this hold up on mobile" is capture_breakpoints, not a request for the user to resize.
   It follows the element across widths, since a rectangle means something different at each.
 - When the request is a clear, unambiguous change ("make this button blue", "add 8px of gap

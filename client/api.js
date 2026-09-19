@@ -278,8 +278,8 @@ globalThis.UITalk = (() => {
 
   // Dev builds already carry where an element came from; the mechanism differs per
   // framework and none of it requires touching the project. What is returned always
-  // names the tier that answered, because an agent told "line 44" that is really a
-  // guess is worse off than one told to grep.
+  // names its confidence and the evidence that produced it, because an agent told
+  // "line 44" that is really a guess is worse off than one told to grep.
   function sourceOf(el) {
     for (let node = el; node; node = node.parentElement) {
       // React: the JSX transform records fileName/lineNumber, reachable via the fiber.
@@ -290,12 +290,11 @@ globalThis.UITalk = (() => {
         for (let fiber = node[fiberKey]; fiber; fiber = fiber._debugOwner) {
           const src = fiber._debugSource ?? fiber._debugInfo?.[0]?.source;
           if (src?.fileName) {
+            const exact = node === el;
             return {
-              tier: "react",
-              file: src.fileName,
-              line: src.lineNumber ?? null,
-              column: src.columnNumber ?? null,
-              exact: node === el,
+              source: { file: src.fileName, line: src.lineNumber ?? null, column: src.columnNumber ?? null },
+              confidence: exact ? "exact" : "component",
+              evidence: [{ kind: "react-debug-source", exact }],
               component: fiber._debugOwner?.type?.name ?? fiber.type?.name ?? undefined,
             };
           }
@@ -305,15 +304,25 @@ globalThis.UITalk = (() => {
       // Svelte stamps every element in dev.
       if (node.__svelte_meta?.loc?.file) {
         const loc = node.__svelte_meta.loc;
-        return { tier: "svelte", file: loc.file, line: loc.line ?? null, column: loc.column ?? null, exact: node === el };
+        const exact = node === el;
+        return {
+          source: { file: loc.file, line: loc.line ?? null, column: loc.column ?? null },
+          confidence: exact ? "exact" : "component",
+          evidence: [{ kind: "svelte-meta", exact }],
+        };
       }
 
-      // Vue knows the component's file, but not the line within it.
+      // Vue knows the component's file, but never the line within it — that caps this
+      // at "component" confidence even when the element itself is the exact match.
       const vue = node.__vueParentComponent ?? node.__vue_app__?._instance;
       const file = vue?.type?.__file;
       if (file) {
-        return { tier: "vue", file, line: null, column: null, exact: node === el,
-                 component: vue.type.__name ?? undefined };
+        return {
+          source: { file, line: null, column: null },
+          confidence: "component",
+          evidence: [{ kind: "vue-component", exact: node === el }],
+          component: vue.type.__name ?? undefined,
+        };
       }
     }
     return null;
@@ -333,19 +342,30 @@ globalThis.UITalk = (() => {
 
     if (!el) throw new Error("pass a selection ref or a CSS selector");
 
+    const element = identify(el);
     const found = sourceOf(el);
-    return {
-      element: identify(el),
-      ...(found
-        ? { ...found, note: found.exact ? undefined : "the nearest ancestor that carries source info" }
-        : {
-            tier: "none",
-            note:
-              "this page carries no dev-time source metadata (a production build, or a framework " +
-              "that does not emit it). Use the identifiers above to find it, or ask the bridge to " +
-              "search the HTML it served.",
-          }),
-    };
+    if (!found) {
+      return {
+        element,
+        source: null,
+        confidence: "none",
+        evidence: [],
+        note:
+          "this page carries no dev-time source metadata (a production build, or a framework " +
+          "that does not emit it). Use the identifiers above to find it, or ask the bridge to " +
+          "search the HTML it served.",
+      };
+    }
+
+    const isVue = found.evidence[0]?.kind === "vue-component";
+    const note =
+      found.confidence === "exact"
+        ? undefined
+        : isVue
+          ? "Vue names the component's file but not a line within it"
+          : "the nearest ancestor that carries source info, not necessarily the element itself";
+
+    return { element, ...found, note };
   }
 
   // ------------------------------------------------------------- geometry

@@ -9,7 +9,7 @@
 [![test](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml/badge.svg)](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
-[![Version 0.6.5](https://img.shields.io/badge/version-0.6.5-informational.svg)](.claude-plugin/plugin.json)
+[![Version 0.6.6](https://img.shields.io/badge/version-0.6.6-informational.svg)](.claude-plugin/plugin.json)
 
 <p align="center">
   <img src="docs/media/story.gif" alt="Talk to your UI, not about it: five acts in one session — centring one button on another by number, fixing a headline that wraps on phones from inside the split-screen frame, a colour change that stays scoped to the selected button, five live style options before anything is written, and a one-click undo" width="100%">

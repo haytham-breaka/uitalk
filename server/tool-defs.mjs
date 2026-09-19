@@ -157,9 +157,11 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
       description:
         "Where an element came from in the codebase. Dev builds carry this: React and Svelte " +
         "record the file and line of each element, Vue records the component's file. Failing " +
-        "that, the bridge searches the HTML it actually served. The reply names which of those " +
-        "answered — treat 'served-html' or 'none' as a lead to confirm, not a location to edit " +
-        "blind. Use this before hunting with grep.",
+        "that, the bridge searches the HTML it actually served. The reply names the confidence " +
+        "of the answer — 'exact' (this element, file and line), 'component' (the right file, " +
+        "not necessarily the right line — always true for Vue), or 'candidate' (a served-HTML " +
+        "text match) — and the evidence behind it. Treat anything short of 'exact' as a lead to " +
+        "confirm, not a location to edit blind. Use this before hunting with grep.",
       schema: {
         ref: { type: "number", description: "Selection ref; defaults to the first selected element" },
         selector: { type: "string", description: "A CSS selector, when nothing is selected" },
@@ -167,7 +169,7 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
       run: async (args) => {
         try {
           const found = await callPage("locateSource", args);
-          if (found.tier !== "none" || !findInHtml) return text(found);
+          if (found.confidence !== "none" || !findInHtml) return text(found);
           const id = found.element ?? {};
           const guess = findInHtml(found.page?.path ?? "/", [
             id.id && `id="${id.id}"`,
@@ -176,7 +178,13 @@ export function toolDefinitions(callPage, report = () => {}, findInHtml = null) 
             id.text,
             id.classes?.[0] && `class="${id.classes[0]}`,
           ]);
-          return text({ ...found, servedHtml: guess, tier: guess.found ? "served-html" : "none" });
+          if (!guess.found) return text(found);
+          return text({
+            ...found,
+            confidence: "candidate",
+            evidence: [{ kind: "served-html-search", line: guess.line, column: guess.column, matched: guess.matched, excerpt: guess.excerpt }],
+            note: "a text match in the HTML the bridge served, not a source file — confirm it before editing",
+          });
         } catch (err) {
           report("locate_source", err.message);
           return failed(err);
