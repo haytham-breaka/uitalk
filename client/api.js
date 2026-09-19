@@ -291,7 +291,7 @@ globalThis.UITalk = (() => {
   /** The computed value of specific properties, for comparing before and after. */
   function computedOf({ ref, selector, properties = [] } = {}) {
     let el = null;
-    if (ref !== undefined && ref !== null) el = byRef(ref);
+    if (ref !== undefined && ref !== null) el = liveRef(ref);
     else if (selector) {
       try {
         el = document.querySelector(selector);
@@ -306,14 +306,14 @@ globalThis.UITalk = (() => {
 
   function describeStyles({ ref, selector, properties } = {}) {
     let el = null;
-    if (ref !== undefined && ref !== null) el = byRef(ref);
+    if (ref !== undefined && ref !== null) el = requireLive(ref);
     else if (selector) {
       try {
         el = document.querySelector(selector);
       } catch {
         throw new Error(`${selector} is not a valid CSS selector`);
       }
-    } else if (picked.length) el = picked[0];
+    } else if (picked.length) el = liveRef(1);
     if (!el) throw new Error("pass a selection ref or a CSS selector");
     return matchedRules(el, { properties: properties?.length ? properties : null });
   }
@@ -375,14 +375,14 @@ globalThis.UITalk = (() => {
   /** Where this element came from, or an honest account of why we cannot say. */
   function locateSource({ ref, selector } = {}) {
     let el = null;
-    if (ref !== undefined && ref !== null) el = byRef(ref);
+    if (ref !== undefined && ref !== null) el = requireLive(ref);
     else if (selector) {
       try {
         el = document.querySelector(selector);
       } catch {
         throw new Error(`${selector} is not a valid CSS selector`);
       }
-    } else if (picked.length) el = picked[0];
+    } else if (picked.length) el = liveRef(1);
 
     if (!el) throw new Error("pass a selection ref or a CSS selector");
 
@@ -651,11 +651,50 @@ globalThis.UITalk = (() => {
 
   const byRef = (ref) => picked[ref - 1];
 
+  // A re-render can replace the very node a ref points at without telling this
+  // side at all — React frequently preserves a DOM node across a rerender, but
+  // a conditional branch or a keyed list change can just as easily swap it out.
+  // Treat a disconnected node as gone rather than operate on it: its geometry
+  // reads as all zeros, its computed style as defaults, and a preview rule
+  // built against it can never match anything visible again.
+  const liveRef = (ref) => {
+    const el = byRef(ref);
+    return el && el.isConnected ? el : undefined;
+  };
+
+  /** liveRef(), but throws with a message that tells "never selected" apart
+   * from "was selected, but the page changed underneath it" — the second is
+   * worth a different instruction than the first. */
+  function requireLive(ref) {
+    const existed = byRef(ref);
+    const el = liveRef(ref);
+    if (el) return el;
+    throw new Error(
+      existed
+        ? `ref ${ref} no longer exists in the page — the app re-rendered and replaced it. Ask the user to select it again.`
+        : `no element is selected as ref ${ref}. Either ask the user to select it, or pass a CSS selector instead — ` +
+          `scan_region returns one for every element it lists.`,
+    );
+  }
+
   function readSelection() {
     if (!picked.length) return { selected: 0, note: "Nothing is selected. Ask the user to pick an element." };
 
-    const ancestor = commonAncestor(picked);
+    const staleRefs = [];
+    picked.forEach((el, i) => {
+      if (!el.isConnected) staleRefs.push(i + 1);
+    });
+    const live = picked.filter((el) => el.isConnected);
+
+    const ancestor = commonAncestor(live.length ? live : picked);
     const items = picked.map((el, i) => {
+      if (!el.isConnected) {
+        return {
+          ref: i + 1,
+          stale: true,
+          note: "this element is no longer in the page — the app re-rendered and replaced it; ask the user to select it again",
+        };
+      }
       const r = el.getBoundingClientRect();
       const cs = getComputedStyle(el);
       return {
@@ -680,6 +719,7 @@ globalThis.UITalk = (() => {
 
     const deltas = [];
     for (let i = 1; i < picked.length; i++) {
+      if (!picked[0].isConnected || !picked[i].isConnected) continue; // no meaningful delta against a stale ref
       const a = picked[0].getBoundingClientRect();
       const b = picked[i].getBoundingClientRect();
       deltas.push({
@@ -698,6 +738,11 @@ globalThis.UITalk = (() => {
       items,
       ancestor: { ...identify(ancestor), layout: layoutOf(ancestor) },
       deltas,
+      note: staleRefs.length
+        ? `ref${staleRefs.length > 1 ? "s" : ""} ${staleRefs.join(", ")} no longer ${staleRefs.length > 1 ? "exist" : "exists"} ` +
+          `in the page — the app re-rendered and replaced ${staleRefs.length > 1 ? "them" : "it"}; ask the user to ` +
+          `select ${staleRefs.length > 1 ? "them" : "it"} again`
+        : undefined,
     };
   }
 
@@ -737,14 +782,7 @@ globalThis.UITalk = (() => {
    */
   function resolveTarget({ ref, selector }) {
     if (ref !== undefined && ref !== null) {
-      const el = byRef(ref);
-      if (!el) {
-        throw new Error(
-          `no element is selected as ref ${ref}. Either ask the user to select it, or ` +
-            `pass a CSS selector instead — scan_region returns one for every element it lists.`,
-        );
-      }
-      return { el, sel: dup(REF_ATTR, ref) };
+      return { el: requireLive(ref), sel: dup(REF_ATTR, ref) };
     }
 
     if (selector) {
@@ -1041,7 +1079,12 @@ globalThis.UITalk = (() => {
   async function captureOnce({ ref, region, inventory: wantInventory = true } = {}) {
     if (region) return captureRegion(region, wantInventory);
 
-    const targets = ref ? [byRef(ref)].filter(Boolean) : picked;
+    // A stale ref (its node left the page in a rerender) is worth capturing the
+    // page for anyway, rather than failing outright — but silently swapping in
+    // a full-page shot for what was asked as "this element" would be exactly
+    // the kind of quiet substitution this tool is supposed to call out.
+    const staleRef = ref !== undefined && ref !== null && byRef(ref) && !byRef(ref).isConnected;
+    const targets = ref ? [liveRef(ref)].filter(Boolean) : picked;
     const subject = targets.length ? (targets.length === 1 ? targets[0] : commonAncestor(targets)) : document.body;
 
     if (targets.length && !isVisible(targets[0])) {
@@ -1051,6 +1094,13 @@ globalThis.UITalk = (() => {
 
     const shot = await withUiHidden(() => UITalkRaster.rasterize(subject));
     const origin = subject.getBoundingClientRect();
+    const warnings = [...shot.warnings];
+    if (staleRef) {
+      warnings.push(
+        `ref ${ref} no longer exists in the page — the app re-rendered and replaced it, so this is a capture of ` +
+          `the whole page instead. Ask the user to select it again.`,
+      );
+    }
 
     return {
       png: shot.png,
@@ -1058,7 +1108,7 @@ globalThis.UITalk = (() => {
       height: shot.height,
       dpr: devicePixelRatio,
       page: pageContext(),
-      warnings: shot.warnings.length ? shot.warnings : undefined,
+      warnings: warnings.length ? warnings : undefined,
       inventory: wantInventory ? inventory(subject, { left: origin.left - 16, top: origin.top - 16 }, null) : undefined,
     };
   }
@@ -1125,7 +1175,7 @@ globalThis.UITalk = (() => {
   /** Where an element sits right now, by ref or selector. Null when it is not there. */
   function rectOf({ ref, selector } = {}) {
     let el = null;
-    if (ref !== undefined && ref !== null) el = byRef(ref);
+    if (ref !== undefined && ref !== null) el = liveRef(ref);
     else if (selector) {
       try {
         el = document.querySelector(selector);

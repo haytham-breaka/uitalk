@@ -251,6 +251,64 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   solo.remove();
 }
 
+// --- a re-render can replace the DOM node a ref points at without telling
+// this side at all — React frequently preserves a node across a rerender, but
+// a conditional branch or a keyed list change can swap it out entirely.
+{
+  const root = window.document.createElement("div");
+  const oldBtn = window.document.createElement("button");
+  oldBtn.textContent = "Buy";
+  root.appendChild(oldBtn);
+  window.document.body.appendChild(root);
+
+  const stalePick = UITalk.pick(oldBtn);
+
+  // the framework replaces the node in place; nothing here is told
+  const newBtn = window.document.createElement("button");
+  newBtn.textContent = "Buy";
+  root.replaceChild(newBtn, oldBtn);
+  check("the old node is genuinely disconnected after the swap", !oldBtn.isConnected);
+
+  const sel = UITalk.readSelection();
+  const staleItem = sel.items.find((it) => it.ref === stalePick.ref);
+  check("read_selection flags the stale ref instead of silently reporting zeroed geometry",
+    staleItem?.stale === true && /no longer exist/.test(sel.note ?? ""), JSON.stringify(staleItem));
+  check("and gives no fabricated rect for it", staleItem?.rect === undefined, JSON.stringify(staleItem));
+
+  let styleError = null;
+  try {
+    UITalk.tryStyle({ ref: stalePick.ref, declarations: "color: red" });
+  } catch (e) {
+    styleError = e.message;
+  }
+  check("try_style refuses a stale ref rather than previewing against a dead node",
+    /no longer exists/.test(styleError ?? ""), styleError);
+  check("and never adopts a preview sheet that could never match anything",
+    window.document.adoptedStyleSheets.length === 0, window.document.adoptedStyleSheets.length);
+
+  let describeError = null;
+  try {
+    UITalk.describeStyles({ ref: stalePick.ref });
+  } catch (e) {
+    describeError = e.message;
+  }
+  check("describe_styles refuses a stale ref the same way", /no longer exists/.test(describeError ?? ""), describeError);
+
+  // a ref that was never picked at all is a different situation, and should
+  // still say so distinctly from "it existed and then vanished"
+  let neverError = null;
+  try {
+    UITalk.tryStyle({ ref: 999, declarations: "color: red" });
+  } catch (e) {
+    neverError = e.message;
+  }
+  check("a ref that was never selected gets a different message than a stale one",
+    /no element is selected/.test(neverError ?? "") && !/no longer exists/.test(neverError ?? ""), neverError);
+
+  UITalk.unpick(stalePick.ref);
+  root.remove();
+}
+
 // --- which rules actually style an element
 {
   // a stylesheet with two competing rules and a media block

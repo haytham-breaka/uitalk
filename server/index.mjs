@@ -740,6 +740,9 @@ You are connected to a web page the user is looking at right now, through the "p
 How to work here:
 - Call read_selection before proposing anything. The user picks elements in order, and refs
   1, 2, 3 in their message mean those selection refs.
+- If a ref comes back "stale" (or a tool refuses it as "no longer exists"), the app re-rendered
+  and replaced that element since it was picked. Do not retry the same ref — tell the user in one
+  short line and ask them to select it again.
 - For a question about position, alignment, or spacing, read the common ancestor's layout
   context that read_selection returns. The correct fix for "align 2 to the top of 1" depends
   entirely on it: align-items or align-self under flex, align-self under grid, a top offset
