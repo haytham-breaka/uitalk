@@ -47,8 +47,10 @@ export function toolDefinitions(
         "it was picked (ref 1, 2, 3...) with its identifiers, geometry and box metrics, plus the " +
         "layout context of their nearest common ancestor, the pixel deltas between them, and the " +
         "viewport they are laid out in — which may be a simulated device size rather than the " +
-        "browser window. Read this before proposing any change, and before answering any " +
-        "question about position, alignment or spacing.",
+        "browser window. A ref whose element the app re-rendered away comes back marked 'stale' " +
+        "with no geometry — every other tool that takes a ref refuses one in that state the same " +
+        "way, rather than operating on a node no longer in the page. Read this before proposing " +
+        "any change, and before answering any question about position, alignment or spacing.",
       schema: {},
       run: () => ask("readSelection"),
     },
