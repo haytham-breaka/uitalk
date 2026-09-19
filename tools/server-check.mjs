@@ -5,7 +5,7 @@
 
 process.env.UITALK_IMPORT_ONLY = "1"; // importing the bridge must not start one
 
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, statSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -390,6 +390,41 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       out.reverted.includes("style.css") && !out.reverted.includes("kept.css"), JSON.stringify(out));
     check("an unrelated file the agent never touched is left alone",
       readFileSync(join(repo, "kept.css"), "utf8").includes("unrelated work"));
+  }
+
+  // A file that was already untracked before the approval, then edited by the
+  // agent: git stash create never captured its contents and git diff ignores
+  // untracked paths, so undo used to leave the agent's edit in place.
+  {
+    writeFileSync(join(repo, "Draft.css"), ".d { color: red } /* user's own */\n");
+    const snap0 = await snapshots.snapshot(repo, "restyle a pre-existing untracked file");
+    writeFileSync(join(repo, "Draft.css"), ".d { color: blue } /* agent */\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("a pre-existing untracked file the agent edited is restored on undo",
+      out.reverted.includes("Draft.css"), JSON.stringify(out));
+    check("and its exact pre-agent contents come back",
+      readFileSync(join(repo, "Draft.css"), "utf8") === ".d { color: red } /* user's own */\n",
+      readFileSync(join(repo, "Draft.css"), "utf8").trim());
+    unlinkSync(join(repo, "Draft.css"));
+  }
+
+  // The same, but the user edits it again after the agent's turn ends: undo must
+  // not clobber the later edit.
+  {
+    writeFileSync(join(repo, "Draft2.css"), ".d { color: red }\n");
+    const snap0 = await snapshots.snapshot(repo, "restyle then user re-edits");
+    writeFileSync(join(repo, "Draft2.css"), ".d { color: blue } /* agent */\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+    writeFileSync(join(repo, "Draft2.css"), ".d { color: green } /* user kept editing */\n");
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("an untracked file edited again after the agent is skipped, not clobbered",
+      out.skipped.includes("Draft2.css") && !out.reverted.includes("Draft2.css"), JSON.stringify(out));
+    check("the user's later edit to it survives",
+      readFileSync(join(repo, "Draft2.css"), "utf8").includes("user kept editing"));
+    unlinkSync(join(repo, "Draft2.css"));
   }
 }
 
