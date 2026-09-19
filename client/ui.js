@@ -1174,6 +1174,8 @@
           void captureAfter();
           if (f.text) say("note", `turn ended: ${f.text}`);
           return;
+        case "approval_rejected": return say("warn", f.text);
+
         case "revertable":
           revertReady = f.available;
           revertLabel = f.label;
