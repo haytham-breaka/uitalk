@@ -13,12 +13,18 @@
 // A tag match alone is not enough to call a file confirmed: `<Button` also
 // matches a comment, a string literal, or a same-named component imported from
 // somewhere else entirely (components/Button.tsx and legacy/Button.tsx are not
-// the same component). Every match is followed back to whatever it was
-// imported from — no AST, just a conservative parser for the common import
-// forms — and only counted as confirmed when that import resolves to the
-// defining file itself. Anything a tag matches but an import can't verify
-// (a path alias, a barrel re-export, no import found at all) is still
-// reported, just as "possible" rather than "confirmed."
+// the same component). Every import in a file is resolved first — no AST,
+// just a conservative parser for the common forms — and a file counts as
+// confirmed only once one of those imports resolves to the defining file
+// itself *and* the local name it binds is actually rendered. Resolving by
+// import first, rather than searching for the original name and only then
+// checking the import, is what catches a renamed import (`{ Button as
+// PrimaryButton }`) or a default import under any local name at all — the
+// file never contains the literal text `<Button` in that case, so anything
+// gated on that text first would never look at it. A same-named tag whose
+// import can't be verified this way (a path alias, a barrel re-export, no
+// import found at all) is still reported, just as "possible" rather than
+// "confirmed."
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -33,25 +39,52 @@ const MAX_DISTINCT_FILES = 20; // enough to tell "a few" from "everywhere" witho
 /** PascalCase -> kebab-case, for Vue templates, which accept either spelling. */
 const kebab = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
+/** Whether `body` renders `localName` as a tag, in either spelling Vue accepts.
+ * Single-word names skip the kebab form — see the note where `needles` is built. */
+const rendersAsTag = (body, localName) => {
+  if (body.includes(`<${localName}`)) return true;
+  const k = kebab(localName);
+  return k.includes("-") && body.includes(`<${k}`);
+};
+
 const IMPORT_RE = /import\s+([^;]+?)\s+from\s+["']([^"']+)["']/g;
 
 /**
- * The module specifier of whichever import statement in `body` binds `name` —
- * covers `import Name from "spec"`, `import { Name } from "spec"`, and
- * `import * as Name from "spec"`, including a multi-name or multi-line clause.
- * Does not follow a renamed import (`{ Name as Other }`); a file that renders
- * `<Other` was never a candidate in the first place, since the tag search
- * looks for `<Name` literally.
+ * The local binding names an import clause introduces — `import Default, {
+ * Named, Other as Renamed } from "spec"` or `import * as NS from "spec"` —
+ * so a renamed import can be followed by the name it's actually used under,
+ * not the name it was exported as.
  */
-function importSpecifierFor(body, name) {
-  const isBound = new RegExp(`\\b${name}\\b`);
+function bindingsFromClause(clause) {
+  const trimmed = clause.trim();
+  const ns = trimmed.match(/^\*\s+as\s+(\w+)$/);
+  if (ns) return [ns[1]];
+
+  const bindings = [];
+  const namedMatch = trimmed.match(/\{([^}]*)\}/);
+  const defaultPart = trimmed.replace(/\{[^}]*\}/, "").replace(/,\s*$/, "").trim();
+  if (defaultPart && /^\w+$/.test(defaultPart)) bindings.push(defaultPart);
+  if (namedMatch) {
+    for (const piece of namedMatch[1].split(",")) {
+      const p = piece.trim();
+      if (!p) continue;
+      const asMatch = p.match(/^(\w+)\s+as\s+(\w+)$/);
+      bindings.push(asMatch ? asMatch[2] : p);
+    }
+  }
+  return bindings;
+}
+
+/** Every `import ... from "spec"` in `body`, as { specifier, bindings }. */
+function importsIn(body) {
+  const out = [];
   IMPORT_RE.lastIndex = 0;
   let m;
   while ((m = IMPORT_RE.exec(body))) {
     const [, clause, specifier] = m;
-    if (isBound.test(clause)) return specifier;
+    out.push({ specifier, bindings: bindingsFromClause(clause) });
   }
-  return null;
+  return out;
 }
 
 /**
@@ -132,13 +165,25 @@ export function countUsages(project, name, definingFile) {
       } catch {
         continue;
       }
-      if (!needles.some((n) => body.includes(n))) continue;
 
-      const specifier = importSpecifierFor(body, name);
-      const resolved = specifier ? resolveRelativeImport(full, specifier) : null;
+      // Resolve every import first, regardless of what name it binds locally
+      // — a rename (`{ Button as PrimaryButton }`) or a default import under
+      // any name at all still points at the same file, and a file rendering
+      // it under that local name is confirmed reuse whether or not the local
+      // name has anything to do with the original one.
+      let confirmedHere = false;
+      for (const imp of importsIn(body)) {
+        if (resolveRelativeImport(full, imp.specifier) !== defining) continue;
+        if (imp.bindings.some((b) => rendersAsTag(body, b))) {
+          confirmedHere = true;
+          break;
+        }
+      }
+
       const relPath = relative(root, full);
-      if (resolved === defining) confirmed.add(relPath);
-      else possible.add(relPath);
+      if (confirmedHere) confirmed.add(relPath);
+      else if (needles.some((n) => body.includes(n))) possible.add(relPath);
+      else continue;
 
       if (confirmed.size + possible.size >= MAX_DISTINCT_FILES) {
         stopped = true;
