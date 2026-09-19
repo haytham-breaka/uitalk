@@ -147,6 +147,35 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("listing an empty registry is empty, not an error", registry.list().length === 0);
 }
 
+// ------------------------------------------------------------ usage counting
+{
+  const { countUsages } = await import("../server/usage.mjs");
+  const proj = join(sandbox, "usage-project");
+  mkdirSync(join(proj, "src", "components"), { recursive: true });
+  mkdirSync(join(proj, "src", "pages"), { recursive: true });
+  mkdirSync(join(proj, "node_modules", "some-lib"), { recursive: true });
+
+  writeFileSync(join(proj, "src", "components", "Button.tsx"), "export function Button() { return <button/>; }\n");
+  writeFileSync(join(proj, "src", "pages", "Home.tsx"), "import { Button } from '../components/Button';\nexport default () => <div><Button/></div>;\n");
+  writeFileSync(join(proj, "src", "pages", "Settings.tsx"), "import { Button } from '../components/Button';\nexport default () => <Button label=\"Save\"/>;\n");
+  writeFileSync(join(proj, "node_modules", "some-lib", "Button.tsx"), "<Button/><Button/><Button/>\n");
+  mkdirSync(join(proj, "src", "vue"), { recursive: true });
+  writeFileSync(join(proj, "src", "vue", "Card.vue"), "<template><my-widget/></template>\n");
+
+  const found = countUsages(proj, "Button", "src/components/Button.tsx");
+  check("counts distinct files that render the component", found?.otherFiles === 2, JSON.stringify(found));
+  check("node_modules is not counted", found?.otherFiles !== 3, JSON.stringify(found));
+  check("a small count is not reported as capped", found?.capped === false, JSON.stringify(found));
+
+  check("a non-component-shaped name is not counted",
+    countUsages(proj, "onClick", "src/components/Button.tsx") === null);
+  check("a missing name is not counted", countUsages(proj, null, "src/components/Button.tsx") === null);
+  check("a defining file outside the project is refused",
+    countUsages(proj, "Button", "../../etc/passwd") === null);
+  check("Vue's kebab-case template spelling is matched too",
+    countUsages(proj, "MyWidget", "src/components/Button.tsx")?.otherFiles === 1);
+}
+
 // --------------------------------------------------------------- snapshots
 {
   const snapshots = await import("../server/snapshots.mjs");
@@ -435,6 +464,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   const failures = [];
   let answer = { ok: true };
   let htmlGuess = { found: true, line: 7, column: 1, matched: "go", excerpt: "<button>" };
+  let usageAnswer = null;
 
   const srv = createPageServer(
     async (method, params) => {
@@ -444,6 +474,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     },
     (method, message) => failures.push({ method, message }),
     (path, needles) => (typeof htmlGuess === "function" ? htmlGuess(path, needles) : htmlGuess),
+    (name, file) => (typeof usageAnswer === "function" ? usageAnswer(name, file) : usageAnswer),
   );
 
   const tools = srv.instance._registeredTools;
@@ -489,6 +520,32 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("and stays 'none' when even the served html has no match",
     /"confidence": "none"/.test(stillNone.content[0].text), stillNone.content[0].text.slice(0, 80));
   htmlGuess = { found: true, line: 7, column: 1, matched: "go", excerpt: "<button>" };
+
+  // a resolved component that is reused elsewhere is flagged, so the agent can
+  // ask about scope instead of silently rippling a change through every instance
+  answer = {
+    confidence: "exact",
+    source: { file: "src/components/Button.tsx", line: 12, column: 3 },
+    evidence: [{ kind: "react-debug-source", exact: true }],
+    component: "Button",
+  };
+  usageAnswer = { otherFiles: 6, capped: false };
+  const reused = await run("locate_source", { ref: 1 });
+  check("a component rendered elsewhere carries a reuse field",
+    /"reuse"/.test(reused.content[0].text) && /"otherFiles": 6/.test(reused.content[0].text),
+    reused.content[0].text);
+
+  usageAnswer = { otherFiles: 0, capped: false };
+  const notReused = await run("locate_source", { ref: 1 });
+  check("a component that is not reused carries no reuse field",
+    !/"reuse"/.test(notReused.content[0].text), notReused.content[0].text);
+
+  answer = { confidence: "exact", source: { file: "src/App.jsx", line: 44, column: null }, evidence: [{ kind: "react-debug-source", exact: true }] };
+  usageAnswer = () => { throw new Error("countUsages should not be called without a resolved component"); };
+  const noComponent = await run("locate_source", { ref: 1 });
+  check("an element with no resolved component is never checked for reuse",
+    !/"reuse"/.test(noComponent.content[0].text) && !noComponent.isError, noComponent.content[0].text);
+  usageAnswer = null;
 
   answer = { frames: [{ png: "A", at: 390, label: "390px · 300×100" }], notes: ["1440px: the element is not present"] };
   const bp = await run("capture_breakpoints", { ref: 1, widths: [390, 1440] });

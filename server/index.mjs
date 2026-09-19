@@ -25,6 +25,7 @@ import { createProxy, proxyUpgrade } from "./proxy.mjs";
 import * as registry from "./registry.mjs";
 import * as settings from "./settings.mjs";
 import * as snapshots from "./snapshots.mjs";
+import { countUsages } from "./usage.mjs";
 
 // A fixed port would stop the second bridge from ever starting. An explicit
 // UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
@@ -98,6 +99,11 @@ const appProxy = createProxy({
     while (servedHtml.size > 12) servedHtml.delete(servedHtml.keys().next().value);
   },
 });
+
+/** How many other project files render a resolved component — see usage.mjs. */
+function countComponentUsages(name, definingFile) {
+  return countUsages(PROJECT, name, definingFile);
+}
 
 /** Find a needle in the HTML we served for a path, reporting line and column. */
 function findInServedHtml(path, needles) {
@@ -749,6 +755,13 @@ How to work here:
 - Before searching the project by hand, call locate_source. Dev builds usually know the file and line an
   element came from. Trust "exact" confidence; treat "component" (right file, not necessarily the
   right line) and "candidate" (a served-HTML guess) as a lead to confirm, not a location to edit blind.
+- If locate_source's reply includes "reuse", the selected element is a component also rendered
+  elsewhere in the project — editing it changes every instance, not just the one clicked. If the
+  request doesn't already settle that ("this button" vs "every button", "all the cards"), ask_choice
+  before editing: change the shared component everywhere, or scope the edit to just this instance.
+  For "just this instance," follow how the project already expresses one-off variants — a prop, a
+  wrapper class, a scoped override — rather than duplicating the whole component, which should be a
+  last resort.
 - "Does this hold up on mobile" is capture_breakpoints, not a request for the user to resize.
   It follows the element across widths, since a rectangle means something different at each.
 - When the request is a clear, unambiguous change ("make this button blue", "add 8px of gap
@@ -786,7 +799,7 @@ async function runBuiltin() {
     ({ query } = await import("@anthropic-ai/claude-agent-sdk"));
     // Also an SDK import: the tools have to be shaped the way it wants them.
     const { createPageServer } = await import("./page-tools.mjs");
-    pageServer = createPageServer(callPage, reportToolFailure, findInServedHtml);
+    pageServer = createPageServer(callPage, reportToolFailure, findInServedHtml, countComponentUsages);
   } catch (err) {
     // An install that skipped optional dependencies is the likely cause, and it is
     // recoverable without reinstalling: the other two modes need nothing extra.
