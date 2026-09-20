@@ -192,6 +192,18 @@ check("a stale answer from a timed-out question is not handed to the next questi
   !/stale-answer/.test(answerForSecond.result.content[0].text) && /did not answer/.test(answerForSecond.result.content[0].text),
   answerForSecond.result.content[0].text.slice(0, 80));
 
+// A blocking await_choice must not hang for its full timeout when the bridge
+// drops mid-wait: the client's close handler resolves it, as a timeout would.
+// (Last, because it takes the bridge down.)
+{
+  const longWait = rpc("tools/call", { name: "await_choice", arguments: { timeout: 300000 } });
+  await new Promise((r) => setTimeout(r, 300)); // let it register its waiter
+  bridge.kill("SIGTERM"); // drop the bridge under the blocking call
+  const res = await longWait; // must resolve now, not in 5 minutes (rpc's own 15s cap would else fire)
+  check("a blocking await_choice returns when the bridge disconnects, not after its full timeout",
+    /did not pick/.test(res.result.content[0].text), res.result.content[0].text.slice(0, 60));
+}
+
 // Closing stdin is how a stdio MCP server is meant to end; killing it would lose
 // its coverage and skip its teardown.
 mcp.stdin.end();

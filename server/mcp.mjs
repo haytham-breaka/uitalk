@@ -148,6 +148,12 @@ function connect() {
       entry.reject(new Error("the bridge disconnected"));
       pending.delete(id);
     }
+    // A blocking await_choice/await_answer would otherwise hang until its own
+    // timeout (up to 15 min) after the bridge drops, and the parked waiter would
+    // still be there to catch an unrelated answer after a reconnect. Resolve them
+    // now, the way a timeout does.
+    for (const wake of waitingForChoice.splice(0)) wake(null);
+    for (const wake of waitingForAnswer.splice(0)) wake(null);
   });
   socket.on("error", () => {});
 
