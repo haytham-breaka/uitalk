@@ -9,6 +9,12 @@
 // edit. To undo safely we also need what it looked like right *after* — captured
 // once, when the agent's turn ends — so a later, unrelated edit to the same file
 // can be told apart from the agent's own change and left alone.
+//
+// Undo restores the *worktree* to the pre-edit state; it must never touch the
+// user's index. Their staging is theirs — a half-staged file, a `git add`ed hunk —
+// and clicking Undo on an agent's edit should not restage, unstage, or collapse
+// any of it. That is why revert uses `git restore --worktree` (worktree only) and
+// not `git checkout <ref> -- <path>` (which rewrites the index too).
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -160,7 +166,8 @@ export async function revertTo(cwd, snap) {
   if (!snap.postCaptured) {
     const changed = lines(await git(cwd, ["diff", "--name-only", snap.ref, "--"]));
     if (!changed.length) return { reverted: [], removed: [], skipped: [], note: "nothing has changed since that point" };
-    await git(cwd, ["checkout", snap.ref, "--", ...changed]);
+    // --worktree, never checkout: restore the files without rewriting the index.
+    await git(cwd, ["restore", `--source=${snap.ref}`, "--worktree", "--", ...changed]);
     return { reverted: changed, removed: [], skipped: [] };
   }
 
@@ -190,7 +197,9 @@ export async function revertTo(cwd, snap) {
     else skipped.push(file);
   }
 
-  if (fromRef.length) await git(cwd, ["checkout", snap.ref, "--", ...fromRef]);
+  // Restore the worktree only — the agent's edit is undone, the user's staging is
+  // left exactly as they had it (see the header note on the index invariant).
+  if (fromRef.length) await git(cwd, ["restore", `--source=${snap.ref}`, "--worktree", "--", ...fromRef]);
   reverted.push(...fromRef);
   for (const file of fromBlob) {
     try {
