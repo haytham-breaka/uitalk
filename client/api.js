@@ -880,11 +880,15 @@ globalThis.UITalk = (() => {
     return { applied: true, target: identify(el), matchedBy: sel };
   }
 
-  function tryMarkup({ ref, selector, html }) {
-    const { el } = resolveTarget({ ref, selector });
+  function tryMarkup({ ref, html }) {
+    // Check the ref before resolving the target: resolving a selector stamps a
+    // data-uitalk-target attribute on the page and registers it, so validating
+    // after would leave that stray state behind on a rejected call. try_markup is
+    // ref-only anyway — the original has to be restored by ref.
     if (ref === undefined || ref === null) {
       throw new Error("try_markup needs a selection ref, because the original has to be restored by ref");
     }
+    const { el } = resolveTarget({ ref });
     if (!originals.has(ref)) originals.set(ref, el);
 
     // A detached <div> parses html under whatever insertion-mode rules apply to
