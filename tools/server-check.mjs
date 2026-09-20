@@ -464,6 +464,81 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("an empty needle list finds nothing", findSourceCandidates(proj, [undefined, null, ""]).length === 0);
 }
 
+// ------------------------------------------------ opencode config auto-wiring
+{
+  const { ensureUitalkMcp, parseJsonc } = await import("../server/opencode-config.mjs");
+  const read = (p, f) => readFileSync(join(p, f), "utf8");
+
+  // The tolerant parser itself: a // or , inside a string must survive, a real
+  // trailing comma must not break the parse.
+  check("parseJsonc keeps a // inside a string and drops a trailing comma",
+    JSON.stringify(parseJsonc('{ "url": "http://x//y", "a": 1, }')) === '{"url":"http://x//y","a":1}',
+    JSON.stringify(parseJsonc('{ "url": "http://x//y", "a": 1, }')));
+  check("parseJsonc returns null on genuinely broken input", parseJsonc('{ "a": ') === null);
+
+  // No config at all: one is created, valid, pointing at uitalk.
+  {
+    const proj = mkdtempSync(join(sandbox, "oc-none-"));
+    const r = ensureUitalkMcp(proj);
+    check("creates opencode.json when none exists", r.action === "created" && r.file === "opencode.json", JSON.stringify(r));
+    const cfg = JSON.parse(read(proj, "opencode.json"));
+    check("the created config points OpenCode at uitalk-mcp",
+      cfg.mcp?.uitalk?.command?.[0] === "uitalk-mcp" && cfg.mcp.uitalk.environment.UITALK_PROJECT === proj,
+      JSON.stringify(cfg.mcp));
+    check("a second call is idempotent, not a duplicate write", ensureUitalkMcp(proj).action === "present");
+  }
+
+  // Existing JSONC with comments and another MCP server: uitalk is spliced in and
+  // every comment survives, because the file is edited, not rewritten.
+  {
+    const proj = mkdtempSync(join(sandbox, "oc-jsonc-"));
+    const original = `{
+  // our project's OpenCode config
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "other": { "type": "local", "command": ["other-mcp"] } // keep this one
+  },
+  "model": "anthropic/claude", // trailing comma below is legal JSONC
+}
+`;
+    writeFileSync(join(proj, "opencode.jsonc"), original);
+    const r = ensureUitalkMcp(proj);
+    check("splices into an existing opencode.jsonc", r.action === "inserted" && r.file === "opencode.jsonc", JSON.stringify(r));
+    const after = read(proj, "opencode.jsonc");
+    check("the hand-written comments are preserved verbatim",
+      after.includes("// our project's OpenCode config") &&
+        after.includes("// keep this one") &&
+        after.includes("// trailing comma below is legal JSONC"),
+      after);
+    const cfg = parseJsonc(after);
+    check("uitalk is now present alongside the existing server",
+      cfg.mcp?.uitalk?.command?.[0] === "uitalk-mcp" && cfg.mcp?.other?.command?.[0] === "other-mcp",
+      JSON.stringify(cfg.mcp));
+    check("splicing is idempotent too", ensureUitalkMcp(proj).action === "present");
+  }
+
+  // Existing config with no mcp key at all: an mcp block is added at the root.
+  {
+    const proj = mkdtempSync(join(sandbox, "oc-nomcp-"));
+    writeFileSync(join(proj, "opencode.json"), `{\n  "model": "anthropic/claude"\n}\n`);
+    const r = ensureUitalkMcp(proj);
+    check("adds an mcp block when the config has none", r.action === "inserted", JSON.stringify(r));
+    const cfg = JSON.parse(read(proj, "opencode.json"));
+    check("the existing keys are kept when mcp is added",
+      cfg.model === "anthropic/claude" && cfg.mcp?.uitalk?.command?.[0] === "uitalk-mcp", JSON.stringify(cfg));
+  }
+
+  // A malformed config is left strictly alone rather than clobbered.
+  {
+    const proj = mkdtempSync(join(sandbox, "oc-bad-"));
+    const broken = `{ "mcp": { "other": { `; // truncated, unparseable
+    writeFileSync(join(proj, "opencode.json"), broken);
+    const r = ensureUitalkMcp(proj);
+    check("refuses to touch a config it cannot parse", r.action === "skipped", JSON.stringify(r));
+    check("and leaves the broken file byte-for-byte unchanged", read(proj, "opencode.json") === broken);
+  }
+}
+
 // --------------------------------------------------------------- snapshots
 {
   const snapshots = await import("../server/snapshots.mjs");
