@@ -2005,6 +2005,25 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     await until(() => calls.permissions.includes("perm1"), "the permission to be approved");
     check("an OpenCode permission request is auto-approved", calls.permissions.includes("perm1"), JSON.stringify(calls.permissions));
 
+    // send() must serialize on turn COMPLETION, not prompt dispatch. A second
+    // message that arrives while the first turn is still streaming must not start
+    // (and overwrite) a new turn: its prompt must wait until the first turn idles.
+    p.sent.length = 0;
+    calls.prompts.length = 0;
+    bridge.pushToAgent("first of two");
+    await until(() => calls.prompts.length === 1, "the first of two prompts to dispatch");
+    bridge.pushToAgent("second of two"); // queued while the first turn is still open
+    await new Promise((r) => setTimeout(r, 60)); // give the queue a chance to wrongly run it
+    check("a second message does not dispatch its prompt until the first turn ends",
+      calls.prompts.length === 1, `${calls.prompts.length} prompts dispatched`);
+    stream.push({ type: "message.updated", properties: { info: { id: "mS", sessionID: "S", role: "assistant" } } });
+    stream.push({ type: "message.part.delta", properties: { sessionID: "S", messageID: "mS", partID: "tS", field: "text", delta: "first done" } });
+    stream.push({ type: "session.idle", properties: { sessionID: "S" } }); // end turn one
+    await until(() => calls.prompts.length === 2, "the second prompt once the first turn ends");
+    check("the second message dispatches only after the first turn has ended", calls.prompts.length === 2);
+    stream.push({ type: "session.idle", properties: { sessionID: "S" } }); // end turn two, leave state clean
+    await until(() => p.sent.filter((f) => f.kind === "turn_end").length >= 2, "both turns to end");
+
     stream.end();
     bridge.setOpencodeForTest(null);
     bridge.setAgentForTest("builtin");

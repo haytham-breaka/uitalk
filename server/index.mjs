@@ -1261,6 +1261,7 @@ async function runOpencode() {
     if (t.said.trim()) record("agent", t.said.trim());
     toPanel({ kind: "turn_end" });
     void noteTurnEnded();
+    t.resolve?.(); // release the queued send() now the turn is actually done, not just dispatched
   }
 
   function failTurn(message) {
@@ -1275,6 +1276,7 @@ async function runOpencode() {
     // partial failure falls back to the coarser whole-file behavior right when
     // the safer, scoped one matters most.
     void noteTurnEnded();
+    t.resolve?.(); // release the queued send(); the failure is already shown, so don't reject it
   }
 
   (async () => {
@@ -1366,19 +1368,22 @@ async function runOpencode() {
     label: "opencode",
 
     send(content) {
-      queue(async () => {
-        turn = { said: "", quiet: false, seenTools: new Set(), textLen: new Map(), assistantMessageIds: new Set() };
-        try {
-          unwrapOpencode(
-            await client.session.promptAsync({
-              path: { id: sessionID },
-              body: { parts: toParts(content), system: GUIDANCE },
-            }),
-          );
-        } catch (err) {
-          failTurn(err.message);
-        }
-      });
+      // Serialize on turn COMPLETION, not prompt dispatch. promptAsync resolves as
+      // soon as OpenCode accepts the prompt (well before session.idle), so awaiting
+      // it here would free the queue mid-turn and let the next send() overwrite the
+      // in-flight `turn`. Resolve the queued step from finishTurn/failTurn instead —
+      // exactly as summarize() already does — so one turn truly finishes before the
+      // next begins.
+      return queue(
+        () =>
+          new Promise((resolve, reject) => {
+            turn = { said: "", quiet: false, seenTools: new Set(), textLen: new Map(), assistantMessageIds: new Set(), resolve, reject };
+            client.session
+              .promptAsync({ path: { id: sessionID }, body: { parts: toParts(content), system: GUIDANCE } })
+              .then((res) => res?.error && failTurn(JSON.stringify(res.error)))
+              .catch((err) => failTurn(err.message));
+          }),
+      );
     },
 
     /** The handover note compaction needs. Asked for without showing it as chat. */
