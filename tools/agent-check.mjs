@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { WebSocket } from "ws";
 import { createAdapter, fileTools, providers, normalize } from "../server/adapter.mjs";
 
@@ -75,6 +75,21 @@ const check = (n, ok, d) => {
   const listThroughLink = await ran("list_dir", { path: "escape" });
   check("list_dir does not follow a symlink out of the project",
     listThroughLink.failed && /outside the project/.test(listThroughLink.text));
+
+  // The explicit project-root escape attempts — read AND write, direct ../ paths,
+  // not just symlinks. These are uitalk's OWN boundary (the adapter's file tools).
+  // Builtin mode does not go through here: it uses the Claude Agent SDK's own file
+  // tools at the user's access level (see the query() options in server/index.mjs),
+  // so its boundary is the SDK's permission model, not this containment.
+  for (const path of ["../outside-project.txt", "../../outside-secret.txt"]) {
+    const rd = await ran("read_file", { path });
+    check(`read_file refuses ${path}`, rd.failed && /outside the project/.test(rd.text), rd.text.slice(0, 70));
+    const before = existsSync(join(root, path)) ? null : "absent";
+    const wr = await ran("write_file", { path, content: "pwned" });
+    check(`write_file refuses ${path}`, wr.failed && /outside the project/.test(wr.text), wr.text.slice(0, 70));
+    check(`and nothing is written outside the project for ${path}`,
+      before === "absent" && !existsSync(resolve(root, path)));
+  }
 
   const edited = await ran("edit_file", { path: "src/app.css", find: "padding: 14px", replace: "padding: 20px" });
   check("edit_file replaces an exact span", !edited.failed &&
