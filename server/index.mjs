@@ -343,9 +343,22 @@ function rejectPending(page) {
 let session = null;
 
 /** The three run* functions construct this themselves in production; a test stands
- * in for one to exercise compact()/clearSession() without a real SDK. */
+ * in for one to exercise compact()/clearSession() without a real SDK. Swapping the
+ * session also resets the builtin turn/queue plumbing, so an unfinished turn, a
+ * queued ask, or a held approval from a prior test block can't bleed into the next
+ * (the seam is test-only; production never calls it). */
 function setSessionForTest(s) {
   session = s;
+  builtinTurnOpen = false;
+  backlog.length = 0;
+  pendingApprovals.length = 0;
+  const stale = new Error("the test session was replaced");
+  while (afterBuiltinTurn.length) afterBuiltinTurn.shift().fail?.(stale);
+  if (internal) {
+    const w = internal;
+    internal = null;
+    w.fail?.(stale);
+  }
 }
 
 // Indirection so a test can force a controllable delay around the approval
@@ -410,6 +423,26 @@ const backlog = [];
 // summarize()/clear() behind send() with a promise-chain queue.
 let builtinTurnOpen = false;
 const afterBuiltinTurn = [];
+
+// Approvals that arrived while an agent turn was still streaming. Processing one
+// then would snapshot the pre-edit state against the WRONG turn: the unrelated
+// turn's end runs the post-edit capture before the approved edit is even made,
+// finalizing an empty snapshot so undo silently does nothing. So an approval that
+// races a turn waits here and is processed once that turn ends — the same point
+// the normal (no-turn-in-flight) approval would have snapshotted from.
+const pendingApprovals = [];
+
+/** Whether an ordinary CHAT turn is streaming right now, across modes — the only
+ * kind whose end runs the post-edit capture, so the only kind an approval must not
+ * snapshot against. Internal/quiet turns (compaction's summarize, "/clear") end
+ * through their own waiter, never noteTurnEnded, so they are harmless here and are
+ * deliberately excluded. builtin tracks the turn flag but must discount an internal
+ * ask (`internal` set); adapter and opencode expose the chat-only signal on their
+ * session; off mode and a torn-down session are never busy. */
+function agentBusy() {
+  if (config.agent === "builtin") return builtinTurnOpen && !internal;
+  return Boolean(session?.busy?.());
+}
 
 function pushToAgent(content) {
   // Both drive their own HTTP-shaped conversation rather than the Claude SDK's
@@ -652,36 +685,15 @@ wss.on("connection", (ws) => {
           });
           return;
         }
-        approvalPhase = "snapshotting";
-        turnWrites = new Set(); // scope this approval's undo to what the agent writes from here
-        record("me", `approved: ${frame.label}`);
-        // Neither the external-agent notice nor the edit instruction may reach an
-        // agent until the pre-edit snapshot exists — otherwise the agent's own
-        // write can land in what undo believes was the "before" state, and undo
-        // would no longer fully restore it. See snapshots.mjs's snapshot(), a real
-        // subprocess call, not something that resolves before this handler returns.
-        void (async () => {
-          const snap = await snapshotFn(frame.label);
-          lastChange = { snap, label: frame.label };
-          approvalPhase = "editing";
-          toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label });
-          toAgents(frame); // an external agent cannot be sent a message; it waits for this
-          pushToAgent(
-            `The user approved option "${frame.label}" for element ${frame.ref}.\n\n` +
-              `Approved declarations:\n${frame.declarations}\n` +
-              (frame.also ? `Additional rules:\n${frame.also}\n` : "") +
-              `\nElement identity:\n${JSON.stringify(frame.element, null, 2)}\n` +
-              `Page: ${frame.page?.path ?? "unknown"}\n\n` +
-              `Now commit this to source. Find where this element is defined and where its ` +
-              `styles live, then make the edit the way the surrounding code would. Match the ` +
-              `project's conventions rather than pasting the preview CSS verbatim, and do not ` +
-              `carry over any data-uitalk-* attribute. Tell me which files you changed.`,
-          );
-          // Off mode has no local turn whose end would return the phase to idle:
-          // the MCP client owns the edit and the bridge never sees it finish. Free
-          // the next approval here, so a second one is relayed rather than refused.
-          if (config.agent === "off") approvalPhase = "idle";
-        })();
+        // An approval that races an in-flight turn must not snapshot now (it would
+        // bind the pre-edit state to that unrelated turn, whose end would finalize
+        // an empty capture and break undo). Hold it; noteTurnEnded starts it once
+        // the turn ends, exactly where a non-racing approval would have begun.
+        if (agentBusy()) {
+          pendingApprovals.push(frame);
+          return;
+        }
+        beginApproval(frame);
         return;
       }
 
@@ -833,7 +845,46 @@ async function noteTurnEnded() {
   } finally {
     if (approvalPhase === "editing") approvalPhase = "idle";
   }
+  // A turn just ended, so the queue serializes no other turn against it now: an
+  // approval that arrived mid-turn can be snapshotted here, lined up with its own
+  // edit turn rather than the one that just finished.
+  if (approvalPhase === "idle" && pendingApprovals.length) beginApproval(pendingApprovals.shift());
   maybeCompact();
+}
+
+/** Take the pre-edit snapshot and send the approved change to the agent as its own
+ * turn. Split out of the "approval" frame handler so a mid-turn approval held in
+ * pendingApprovals can be started later, from noteTurnEnded, on identical terms. */
+function beginApproval(frame) {
+  approvalPhase = "snapshotting";
+  turnWrites = new Set(); // scope this approval's undo to what the agent writes from here
+  record("me", `approved: ${frame.label}`);
+  // Neither the external-agent notice nor the edit instruction may reach an agent
+  // until the pre-edit snapshot exists — otherwise the agent's own write can land
+  // in what undo believes was the "before" state. See snapshots.mjs's snapshot(),
+  // a real subprocess call, not something that resolves before this returns.
+  void (async () => {
+    const snap = await snapshotFn(frame.label);
+    lastChange = { snap, label: frame.label };
+    approvalPhase = "editing";
+    toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label });
+    toAgents(frame); // an external agent cannot be sent a message; it waits for this
+    pushToAgent(
+      `The user approved option "${frame.label}" for element ${frame.ref}.\n\n` +
+        `Approved declarations:\n${frame.declarations}\n` +
+        (frame.also ? `Additional rules:\n${frame.also}\n` : "") +
+        `\nElement identity:\n${JSON.stringify(frame.element, null, 2)}\n` +
+        `Page: ${frame.page?.path ?? "unknown"}\n\n` +
+        `Now commit this to source. Find where this element is defined and where its ` +
+        `styles live, then make the edit the way the surrounding code would. Match the ` +
+        `project's conventions rather than pasting the preview CSS verbatim, and do not ` +
+        `carry over any data-uitalk-* attribute. Tell me which files you changed.`,
+    );
+    // Off mode has no local turn whose end would return the phase to idle: the MCP
+    // client owns the edit and the bridge never sees it finish. Free the next
+    // approval here, so a second one is relayed rather than refused.
+    if (config.agent === "off") approvalPhase = "idle";
+  })();
 }
 
 /** Compact between turns, never inside one: mid-turn the history is still in use. */
@@ -955,6 +1006,16 @@ async function clearSession() {
   resetContextMeter();
   lastChange = null;
   approvalPhase = "idle"; // abandon any approval whose turn will now never end
+  // A new session also abandons any in-flight builtin turn and everything queued
+  // behind it: unsent prompts in the backlog, internal asks waiting on a turn that
+  // will now never end, and approvals held for a turn that is being discarded.
+  // Leaving builtinTurnOpen set would strand the next approval (held as if a turn
+  // were still streaming) and the next askAgent (queued behind a phantom turn).
+  builtinTurnOpen = false;
+  backlog.length = 0;
+  pendingApprovals.length = 0;
+  const abandoned = new Error("the session was cleared");
+  while (afterBuiltinTurn.length) afterBuiltinTurn.shift().fail?.(abandoned);
   toPanel({ kind: "cleared" });
   notifyAgents("The user started a new session in the panel. The panel's history was cleared.");
   log(session ? "session cleared on request" : "panel history cleared (no built-in agent)");
@@ -1366,6 +1427,11 @@ async function runOpencode() {
   session = {
     mode: "opencode",
     label: "opencode",
+
+    /** Whether an ordinary chat turn is streaming — so the bridge can hold an
+     * approval that arrives mid-turn rather than snapshotting against it. A quiet
+     * (compaction) turn doesn't run the post-edit capture, so it doesn't count. */
+    busy: () => turn !== null && !turn.quiet,
 
     send(content) {
       // Serialize on turn COMPLETION, not prompt dispatch. promptAsync resolves as

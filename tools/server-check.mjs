@@ -1675,6 +1675,53 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // The approval-mid-turn race: approving while a CHAT turn is still streaming
+    // must NOT snapshot against that turn — its end would run the post-edit capture
+    // before the approved edit is even made, finalizing an empty snapshot so undo
+    // silently does nothing. The approval is held until the turn ends, then run as
+    // its own edit turn, so undo restores exactly the approved change.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    writeFileSync(join(proj, "race.css"), ".r{color:red}\n"); // a fresh file, so the baseline always commits
+    execFileSync("git", ["add", "race.css"], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "race baseline"], { cwd: proj });
+
+    bridge.pushToAgent("what does this element do?"); // an ordinary chat turn is now streaming
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "make it green", ref: 1, declarations: "color:green", element: {} });
+    await new Promise((r) => setTimeout(r, 30));
+    check("an approval during a chat turn is held, not snapshotted against it",
+      bridge.approvalPhaseForTest() === "idle" && !p.sent.some((f) => f.kind === "revertable"),
+      `phase=${bridge.approvalPhaseForTest()} frames=${JSON.stringify(p.sent.map((f) => f.kind))}`);
+
+    bridge.relay({ type: "result", subtype: "success" }); // the chat turn ends
+    await untilPhase("editing"); // only now does the held approval snapshot + push its edit
+    check("once the chat turn ends the held approval becomes revertable",
+      p.sent.some((f) => f.kind === "revertable" && f.available === true),
+      JSON.stringify(p.sent.map((f) => f.kind)));
+    writeFileSync(join(proj, "race.css"), ".r{color:green}\n"); // the "agent" makes the approved edit
+    bridge.relay({ type: "result", subtype: "success" }); // the edit turn ends → captureAfter
+    await untilPhase("idle");
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the revert to answer");
+    const rev = p.sent.find((f) => f.kind === "reverted");
+    check("undo restores a change approved during a chat turn — the snapshot lined up with the edit",
+      rev?.ok === true && readFileSync(join(proj, "race.css"), "utf8") === ".r{color:red}\n",
+      JSON.stringify({ rev, now: readFileSync(join(proj, "race.css"), "utf8").trim() }));
+
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
     // An approval missing the fields it needs is refused rather than sent to
     // the agent as a nonsense edit instruction.
     const p = makePage();
