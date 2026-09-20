@@ -1036,6 +1036,100 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       JSON.stringify(snapAll.changedByAgent));
     git("checkout", "--", "agent.css", "mine.css");
   }
+
+  // Undo must preserve the entry TYPE of a pre-existing untracked file, not only its
+  // bytes. git hash-object follows a symlink and stores the target's content, so a
+  // blob restore used to turn a link into a regular file — silently changing topology.
+  // Guard on symlink support so the suite still runs where creating one needs
+  // privileges (some Windows setups).
+  const fsx = await import("node:fs");
+  let symlinksWork = true;
+  try {
+    writeFileSync(join(repo, "sym-target.txt"), "hello\n");
+    fsx.symlinkSync("sym-target.txt", join(repo, "sym-probe"));
+    symlinksWork = fsx.lstatSync(join(repo, "sym-probe")).isSymbolicLink();
+    unlinkSync(join(repo, "sym-probe"));
+    unlinkSync(join(repo, "sym-target.txt"));
+  } catch {
+    symlinksWork = false;
+  }
+
+  if (symlinksWork) {
+    // (a) the agent deletes an untracked symlink -> undo brings back the symlink.
+    {
+      writeFileSync(join(repo, "s-target.txt"), "hello\n");
+      fsx.symlinkSync("s-target.txt", join(repo, "s-link"));
+      const snap0 = await snapshots.snapshot(repo, "agent deletes an untracked symlink");
+      unlinkSync(join(repo, "s-link"));
+      const snap = await snapshots.captureAfter(repo, snap0);
+      const out = await snapshots.revertTo(repo, snap);
+      check("undo restores a deleted untracked symlink AS a symlink, not a regular file",
+        out.reverted.includes("s-link") && fsx.lstatSync(join(repo, "s-link")).isSymbolicLink(),
+        JSON.stringify(out));
+      check("and it points at the original target",
+        fsx.readlinkSync(join(repo, "s-link")) === "s-target.txt", fsx.readlinkSync(join(repo, "s-link")));
+      unlinkSync(join(repo, "s-link"));
+      unlinkSync(join(repo, "s-target.txt"));
+    }
+
+    // (b) the agent replaces an untracked symlink with a regular file -> undo puts the
+    // symlink back (a same-content swap must still be detected as a modification).
+    {
+      writeFileSync(join(repo, "r-target.txt"), "hello\n");
+      fsx.symlinkSync("r-target.txt", join(repo, "r-link"));
+      const snap0 = await snapshots.snapshot(repo, "agent swaps a symlink for a file");
+      unlinkSync(join(repo, "r-link"));
+      writeFileSync(join(repo, "r-link"), "now a real file\n");
+      const snap = await snapshots.captureAfter(repo, snap0);
+      check("replacing a symlink with a file is seen as a modification",
+        snap.modifiedUntracked?.includes("r-link"), JSON.stringify(snap.modifiedUntracked));
+      const out = await snapshots.revertTo(repo, snap);
+      check("undo turns it back into the original symlink",
+        out.reverted.includes("r-link") && fsx.lstatSync(join(repo, "r-link")).isSymbolicLink() &&
+          fsx.readlinkSync(join(repo, "r-link")) === "r-target.txt", JSON.stringify(out));
+      unlinkSync(join(repo, "r-link"));
+      unlinkSync(join(repo, "r-target.txt"));
+    }
+
+    // (c) the agent replaces a regular untracked file with a symlink -> undo restores
+    // the file's bytes and must NOT write through the leftover symlink to its target.
+    {
+      writeFileSync(join(repo, "f-orig.txt"), "original bytes\n");
+      writeFileSync(join(repo, "f-victim.txt"), "must stay\n");
+      const snap0 = await snapshots.snapshot(repo, "agent swaps a file for a symlink");
+      unlinkSync(join(repo, "f-orig.txt"));
+      fsx.symlinkSync("f-victim.txt", join(repo, "f-orig.txt"));
+      const snap = await snapshots.captureAfter(repo, snap0);
+      const out = await snapshots.revertTo(repo, snap);
+      check("undo restores the original regular file, not a symlink",
+        out.reverted.includes("f-orig.txt") && fsx.lstatSync(join(repo, "f-orig.txt")).isFile() &&
+          readFileSync(join(repo, "f-orig.txt"), "utf8") === "original bytes\n", JSON.stringify(out));
+      check("and does not write through the symlink into its target file",
+        readFileSync(join(repo, "f-victim.txt"), "utf8") === "must stay\n",
+        readFileSync(join(repo, "f-victim.txt"), "utf8").trim());
+      unlinkSync(join(repo, "f-orig.txt"));
+      unlinkSync(join(repo, "f-victim.txt"));
+    }
+  }
+
+  // The executable bit on a pre-existing untracked file must survive undo. The blob
+  // captures bytes but no mode, and writeFileSync creates with the default mode, so
+  // restoring an edited script used to drop its +x. POSIX only (no Windows exec bit).
+  if (process.platform !== "win32") {
+    writeFileSync(join(repo, "run.sh"), "#!/bin/sh\necho hi\n");
+    fsx.chmodSync(join(repo, "run.sh"), 0o755);
+    const snap0 = await snapshots.snapshot(repo, "agent rewrites an executable untracked script");
+    writeFileSync(join(repo, "run.sh"), "#!/bin/sh\necho changed\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+    const out = await snapshots.revertTo(repo, snap);
+    check("undo restores an executable untracked file's contents",
+      out.reverted.includes("run.sh") && readFileSync(join(repo, "run.sh"), "utf8").includes("echo hi"),
+      JSON.stringify(out));
+    check("and preserves its executable bit",
+      (statSync(join(repo, "run.sh")).mode & 0o111) !== 0,
+      "0" + (statSync(join(repo, "run.sh")).mode & 0o777).toString(8));
+    unlinkSync(join(repo, "run.sh"));
+  }
   } catch (err) {
     check("the snapshots section ran without an unexpected throw", false, err.stack || String(err));
   }
