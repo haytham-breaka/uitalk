@@ -897,6 +897,84 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   await tick();
 }
 
+// --- a standalone reload hands verification to the next document, and does not
+//     verify against the outgoing one (which still shows the pre-edit markup)
+{
+  const sock = sockets[0];
+  const realComputed = UITalk.computedOf;
+  const realLive = UITalk.liveReload;
+  window.sessionStorage.removeItem("uitalk.pendingVerify");
+  UITalk.liveReload = () => null; // standalone app, no HMR -> reload and hand the job off
+
+  // A stub that WOULD report drift, so any stray inline verify on the old document is
+  // unmistakable: first read (at approval) is the preview, a later one differs.
+  let reads = 0;
+  UITalk.computedOf = () => ({ "border-radius": reads++ === 0 ? "999px" : "4px" });
+
+  const msgsBefore = root.querySelectorAll(".log .msg").length;
+  const sentBefore = sent.length;
+
+  UITalk.clearSelection();
+  atPoint = window.document.querySelector(".notify-button");
+  if (!tool("pick").classList.contains("on")) await clickTool("pick");
+  fire("click", 600, 600);
+  await tick();
+  UITalk.showOptions({ ref: 1, options: [
+    { label: "Pill", declarations: "border-radius: 999px" },
+    { label: "Square", declarations: "border-radius: 0" },
+  ]});
+  await tick();
+  root.querySelector('[data-act="approve"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  await tick(); await tick();
+  sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+  await new Promise((r) => setTimeout(r, 1400)); // reloadForResult (900ms) + capture
+
+  const newLog = [...root.querySelectorAll(".log .msg")].slice(msgsBefore).map((m) => m.textContent).join(" | ");
+  check("a standalone reload does NOT verify against the outgoing document",
+    !/did not survive the edit/.test(newLog) && !/looks the same committed/.test(newLog), newLog.slice(-110));
+  check("and does not nudge the agent from the outgoing document",
+    !sent.slice(sentBefore).some((f) => f.kind === "chat" && /did not take effect/.test(f.text ?? "")));
+  const saved = JSON.parse(window.sessionStorage.getItem("uitalk.pendingVerify") ?? "null");
+  check("the verification is deferred to the replacement document",
+    saved?.props?.includes("border-radius"), JSON.stringify(saved && saved.label));
+
+  UITalk.computedOf = realComputed;
+  UITalk.liveReload = realLive;
+  window.sessionStorage.removeItem("uitalk.pendingVerify");
+  UITalk.resetPreview();
+  UITalk.clearSelection();
+  await tick();
+}
+
+// --- the replacement document resumes the handed-off verification exactly once
+{
+  const resumed = new JSDOM(HTML, { url: "http://127.0.0.1:8400/", pretendToBeVisual: true,
+    runScripts: "outside-only", virtualConsole: vc });
+  resumed.window.CSSStyleSheet = FakeSheet;
+  resumed.window.document.adoptedStyleSheets = [];
+  resumed.window.CSS = { escape: (v) => String(v) };
+  resumed.window.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  resumed.window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} };
+  // The job left by the outgoing document before it reloaded.
+  resumed.window.sessionStorage.setItem("uitalk.pendingVerify", JSON.stringify({
+    label: "Pill", ref: 1, props: ["border-radius"], previewed: { "border-radius": "999px" },
+  }));
+
+  for (const f of ["api.js", "raster.js", "native.js", "shell.js", "ui.js"]) loadClient(resumed.window, f);
+  // The committed value matches the preview, so the resumed check reports "verified".
+  resumed.window.UITalk.computedOf = () => ({ "border-radius": "999px" });
+  await new Promise((r) => setTimeout(r, 800)); // the resume runs on a 600ms timer
+
+  const resumedRoot = resumed.window.document.getElementById("uitalk-host")?.shadowRoot;
+  const verifyMsgs = [...(resumedRoot?.querySelectorAll(".log .msg") ?? [])]
+    .map((m) => m.textContent).filter((t) => /looks the same committed/.test(t));
+  check("the replacement document runs the deferred verification exactly once",
+    verifyMsgs.length === 1, `${verifyMsgs.length} verification message(s)`);
+  check("and consumes the resume key so it does not verify again on the next load",
+    resumed.window.sessionStorage.getItem("uitalk.pendingVerify") === null,
+    resumed.window.sessionStorage.getItem("uitalk.pendingVerify") ?? "cleared");
+}
+
 // --- settings render by type, not as a number box for everything
 {
   const sock = sockets[0];
