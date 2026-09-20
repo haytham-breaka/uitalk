@@ -17,7 +17,10 @@
 // not `git checkout <ref> -- <path>` (which rewrites the index too).
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync,
+  rmdirSync, symlinkSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -68,6 +71,53 @@ const hashFile = (path) => {
   }
 };
 
+// Does the path exist as an entry of any kind? existsSync follows symlinks, so a
+// dangling one reads as absent — lstat sees the link itself, which is what "was
+// this file deleted?" actually means for an untracked symlink.
+const lexists = (path) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// What an untracked entry IS, captured with lstat so a symlink is recorded as a
+// link (its target), not followed. git hash-object follows a symlink and stores the
+// TARGET's bytes, so restoring from a blob would turn the link into a regular file —
+// silently changing filesystem topology. A regular file also carries its mode, so
+// undo can put an executable bit back (writeFileSync alone would drop it). The
+// content hash lets a later user edit be told apart from the agent's own change.
+const entryMeta = (path) => {
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) return { type: "link", target: readlinkSync(path) };
+    if (st.isFile()) return { type: "file", mode: st.mode & 0o777, hash: hashFile(path) };
+    return { type: "other" }; // fifo/socket/etc — no bytes we can meaningfully restore
+  } catch {
+    return null; // gone or unreadable
+  }
+};
+
+// A comparable fingerprint of an untracked entry as it is right now: the link target
+// for a symlink, the content hash for a file. Compared against the snapshot's stored
+// meta to decide "did this change, and is what's here now still what the agent left?"
+const currentFingerprint = (path) => {
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) return `L:${readlinkSync(path)}`;
+    return `F:${hashFile(path)}`;
+  } catch {
+    return null;
+  }
+};
+
+// The same fingerprint derived from stored snapshot meta, so before/after compare
+// on the same footing (a symlink that becomes a same-content regular file, or a
+// retargeted link, both read as "changed").
+const metaFingerprint = (m) => (!m ? null : m.type === "link" ? `L:${m.target}` : `F:${m.hash}`);
+
 export async function isRepo(cwd) {
   try {
     return (await git(cwd, ["rev-parse", "--is-inside-work-tree"])) === "true";
@@ -88,10 +138,20 @@ export async function snapshot(cwd, label, onError = null) {
     const ref = wip || (await git(cwd, ["rev-parse", "HEAD"]));
     const untrackedBefore = await untracked(cwd);
     // stash create captures only tracked files, so an already-untracked file the
-    // agent later edits has no restore point in `ref`. Keep each one's contents
-    // as a git blob now, before any edit, so undo can put it back exactly.
-    const untrackedBlobs = await blobIds(cwd, untrackedBefore, { write: true });
-    return { ref, label, at: Date.now(), untrackedBefore, untrackedBlobs };
+    // agent later edits has no restore point in `ref`. Record what each one IS
+    // (regular file with its mode, or a symlink with its target) and, for regular
+    // files, keep the bytes as a git blob now, before any edit, so undo can put it
+    // back exactly. Symlinks are deliberately NOT hash-object'd — that would follow
+    // the link and blob the target's bytes; their target string is the restore point.
+    const untrackedMeta = {};
+    const regularFiles = [];
+    for (const f of untrackedBefore) {
+      const meta = entryMeta(join(cwd, f));
+      untrackedMeta[f] = meta;
+      if (meta && meta.type !== "link") regularFiles.push(f);
+    }
+    const untrackedBlobs = await blobIds(cwd, regularFiles, { write: true });
+    return { ref, label, at: Date.now(), untrackedBefore, untrackedBlobs, untrackedMeta };
   } catch (err) {
     // A git operation failed on a tree we already confirmed is a repo — a
     // transient spawn failure, an odd filesystem, a locale that trips path
@@ -133,32 +193,34 @@ export async function captureAfter(cwd, snap, touched = null) {
   const createdHashes = {};
   for (const file of createdByAgent) createdHashes[file] = hashFile(join(cwd, file));
 
-  // A file that was already untracked and whose bytes the agent changed since the
-  // snapshot. git diff never lists it (it is untracked) and it is not "created"
-  // (it predates the snapshot), so it needs its own bucket. Freeze the post-edit
-  // hash too, to tell a later user edit apart from the agent's own change.
-  const stillUntracked = scope((snap.untrackedBefore ?? []).filter((f) => existsSync(join(cwd, f))));
-  const nowBlobs = await blobIds(cwd, stillUntracked);
+  // A pre-existing untracked entry the agent changed in place: its bytes edited, a
+  // symlink retargeted, or its very type swapped (file <-> symlink). git diff never
+  // lists it (untracked) and it is not "created" (it predates the snapshot), so it
+  // needs its own bucket. Detection is by a type-aware fingerprint, not bytes alone,
+  // so replacing a symlink with a same-content file still counts. Freeze the post-edit
+  // fingerprint to tell a later user edit apart from the agent's own change.
+  const stillUntracked = scope((snap.untrackedBefore ?? []).filter((f) => lexists(join(cwd, f))));
   const modifiedUntracked = [];
-  const modifiedHashes = {};
+  const modifiedFps = {};
   for (const file of stillUntracked) {
-    const baseline = snap.untrackedBlobs?.[file];
-    if (baseline && nowBlobs[file] && nowBlobs[file] !== baseline) {
+    const was = metaFingerprint(snap.untrackedMeta?.[file]);
+    const now = currentFingerprint(join(cwd, file));
+    if (was !== null && now !== null && now !== was) {
       modifiedUntracked.push(file);
-      modifiedHashes[file] = hashFile(join(cwd, file));
+      modifiedFps[file] = now;
     }
   }
 
-  // A pre-existing untracked file the agent DELETED. It no longer exists, so git
-  // diff and untracked() both miss it, but its bytes were blobbed at snapshot time,
-  // so undo can put it back. No post-hash is kept: a gone file has no content to
-  // fingerprint, and its concurrency rule is "restore only if still absent at undo"
-  // — a path the user has since recreated is theirs, and revertTo() leaves it alone.
-  const deletedUntracked = scope((snap.untrackedBefore ?? []).filter((f) => !existsSync(join(cwd, f))));
+  // A pre-existing untracked entry the agent DELETED. It no longer exists, so git
+  // diff and untracked() both miss it, but its type (and, for a file, its bytes) were
+  // captured at snapshot time, so undo can put it back. No post-fingerprint is kept:
+  // a gone entry has nothing to fingerprint, and its concurrency rule is "restore only
+  // if still absent at undo" — a path the user has since recreated is theirs.
+  const deletedUntracked = scope((snap.untrackedBefore ?? []).filter((f) => !lexists(join(cwd, f))));
 
   return {
     ...snap, postCaptured: true, changedByAgent, postHashes, createdByAgent, createdHashes,
-    modifiedUntracked, modifiedHashes, deletedUntracked,
+    modifiedUntracked, modifiedFps, deletedUntracked,
   };
 }
 
@@ -211,23 +273,28 @@ export async function revertTo(cwd, snap) {
     else skipped.push(file);
   }
 
-  // Untracked-and-modified files are not in the ref, so they are restored from the
-  // blob captured at snapshot time rather than by checkout — but only if the user
-  // has not edited them again since the agent finished.
-  const fromBlob = [];
+  // Can this untracked entry be put back? A symlink needs its recorded target; a
+  // regular file needs the blob captured at snapshot time.
+  const restorable = (file) => {
+    const meta = snap.untrackedMeta?.[file];
+    return meta?.type === "link" ? meta.target != null : Boolean(snap.untrackedBlobs?.[file]);
+  };
+
+  // Untracked entries the agent changed in place are not in the ref, so they come
+  // back from the captured meta/blob rather than by checkout — but only if the user
+  // has not touched them again since the agent finished (fingerprint still matches).
+  const fromCapture = [];
   for (const file of snap.modifiedUntracked ?? []) {
-    const blob = snap.untrackedBlobs?.[file];
-    if (blob && hashFile(join(cwd, file)) === snap.modifiedHashes?.[file]) fromBlob.push(file);
+    if (restorable(file) && currentFingerprint(join(cwd, file)) === snap.modifiedFps?.[file]) fromCapture.push(file);
     else skipped.push(file);
   }
 
-  // A pre-existing untracked file the agent deleted: restore it from the snapshot
-  // blob, but only if the path is still absent — a file the user has since put back
-  // is theirs, left untouched (the same concurrency rule as an edited-again file).
+  // A pre-existing untracked entry the agent deleted: restore it, but only if the
+  // path is still absent — one the user has since put back is theirs, left untouched
+  // (the same concurrency rule as an edited-again entry).
   const restoreDeleted = [];
   for (const file of snap.deletedUntracked ?? []) {
-    const blob = snap.untrackedBlobs?.[file];
-    if (blob && !existsSync(join(cwd, file))) restoreDeleted.push(file);
+    if (restorable(file) && !lexists(join(cwd, file))) restoreDeleted.push(file);
     else skipped.push(file);
   }
 
@@ -235,21 +302,32 @@ export async function revertTo(cwd, snap) {
   // left exactly as they had it (see the header note on the index invariant).
   if (fromRef.length) await git(cwd, ["restore", `--source=${snap.ref}`, "--worktree", "--", ...fromRef]);
   reverted.push(...fromRef);
-  // Both buckets come back from their captured blob. A deleted file's parent
-  // directory may have gone with it, so recreate it first; a modified file still
-  // exists, so its directory does too and the mkdir is a harmless no-op.
-  for (const file of [...fromBlob, ...restoreDeleted]) {
+  // Both buckets are recreated from their captured meta: a symlink from its target
+  // (never a regular file with the target's bytes), a regular file from its blob with
+  // its original mode. A deleted entry's parent directory may have gone with it, so
+  // recreate it first; anything still present is removed first so we recreate the
+  // original TYPE rather than writing through a leftover symlink or over a wrong-type
+  // entry. A modified entry still exists, so its directory does too.
+  for (const file of [...fromCapture, ...restoreDeleted]) {
+    const full = join(cwd, file);
+    const meta = snap.untrackedMeta?.[file];
     try {
-      const { stdout } = await run("git", ["cat-file", "blob", snap.untrackedBlobs[file]], {
-        cwd,
-        encoding: "buffer",
-        maxBuffer: 1024 * 1024 * 64,
-      });
-      mkdirSync(dirname(join(cwd, file)), { recursive: true });
-      writeFileSync(join(cwd, file), stdout);
+      mkdirSync(dirname(full), { recursive: true });
+      if (lexists(full)) unlinkSync(full);
+      if (meta?.type === "link") {
+        symlinkSync(meta.target, full);
+      } else {
+        const { stdout } = await run("git", ["cat-file", "blob", snap.untrackedBlobs[file]], {
+          cwd,
+          encoding: "buffer",
+          maxBuffer: 1024 * 1024 * 64,
+        });
+        writeFileSync(full, stdout);
+        if (meta?.mode != null) chmodSync(full, meta.mode); // put an executable bit back
+      }
       reverted.push(file);
     } catch {
-      skipped.push(file); // the blob is gone (gc'd) — better to leave the file than to fail the whole undo
+      skipped.push(file); // blob gc'd, or the entry can't be recreated — leave it rather than fail the whole undo
     }
   }
   for (const file of removed) {
