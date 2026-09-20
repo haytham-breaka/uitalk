@@ -409,6 +409,30 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   UITalk.resetPreview();
 }
 
+// --- try_style shows one preview at a time, so a new one must not leave the
+// previous selector target's handle stranded on the live DOM
+{
+  const wrap = window.document.createElement("div");
+  const first = window.document.createElement("button");
+  first.className = "preview-a";
+  const second = window.document.createElement("button");
+  second.className = "preview-b";
+  wrap.append(first, second);
+  window.document.body.appendChild(wrap);
+
+  UITalk.tryStyle({ selector: ".preview-a", declarations: "color: red" });
+  check("the first selector preview stamps its target", first.hasAttribute("data-uitalk-target"));
+  UITalk.tryStyle({ selector: ".preview-b", declarations: "color: blue" });
+  check("a second preview stamps its own target", second.hasAttribute("data-uitalk-target"));
+  check("and clears the superseded first target's handle, leaving no stray attribute",
+    !first.hasAttribute("data-uitalk-target") &&
+      window.document.querySelectorAll("[data-uitalk-target]").length === 1,
+    `${window.document.querySelectorAll("[data-uitalk-target]").length} stamped`);
+
+  UITalk.resetPreview();
+  wrap.remove();
+}
+
 // --- which rules actually style an element
 {
   // a stylesheet with two competing rules and a media block
