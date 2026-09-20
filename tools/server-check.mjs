@@ -15,6 +15,7 @@ const fail = [];
 const check = (n, ok, d) => {
   console.log(`${ok ? "  ok  " : " FAIL "} ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) fail.push(n);
+  return ok; // so a test can gate dependent steps on a precondition it just asserted
 };
 
 const sandbox = mkdtempSync(join(tmpdir(), "uitalk-server-check-"));
@@ -602,12 +603,30 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
 
 // --------------------------------------------------------------- snapshots
 {
+  // A backstop: if any snapshot/git step throws unexpectedly (a transient git
+  // failure on CI, say), record it as one failure and let the rest of the suite
+  // run, instead of letting an uncaught throw abort every later section.
+  try {
   const snapshots = await import("../server/snapshots.mjs");
   const repo = join(sandbox, "repo");
   mkdirSync(repo, { recursive: true });
 
   check("a directory that is not a repository says so", (await snapshots.isRepo(repo)) === false);
   check("and cannot be snapshotted", (await snapshots.snapshot(repo, "x")) === null);
+
+  // When a git step fails on a tree that IS a repo, snapshot() still returns null
+  // (undo unavailable) but must surface the reason through onError rather than
+  // swallowing it — an intermittent failure has to be diagnosable. A freshly
+  // init'd repo with no commit yet makes a git step fail deterministically.
+  {
+    const headless = join(sandbox, "headless-repo");
+    mkdirSync(headless, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: headless });
+    let captured = null;
+    const snap = await snapshots.snapshot(headless, "before first commit", (err) => { captured = err; });
+    check("snapshot() surfaces a git failure through onError instead of swallowing it",
+      snap === null && captured instanceof Error, captured?.message?.split("\n")[0]);
+  }
 
   const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
   git("init", "-q");
@@ -738,27 +757,34 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     git("add", ".");
     git("commit", "-qm", "accented baseline");
     const snap0 = await snapshots.snapshot(repo, "restyle an accented tracked file");
-    writeFileSync(join(repo, "café.css"), ".c { color: blue }\n");
-    const snap = await snapshots.captureAfter(repo, snap0);
-    check("a tracked non-ASCII filename is seen as changed by the agent",
-      snap.changedByAgent.includes("café.css"), JSON.stringify(snap.changedByAgent));
-    const out = await snapshots.revertTo(repo, snap);
-    check("undo restores a tracked non-ASCII file",
-      out.reverted.includes("café.css") && readFileSync(join(repo, "café.css"), "utf8").includes("red"),
-      JSON.stringify(out.reverted));
+    // snapshot() is documented to return null when it can't snapshot; honour that
+    // contract rather than dereferencing it, so a transient git failure surfaces
+    // as one legible failure instead of an uncaught throw that aborts the suite.
+    if (check("a tracked non-ASCII file can be snapshotted", !!snap0, "snapshot() returned null")) {
+      writeFileSync(join(repo, "café.css"), ".c { color: blue }\n");
+      const snap = await snapshots.captureAfter(repo, snap0);
+      check("a tracked non-ASCII filename is seen as changed by the agent",
+        snap.changedByAgent.includes("café.css"), JSON.stringify(snap.changedByAgent));
+      const out = await snapshots.revertTo(repo, snap);
+      check("undo restores a tracked non-ASCII file",
+        out.reverted.includes("café.css") && readFileSync(join(repo, "café.css"), "utf8").includes("red"),
+        JSON.stringify(out.reverted));
+    }
   }
 
   {
     writeFileSync(join(repo, "résumé.css"), ".r { color: red } /* user's own */\n");
     const snap0 = await snapshots.snapshot(repo, "restyle a pre-existing untracked accented file");
-    writeFileSync(join(repo, "résumé.css"), ".r { color: blue } /* agent */\n");
-    const snap = await snapshots.captureAfter(repo, snap0);
-    const out = await snapshots.revertTo(repo, snap);
-    check("undo restores a pre-existing untracked non-ASCII file to its exact contents",
-      out.reverted.includes("résumé.css") &&
-        readFileSync(join(repo, "résumé.css"), "utf8") === ".r { color: red } /* user's own */\n",
-      JSON.stringify(out));
-    unlinkSync(join(repo, "résumé.css"));
+    if (check("a pre-existing untracked non-ASCII file can be snapshotted", !!snap0, "snapshot() returned null")) {
+      writeFileSync(join(repo, "résumé.css"), ".r { color: blue } /* agent */\n");
+      const snap = await snapshots.captureAfter(repo, snap0);
+      const out = await snapshots.revertTo(repo, snap);
+      check("undo restores a pre-existing untracked non-ASCII file to its exact contents",
+        out.reverted.includes("résumé.css") &&
+          readFileSync(join(repo, "résumé.css"), "utf8") === ".r { color: red } /* user's own */\n",
+        JSON.stringify(out));
+    }
+    if (existsSync(join(repo, "résumé.css"))) unlinkSync(join(repo, "résumé.css"));
   }
 
   // Undo restores the worktree but must NOT touch the index — a `git checkout
@@ -882,6 +908,9 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       snapAll.changedByAgent.includes("agent.css") && snapAll.changedByAgent.includes("mine.css"),
       JSON.stringify(snapAll.changedByAgent));
     git("checkout", "--", "agent.css", "mine.css");
+  }
+  } catch (err) {
+    check("the snapshots section ran without an unexpected throw", false, err.stack || String(err));
   }
 }
 

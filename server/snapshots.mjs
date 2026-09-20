@@ -80,7 +80,7 @@ export async function isRepo(cwd) {
  * A restorable point. Returns null when there is nothing to snapshot or this is
  * not a repository — callers must treat revert as unavailable rather than assume.
  */
-export async function snapshot(cwd, label) {
+export async function snapshot(cwd, label, onError = null) {
   if (!(await isRepo(cwd))) return null;
   try {
     // With a clean tree `stash create` prints nothing; HEAD is the restore point.
@@ -92,7 +92,13 @@ export async function snapshot(cwd, label) {
     // as a git blob now, before any edit, so undo can put it back exactly.
     const untrackedBlobs = await blobIds(cwd, untrackedBefore, { write: true });
     return { ref, label, at: Date.now(), untrackedBefore, untrackedBlobs };
-  } catch {
+  } catch (err) {
+    // A git operation failed on a tree we already confirmed is a repo — a
+    // transient spawn failure, an odd filesystem, a locale that trips path
+    // handling. Undo becomes unavailable for this change either way, but the
+    // reason must not vanish: swallowing it silently is what made an intermittent
+    // failure impossible to diagnose. Surface it and let the caller log.
+    onError?.(err);
     return null;
   }
 }
