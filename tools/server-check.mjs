@@ -1881,6 +1881,30 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     p.close();
   }
 
+  {
+    // An internal ask (compaction/clear) queued behind an open turn must still time
+    // out if that turn never ends — otherwise its promise leaks and the compaction
+    // that awaits it wedges. Open a turn that never resolves, then queue an ask
+    // behind it and prove it rejects on its own timeout rather than hanging.
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    bridge.pushToAgent("open a turn that never ends"); // builtinTurnOpen = true, no result relayed
+    const t0 = Date.now();
+    const outcome = await Promise.race([
+      bridge.askAgent("queued while a turn is open", 80).then(() => "resolved", () => "rejected"),
+      new Promise((r) => setTimeout(() => r("hung"), 1500)),
+    ]);
+    check("an internal ask queued behind an open turn still times out, never leaks",
+      outcome === "rejected" && Date.now() - t0 >= 70, `${outcome} after ${Date.now() - t0}ms`);
+
+    bridge.relay({ type: "result", subtype: "success" }); // close the dangling turn
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+  }
+
   // -------------------------------------------------- the OpenCode agent loop
   // runOpencode drives an OpenCode session over the SDK's HTTP client and relays
   // its event stream into the panel. Fake the SDK — the seam createAdapter gives
