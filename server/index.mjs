@@ -27,6 +27,7 @@ import * as settings from "./settings.mjs";
 import * as snapshots from "./snapshots.mjs";
 import { countUsages } from "./usage.mjs";
 import { findSourceCandidates } from "./candidates.mjs";
+import { ensureUitalkMcp } from "./opencode-config.mjs";
 import { isFrame } from "./protocol.mjs";
 import { projectToken } from "./token.mjs";
 import { timingSafeEqual } from "node:crypto";
@@ -1172,23 +1173,25 @@ async function runOpencode() {
 
   const client = sdk.createOpencodeClient({ baseUrl, directory: PROJECT });
 
-  // Best-effort, read-only nudge: the page tools only reach OpenCode through its
-  // own MCP config, and there is no safe way to add that ourselves without
-  // risking a JSONC file's comments on a round-trip, so this only checks.
-  const hasUitalkMcp = ["opencode.jsonc", "opencode.json"].some((f) => {
-    try {
-      return readFileSync(join(PROJECT, f), "utf8").includes("uitalk");
-    } catch {
-      return false;
-    }
-  });
-  if (!hasUitalkMcp) {
-    log(`no opencode.jsonc/opencode.json in ${PROJECT} mentions uitalk — the page tools may not reach it`);
+  // The page tools only reach OpenCode through its own MCP config, so wire uitalk
+  // in if it isn't already. This creates opencode.json when there is none, or
+  // splices a single member into an existing config without disturbing the rest
+  // of the file (comments included); anything it can't do safely it leaves alone
+  // and tells the user how to finish by hand.
+  const wired = ensureUitalkMcp(PROJECT);
+  if (wired.action === "created") {
+    log(`wrote ${wired.file} pointing OpenCode at uitalk's MCP server`);
+    toPanel({ kind: "notice", text: `Added uitalk to ${wired.file} so OpenCode can see the page tools.` });
+  } else if (wired.action === "inserted") {
+    log(`added uitalk's MCP server to ${wired.file}`);
+    toPanel({ kind: "notice", text: `Added uitalk to your ${wired.file} so OpenCode can see the page tools.` });
+  } else if (wired.action === "skipped") {
+    log(`left ${wired.file} untouched (${wired.reason}); OpenCode may not see the page tools`);
     toPanel({
       kind: "agent_absent",
       text:
-        "OpenCode's config doesn't look like it points at uitalk's MCP server yet, so it may not see " +
-        "the page tools. Add uitalk to opencode.jsonc (see the README's \"Other editors\" section).",
+        `Couldn't add uitalk to ${wired.file} automatically (${wired.reason}), so OpenCode may not see ` +
+        "the page tools. Add it by hand — see the README's \"Other editors\" section.",
     });
   }
 
