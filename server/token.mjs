@@ -13,14 +13,22 @@
 // project — a token committed to a repo would defeat the point. Persisting it per
 // project keeps a bookmarklet and an already-open page working across a bridge
 // restart rather than silently failing to reconnect.
+//
+// One file per project, not one shared JSON object: two processes (a bridge and
+// its MCP server) asking for the same project's token at once would each read
+// "no token", generate a different one, and the second write would win — leaving
+// the store holding a token the running bridge never accepted. Electing a single
+// writer with an atomic exclusive create means every concurrent caller converges
+// on the one token.
 
-import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync, realpathSync } from "node:fs";
+import { randomBytes, createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, linkSync, unlinkSync, chmodSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const HOME = process.env.UITALK_HOME ?? join(homedir(), ".uitalk");
-const FILE = join(HOME, "tokens.json");
+const DIR = join(HOME, "tokens");
+const LEGACY = join(HOME, "tokens.json"); // the pre-per-project single-object store
 
 /** The one spelling of a project two paths to the same directory agree on, so a
  * bridge and an MCP server started with different spellings still share a token. */
@@ -34,28 +42,57 @@ function key(project) {
   return process.platform === "win32" ? p.toLowerCase() : p;
 }
 
-const read = () => {
+const tokenFile = (k) => join(DIR, `${createHash("sha256").update(k).digest("hex")}.token`);
+
+const readTrim = (path) => {
   try {
-    const v = JSON.parse(readFileSync(FILE, "utf8"));
-    return v && typeof v === "object" ? v : {};
+    return readFileSync(path, "utf8").trim();
   } catch {
-    return {};
+    return "";
   }
 };
 
-/** This project's token, created on first use and reused after. */
+/** A token already recorded for this project in the old shared store, so
+ * migrating never rotates a token a running bridge or a saved bookmarklet holds. */
+function legacyToken(k) {
+  try {
+    const v = JSON.parse(readFileSync(LEGACY, "utf8"));
+    return v && typeof v === "object" && typeof v[k] === "string" ? v[k].trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/** This project's token, created on first use and reused after. Concurrent
+ * first-time callers for the same project all get the one token the winner wrote. */
 export function projectToken(project) {
   const k = key(project);
-  const store = read();
-  if (typeof store[k] === "string" && store[k]) return store[k];
+  const file = tokenFile(k);
 
-  const token = randomBytes(24).toString("hex");
-  mkdirSync(HOME, { recursive: true });
-  const tmp = `${FILE}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ ...store, [k]: token }, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, FILE);
+  const existing = readTrim(file);
+  if (existing) return existing;
+
+  mkdirSync(DIR, { recursive: true, mode: 0o700 });
+  const token = legacyToken(k) || randomBytes(24).toString("hex");
+
+  // Write the whole token to a temp file, then hard-link it into place: link is
+  // atomic and fails with EEXIST if the target already exists, so exactly one
+  // caller wins, and the target — the moment it appears — is a link to fully
+  // written content, never an empty file a racing reader could observe.
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  writeFileSync(tmp, `${token}\n`, { mode: 0o600 });
   try {
-    chmodSync(FILE, 0o600);
-  } catch {}
-  return token;
+    linkSync(tmp, file);
+    try {
+      chmodSync(file, 0o600);
+    } catch {}
+    return token;
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    return readTrim(file); // a concurrent caller won; use the token it wrote
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {}
+  }
 }
