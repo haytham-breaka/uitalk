@@ -123,6 +123,21 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     !("agentModel" in longModel.clean) && /longer than/.test(longModel.rejected[0] ?? ""),
     longModel.rejected[0]);
 
+  // Saving normalizes the file to recognized settings: an unknown or mistyped key a
+  // hand-edit left behind is dropped, not persisted forever, and a recognized one is
+  // kept. (load() already ignores unknown keys, so this only makes the file match.)
+  {
+    const dirty = mkdtempSync(join(sandbox, "settings-save-"));
+    writeFileSync(join(dirty, ".uitalk.json"),
+      JSON.stringify({ replayLimit: 42, mistypedd: true, "not a setting": "x" }));
+    settings.save(dirty, { compactAtPercent: 30 });
+    const onDisk = JSON.parse(readFileSync(join(dirty, ".uitalk.json"), "utf8"));
+    check("save keeps the recognized existing setting and the new patch",
+      onDisk.replayLimit === 42 && onDisk.compactAtPercent === 30, JSON.stringify(onDisk));
+    check("and drops the unknown/mistyped keys instead of persisting them",
+      !("mistypedd" in onDisk) && !("not a setting" in onDisk), JSON.stringify(onDisk));
+  }
+
   process.env.UITALK_AGENT = "adapter";
   check("the mode can be set for one run without editing a file",
     settings.load(project).agent === "adapter", settings.load(project).agent);
