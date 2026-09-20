@@ -19,7 +19,10 @@ import { promisify } from "node:util";
 const run = promisify(execFile);
 
 const git = async (cwd, args) => {
-  const { stdout } = await run("git", args, { cwd, maxBuffer: 1024 * 1024 * 8 });
+  // core.quotePath=false stops git octal-quoting non-ASCII paths (café.css ->
+  // "caf\303\251.css"); left quoted, that string flows into hash-object and
+  // checkout as a bogus pathspec, so an accented filename was silently un-undoable.
+  const { stdout } = await run("git", ["-c", "core.quotePath=false", ...args], { cwd, maxBuffer: 1024 * 1024 * 8 });
   return stdout.trim();
 };
 
