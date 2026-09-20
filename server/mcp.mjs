@@ -285,11 +285,20 @@ defs.push({
   description:
     "Call this once you have committed an approved change (from await_choice) to source. It lets " +
     "uitalk record the post-edit state so the user can undo the change, and tell a later edit of " +
-    "theirs apart from yours. Nothing to pass; call it after each approved change you write.",
-  schema: {},
-  run: async () => {
+    "theirs apart from yours. Pass `files` — the project-relative paths you changed for this " +
+    "approval — so undo scopes to exactly those; omit it and undo falls back to the whole diff " +
+    "since the change was approved. Call it after each approved change you write.",
+  schema: {
+    files: {
+      type: "array",
+      items: { type: "string" },
+      description: "The paths you changed for this approved change, project-relative (optional but preferred).",
+    },
+  },
+  run: async ({ files } = {}) => {
     await ready();
-    socket.send(JSON.stringify({ kind: "note_edit" }));
+    const scoped = Array.isArray(files) ? files.filter((f) => typeof f === "string" && f) : undefined;
+    socket.send(JSON.stringify({ kind: "note_edit", files: scoped }));
     return text({ ok: true, note: "post-edit state recorded; the user can undo this change" });
   },
 });
