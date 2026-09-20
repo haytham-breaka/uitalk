@@ -1768,6 +1768,34 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // If the post-edit capture throws (a transient git failure at turn-end), the
+    // phase must STILL return to idle — otherwise a single hiccup wedges every
+    // later approval and revert off until a session clear. Force it: hand the
+    // approval a snapshot whose ref git can't resolve, so captureAfter() throws
+    // when the turn ends.
+    const p = makePage();
+    bridge.setSnapshotForTest((label) => ({
+      ref: "uitalk-not-a-real-ref", label, at: Date.now(), untrackedBefore: [], untrackedBlobs: {},
+    }));
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    p.deliver({ kind: "approval", label: "edit with a doomed capture", ref: 1, declarations: "color:red", element: {} });
+    await until(() => bridge.approvalPhaseForTest() === "editing", "phase editing after approval");
+    bridge.relay({ type: "result", subtype: "success" });
+    await until(() => bridge.approvalPhaseForTest() === "idle", "phase idle after a turn whose capture threw");
+    check("a turn whose post-edit capture throws still frees the approval phase",
+      bridge.approvalPhaseForTest() === "idle", bridge.approvalPhaseForTest());
+
+    bridge.setSnapshotForTest(null);
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
     // Off mode (an MCP client drives) has no local turn to end, so the phase must
     // not latch: the first approval is relayed and the second must be too, not
     // refused as "still applying the previous change".
