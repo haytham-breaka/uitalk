@@ -198,7 +198,8 @@ defs.push({
     "Wait for the user to approve one of the alternatives you mounted with show_options, and " +
     "return which they picked along with its CSS and the element's identifiers. Call this " +
     "straight after show_options. It blocks until they choose or the timeout passes — your " +
-    "client cannot be sent a message, so this is how their answer reaches you.",
+    "client cannot be sent a message, so this is how their answer reaches you. Once you have " +
+    "committed the approved change to source, call note_edit so the user can undo it.",
   schema: {
     timeout: { type: "number", description: "Give up after this many milliseconds (default 300000)" },
   },
@@ -260,6 +261,25 @@ defs.push({
     return waited
       ? text(waited)
       : text({ chose: null, note: "the user did not answer before the timeout" });
+  },
+});
+
+// A built-in/adapter session ends a turn, which is when uitalk freezes the
+// post-edit state that makes an approved change undoable. Over MCP the edit
+// happens in the client's own editor, invisible to the bridge, so the client has
+// to say when it is done — otherwise undo has nothing to scope to and declines.
+defs.push({
+  name: "note_edit",
+  readOnly: true,
+  description:
+    "Call this once you have committed an approved change (from await_choice) to source. It lets " +
+    "uitalk record the post-edit state so the user can undo the change, and tell a later edit of " +
+    "theirs apart from yours. Nothing to pass; call it after each approved change you write.",
+  schema: {},
+  run: async () => {
+    await ready();
+    socket.send(JSON.stringify({ kind: "note_edit" }));
+    return text({ ok: true, note: "post-edit state recorded; the user can undo this change" });
   },
 });
 

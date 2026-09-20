@@ -360,6 +360,12 @@ function setAgentForTest(mode) {
   config = { ...config, agent: mode };
 }
 
+/** Whether the last approved change's post-edit state has been frozen — a test
+ * polls this instead of sleeping, since captureAfter() emits no frame. */
+function approvalCapturedForTest() {
+  return Boolean(lastChange?.snap?.postCaptured);
+}
+
 const AGENT_MODES = {
   builtin: "the built-in Claude session",
   adapter: "your own model",
@@ -591,6 +597,13 @@ wss.on("connection", (ws) => {
       case "clear":
         return void clearSession();
 
+      // Off mode has no turn whose end would freeze the post-edit state: the MCP
+      // client edits source with its own tools, invisible to the bridge, then
+      // sends this once it has committed the approved change — so undo can scope
+      // to exactly those files instead of refusing forever.
+      case "note_edit":
+        return void captureApprovedEdit();
+
       case "approval": {
         if (typeof frame.label !== "string" || !frame.label || typeof frame.declarations !== "string") {
           toPanel({ kind: "approval_rejected", label: frame.label, text: "that approval was missing its label or declarations" });
@@ -730,10 +743,17 @@ function noteTokens(total) {
  * post-edit state gets frozen, once, before a later user edit could otherwise
  * be mistaken for the agent's own change. See snapshots.mjs's captureAfter().
  */
-async function noteTurnEnded() {
+/** Freeze the post-edit state of the last approved change, once, so a later user
+ * edit can be told from the agent's own and undo can scope to exactly those files.
+ * See snapshots.mjs's captureAfter(). Idempotent. */
+async function captureApprovedEdit() {
   if (lastChange?.snap && !lastChange.snap.postCaptured) {
     lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap);
   }
+}
+
+async function noteTurnEnded() {
+  await captureApprovedEdit();
   // A finished turn frees the next approval whether or not there was a snapshot to
   // freeze — a project that is not a git repo has none, and leaving the reset
   // inside the snapshot branch latched the phase at "editing" and refused it.
@@ -1455,6 +1475,7 @@ export {
   setSnapshotForTest,
   approvalPhaseForTest,
   setAgentForTest,
+  approvalCapturedForTest,
   TOKEN as socketToken,
 };
 
