@@ -102,6 +102,24 @@ const check = (n, ok, d) => {
   const nothing = await ran("search_files", { query: "zzz-not-here" });
   check("a search with no match says so plainly", /no match/.test(nothing.text), nothing.text);
 
+  // A file larger than MAX_READ used to be skipped entirely, so a match in a big
+  // source/config/style file read as a misleading "no match". It is streamed now.
+  writeFileSync(join(root, "src", "big.css"), ".filler {}\n".repeat(20_000) + ".needle-xyzzy { color: rebeccapurple }\n");
+  const big = await ran("search_files", { query: "needle-xyzzy", extensions: "css" });
+  check("search_files finds a match in a file larger than MAX_READ (streamed, not skipped)",
+    /src\/big\.css:\d+: .*needle-xyzzy/.test(big.text), big.text.split("\n").find((l) => /big\.css/.test(l)) ?? big.text.slice(0, 60));
+
+  // A binary file is not searched (its bytes are not text): a NUL marks it.
+  writeFileSync(join(root, "src", "blob.css"), Buffer.concat([Buffer.from("binneedle-xyzzy"), Buffer.from([0]), Buffer.from("more")]));
+  const bin = await ran("search_files", { query: "binneedle-xyzzy", extensions: "css" });
+  check("a binary file is skipped, not searched", /no match/.test(bin.text), bin.text.slice(0, 60));
+
+  // A file too large even to stream must be reported, never silently "no match".
+  writeFileSync(join(root, "src", "toobig.css"), "x\n".repeat(2_700_000)); // > MAX_SEARCH_BYTES (~5.4MB)
+  const huge = await ran("search_files", { query: "definitely-absent-token", extensions: "css" });
+  check("a file too large to search is reported skipped, not passed off as no-match",
+    /not searched — too large/.test(huge.text) && /toobig\.css/.test(huge.text), huge.text.split("\n").pop());
+
   // The write tools report the path they touched (for precise undo scoping); the
   // read/search tools and refused writes do not — reading a file must never make
   // undo revert it.
