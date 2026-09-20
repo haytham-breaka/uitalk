@@ -17,7 +17,7 @@
 // not `git checkout <ref> -- <path>` (which rewrites the index too).
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -149,9 +149,16 @@ export async function captureAfter(cwd, snap, touched = null) {
     }
   }
 
+  // A pre-existing untracked file the agent DELETED. It no longer exists, so git
+  // diff and untracked() both miss it, but its bytes were blobbed at snapshot time,
+  // so undo can put it back. No post-hash is kept: a gone file has no content to
+  // fingerprint, and its concurrency rule is "restore only if still absent at undo"
+  // — a path the user has since recreated is theirs, and revertTo() leaves it alone.
+  const deletedUntracked = scope((snap.untrackedBefore ?? []).filter((f) => !existsSync(join(cwd, f))));
+
   return {
     ...snap, postCaptured: true, changedByAgent, postHashes, createdByAgent, createdHashes,
-    modifiedUntracked, modifiedHashes,
+    modifiedUntracked, modifiedHashes, deletedUntracked,
   };
 }
 
@@ -214,17 +221,31 @@ export async function revertTo(cwd, snap) {
     else skipped.push(file);
   }
 
+  // A pre-existing untracked file the agent deleted: restore it from the snapshot
+  // blob, but only if the path is still absent — a file the user has since put back
+  // is theirs, left untouched (the same concurrency rule as an edited-again file).
+  const restoreDeleted = [];
+  for (const file of snap.deletedUntracked ?? []) {
+    const blob = snap.untrackedBlobs?.[file];
+    if (blob && !existsSync(join(cwd, file))) restoreDeleted.push(file);
+    else skipped.push(file);
+  }
+
   // Restore the worktree only — the agent's edit is undone, the user's staging is
   // left exactly as they had it (see the header note on the index invariant).
   if (fromRef.length) await git(cwd, ["restore", `--source=${snap.ref}`, "--worktree", "--", ...fromRef]);
   reverted.push(...fromRef);
-  for (const file of fromBlob) {
+  // Both buckets come back from their captured blob. A deleted file's parent
+  // directory may have gone with it, so recreate it first; a modified file still
+  // exists, so its directory does too and the mkdir is a harmless no-op.
+  for (const file of [...fromBlob, ...restoreDeleted]) {
     try {
       const { stdout } = await run("git", ["cat-file", "blob", snap.untrackedBlobs[file]], {
         cwd,
         encoding: "buffer",
         maxBuffer: 1024 * 1024 * 64,
       });
+      mkdirSync(dirname(join(cwd, file)), { recursive: true });
       writeFileSync(join(cwd, file), stdout);
       reverted.push(file);
     } catch {
