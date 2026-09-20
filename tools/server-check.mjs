@@ -1426,6 +1426,37 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     /projectSlug\(project\)/.test(launcher) && !/basename\(project\)/.test(launcher));
 }
 
+// ------------------------------- --dev attaches only to a server IT started
+{
+  const { openPorts, newlyOpenPort } = await import("../server/dev-ports.mjs");
+  const CANDS = [5173, 5174, 3000];
+
+  // An unrelated project's dev server occupies a shared default (5173) before --dev
+  // launches. Merely finding it open used to make the launcher attach to it and skip
+  // running the requested command — proxying project A while claiming to serve B.
+  const busy = new Set([5173]);
+  const isOpen = async (p) => busy.has(p);
+
+  const pre = await openPorts(CANDS, isOpen);
+  check("a candidate busy before launch is recorded as pre-existing", pre.includes(5173),
+    JSON.stringify(pre));
+  check("with only a pre-existing server open, no port is chosen — keep waiting, don't attach",
+    (await newlyOpenPort(CANDS, isOpen, pre)) === null);
+
+  // Our own dev server then comes up on the next free port.
+  busy.add(5174);
+  check("the port our own launch opened is chosen, not the pre-existing one",
+    (await newlyOpenPort(CANDS, isOpen, pre)) === 5174);
+  check("and the unrelated pre-existing server is never selected",
+    (await newlyOpenPort(CANDS, isOpen, pre)) !== 5173);
+
+  // Anchor to the launcher itself: the --dev path must discover its own port via
+  // newlyOpenPort against a pre-launch snapshot, not early-return on any open port.
+  const bin = readFileSync(new URL("../bin/uitalk", import.meta.url), "utf8");
+  check("the launcher discovers a --dev server by the port it opened",
+    /newlyOpenPort\(CANDIDATES/.test(bin) && /openPorts\(CANDIDATES/.test(bin));
+}
+
 // -------------------------------------------- the message the agent receives
 {
   const bridge = await import("../server/index.mjs");

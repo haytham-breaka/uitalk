@@ -203,6 +203,7 @@ const running = () => registryList().find((e) => e.project === project);
 // server. See server/project-id.mjs. `project` is already realpath-resolved above.
 const { projectSlug } = await import(join(ROOT, "server", "project-id.mjs"));
 const slug = projectSlug(project);
+const { openPorts, newlyOpenPort } = await import(join(ROOT, "server", "dev-ports.mjs"));
 
 const devPidfile = () => join(LOG_DIR, `${slug}-dev.pid`);
 const devRunning = () => {
@@ -235,23 +236,22 @@ async function startDev() {
     return true;
   }
 
-  // Something may already be serving this app outside uitalk's own tracking (started
-  // by hand, or by a previous run whose bridge has since been stopped). Spawning
-  // another copy of the dev command would just crash on the same port a moment later.
+  // A server already answering on the EXPLICITLY requested port is almost certainly
+  // this app started by hand; attaching to it is what --app-port asked for, and
+  // launching another copy would just crash on the same port. But without an explicit
+  // port, an open common port proves only that SOMETHING is listening there — it may
+  // be a completely unrelated project's dev server on a shared default (5173, 3000).
+  // --dev means "run this command", so we launch it and attach to the port IT opens,
+  // never one that was already busy. (devRunning() above already covers a dev server
+  // this bridge started earlier; that is the "owned by this project" case.)
   if (appPort) {
     if (await portOpen(Number(appPort))) {
       console.error(`[uitalk] found a server already on :${appPort}`);
       return true;
     }
-  } else {
-    for (const c of CANDIDATES) {
-      if (await portOpen(c)) {
-        appPort = String(c);
-        console.error(`[uitalk] found a server already on :${c}`);
-        return true;
-      }
-    }
   }
+  // Snapshot which candidates are already busy so we can tell our server from theirs.
+  const preexisting = appPort ? [] : await openPorts(CANDIDATES, portOpen);
 
   console.error(`[uitalk] starting: ${devCmd}`);
   const fd = openSync(logPath, "a");
@@ -264,12 +264,13 @@ async function startDev() {
     if (appPort) {
       if (await portOpen(Number(appPort))) return true;
     } else {
-      for (const c of CANDIDATES) {
-        if (await portOpen(c)) {
-          appPort = String(c);
-          console.error(`[uitalk] dev server came up on :${c}`);
-          return true;
-        }
+      // Only a port that became open AFTER we launched — an already-busy candidate is
+      // someone else's server and must not be mistaken for the one we just started.
+      const opened = await newlyOpenPort(CANDIDATES, portOpen, preexisting);
+      if (opened) {
+        appPort = String(opened);
+        console.error(`[uitalk] dev server came up on :${opened}`);
+        return true;
       }
     }
     await sleep(500);
