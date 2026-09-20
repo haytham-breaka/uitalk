@@ -1987,6 +1987,44 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // A snapshotFn that REJECTS (not just returns null) must not latch the phase at
+    // "snapshotting" or leak an unhandled rejection: the approval is refused, the
+    // phase returns to idle, and the next approval still works.
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    bridge.setSnapshotForTest(() => Promise.reject(new Error("snapshot exploded")));
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "doomed snapshot", ref: 1, declarations: "color:red", element: {} });
+    let refused = false;
+    for (let i = 0; i < 200 && !refused; i++) {
+      refused = p.sent.some((f) => f.kind === "approval_rejected" && f.label === "doomed snapshot");
+      if (!refused) await new Promise((r) => setTimeout(r, 10));
+    }
+    check("a rejecting snapshotFn refuses the approval and returns the phase to idle",
+      refused && bridge.approvalPhaseForTest() === "idle",
+      `refused=${refused} phase=${bridge.approvalPhaseForTest()}`);
+
+    // And a later approval still works — the failure didn't wedge the machine.
+    bridge.setSnapshotForTest(() => ({ ref: "HEAD", label: "x", at: Date.now(), untrackedBefore: [], untrackedBlobs: {} }));
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "after failure", ref: 2, declarations: "color:blue", element: {} });
+    await untilPhase("editing");
+    check("approvals still work after a snapshot failure",
+      p.sent.some((f) => f.kind === "revertable" && f.label === "after failure"), JSON.stringify(p.sent.map((f) => f.kind)));
+    bridge.relay({ type: "result", subtype: "success" });
+    await untilPhase("idle");
+
+    bridge.setSnapshotForTest(null);
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
     // Off mode (an MCP client drives) has no local turn to end, so the phase must
     // not latch: the first approval is relayed and the second must be too, not
     // refused as "still applying the previous change".
