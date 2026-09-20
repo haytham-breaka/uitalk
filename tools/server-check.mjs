@@ -1106,6 +1106,50 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     p.close();
   }
 
+  {
+    // A finished turn must return the phase to idle even when the project is not a
+    // git repo (snapshot() returns null) — otherwise the reset was skipped and the
+    // phase latched at "editing", refusing every later approval.
+    const p = makePage();
+    bridge.setSnapshotForTest(() => null); // simulate a non-repo project
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    p.deliver({ kind: "approval", label: "no-repo change", ref: 1, declarations: "color:red", element: {} });
+    await until(() => bridge.approvalPhaseForTest() === "editing", "phase editing after a non-repo approval");
+    bridge.relay({ type: "result", subtype: "success" });
+    await until(() => bridge.approvalPhaseForTest() === "idle", "phase idle after the turn ends");
+    check("a finished turn frees the phase even with no snapshot to freeze",
+      bridge.approvalPhaseForTest() === "idle", bridge.approvalPhaseForTest());
+
+    bridge.setSnapshotForTest(null);
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
+    // Off mode (an MCP client drives) has no local turn to end, so the phase must
+    // not latch: the first approval is relayed and the second must be too, not
+    // refused as "still applying the previous change".
+    const p = makePage();
+    bridge.setAgentForTest("off");
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "first (mcp)", ref: 1, declarations: "color:red", element: {} });
+    await until(() => bridge.approvalPhaseForTest() === "idle", "phase idle after an off-mode approval");
+    p.deliver({ kind: "approval", label: "second (mcp)", ref: 2, declarations: "color:blue", element: {} });
+    await new Promise((r) => setTimeout(r, 30));
+    check("a second approval in off mode is relayed, not refused",
+      !p.sent.some((f) => f.kind === "approval_rejected" && f.label === "second (mcp)"),
+      JSON.stringify(p.sent.map((f) => f.kind)));
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    p.close();
+  }
+
   // ------------------------------------------------- RPC answers are bound to
   // ------------------------------------------------- the socket asked, not id alone
   {
