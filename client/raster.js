@@ -83,6 +83,13 @@ globalThis.UITalkRaster = (() => {
     clone.setAttribute("style", css);
     clone.removeAttribute("class"); // styles are flattened; class rules cannot apply inside the SVG
 
+    // A web component renders its content in a shadow root, which cloneNode(true)
+    // does not copy and this walk cannot reach — so it captures as an empty box.
+    // Say so rather than return a silently blank region, like the canvas/video case.
+    if (source.shadowRoot?.childNodes.length) {
+      warnings.push(`<${source.tagName.toLowerCase()}> renders in a shadow root, which cannot be rasterized; it captures blank`);
+    }
+
     if (source.tagName === "IMG") {
       // Inside the SVG the browser still runs srcset/<picture> selection, but the
       // candidate it picks was never embedded, so it renders blank and overrides
