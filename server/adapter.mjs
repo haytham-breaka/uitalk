@@ -13,8 +13,9 @@
 // rather than token by token. Everything else the panel shows — tool names, the
 // context meter, compaction — works the same as with the built-in session.
 
-import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, existsSync, lstatSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, existsSync, lstatSync, openSync, readSync, closeSync } from "node:fs";
 import { resolve, relative, join, dirname, sep, isAbsolute } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
 import { countUsages } from "./usage.mjs";
 import { findSourceCandidates } from "./candidates.mjs";
@@ -27,7 +28,51 @@ const DEFAULT_MODEL = {
 
 const MAX_ROUNDS = 24; // a turn that calls tools forever is a bug, not a long task
 const MAX_READ = 120_000; // bytes of one file, so a bundle cannot fill the window
+const SEARCH_CHUNK = 64 * 1024; // how much of an oversized file to read at a time when searching
+const MAX_SEARCH_BYTES = 5 * 1024 * 1024; // stream-search a big file up to here; past it, report it skipped
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", ".cache", "coverage", ".cov"]);
+
+/**
+ * Search a file too big to read whole (see MAX_READ) without loading it into memory
+ * or the model's context: read it in fixed chunks, decode across chunk boundaries,
+ * and hand each matching line to onMatch(lineNumber, line) — searching does not need
+ * read_file's context-size limit, only its own bounded memory. Returns "ok",
+ * "binary" (a NUL byte — not text, skip silently) or "too-large" (past
+ * MAX_SEARCH_BYTES — reported skipped so a match there is never read as "no match").
+ * onMatch returns false to stop early (the caller's match limit is reached).
+ */
+function searchStreaming(full, query, onMatch) {
+  const fd = openSync(full, "r");
+  try {
+    const buf = Buffer.allocUnsafe(SEARCH_CHUNK);
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let lineNo = 0;
+    let scanned = 0;
+    for (;;) {
+      const n = readSync(fd, buf, 0, SEARCH_CHUNK, null);
+      if (n === 0) break;
+      const chunk = buf.subarray(0, n);
+      if (chunk.includes(0)) return "binary"; // a NUL byte means it isn't text
+      scanned += n;
+      if (scanned > MAX_SEARCH_BYTES) return "too-large";
+      const parts = (carry + decoder.write(chunk)).split("\n");
+      carry = parts.pop(); // a partial final line carries into the next chunk
+      for (const line of parts) {
+        lineNo++;
+        if (line.includes(query) && onMatch(lineNo, line) === false) return "ok";
+      }
+    }
+    carry += decoder.end();
+    if (carry) {
+      lineNo++;
+      if (carry.includes(query)) onMatch(lineNo, carry);
+    }
+    return "ok";
+  } finally {
+    closeSync(fd);
+  }
+}
 
 // ------------------------------------------------------------- the file tools
 
@@ -205,24 +250,50 @@ export function fileTools(project, report = () => {}, onWrite = () => {}) {
           .map((e) => e.trim().replace(/^\./, ""))
           .filter(Boolean);
         const hits = [];
+        const tooLarge = [];
+        const record = (full, lineNo, line) => hits.push(`${relative(root, full)}:${lineNo}: ${line.trim().slice(0, 200)}`);
         walk(root, (full) => {
           if (hits.length >= limit) return;
           if (exts.length && !exts.includes(full.split(".").pop())) return;
-          let body;
+          let size;
           try {
-            if (statSync(full).size > MAX_READ) return;
-            body = readFileSync(full, "utf8");
+            size = statSync(full).size;
           } catch {
             return;
           }
-          if (!body.includes(query)) return;
-          body.split("\n").forEach((line, i) => {
-            if (hits.length < limit && line.includes(query)) {
-              hits.push(`${relative(root, full)}:${i + 1}: ${line.trim().slice(0, 200)}`);
+          if (size <= MAX_READ) {
+            let body;
+            try {
+              body = readFileSync(full, "utf8");
+            } catch {
+              return;
             }
-          });
+            if (body.includes(" ") || !body.includes(query)) return; // skip binary; skip a non-match cheaply
+            body.split("\n").forEach((line, i) => {
+              if (hits.length < limit && line.includes(query)) record(full, i + 1, line);
+            });
+            return;
+          }
+          // An oversized file was silently skipped before, so a match in a big
+          // source/config/style file read as "no match". Stream it instead, bounded.
+          let outcome;
+          try {
+            outcome = searchStreaming(full, query, (lineNo, line) => {
+              if (hits.length >= limit) return false;
+              record(full, lineNo, line);
+              return hits.length < limit;
+            });
+          } catch {
+            return;
+          }
+          if (outcome === "too-large") tooLarge.push(relative(root, full));
         });
-        return hits.length ? hits.join("\n") : `no match for ${JSON.stringify(query)}`;
+        const out = hits.length ? [...hits] : [`no match for ${JSON.stringify(query)}`];
+        if (tooLarge.length) {
+          // Never let a file that couldn't be searched masquerade as "no match".
+          out.push(`[not searched — too large (> ${Math.round(MAX_SEARCH_BYTES / 1024 / 1024)}MB): ${tooLarge.slice(0, 10).join(", ")}${tooLarge.length > 10 ? ", …" : ""}]`);
+        }
+        return out.join("\n");
       }),
     },
   ];
