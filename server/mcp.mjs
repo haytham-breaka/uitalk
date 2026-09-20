@@ -53,10 +53,12 @@ export function canonical(p) {
  * first would leave the file tools on this project and the page tools on an
  * unrelated app — the confusing split this refuses to create.
  */
-// The socket is token-gated. The token is per project, kept in the uitalk home,
-// so it is derived from the bridge's own project rather than guessed — a bridge
-// we cannot find in the registry (an explicit port to something not registered,
-// e.g. a test) simply connects without one.
+// The socket is token-gated — the bridge rejects EVERY connection without the
+// correct per-project capability token. The token is derived from a project path,
+// so we need one to connect: the registry entry's project when we can find it,
+// otherwise UITALK_PROJECT (which, when it matches the bridge's own project, yields
+// the same token). A wrong or absent project yields a token the bridge refuses,
+// which is correct — that connection was never authorized.
 const socketFor = (port, project) => {
   const token = project ? projectToken(project) : null;
   return `ws://127.0.0.1:${port}/__uitalk/socket${token ? `?token=${token}` : ""}`;
@@ -65,8 +67,11 @@ const socketFor = (port, project) => {
 export function bridgeUrl({ port = PORT, project = PROJECT } = {}) {
   const running = registry.list();
   if (port) {
+    // Explicit port wins, but still needs a token. Prefer the registered project
+    // for that port; fall back to UITALK_PROJECT so an explicit port to a bridge
+    // not (yet) in the registry can still authenticate when the project matches.
     const entry = running.find((e) => e.port === port);
-    return socketFor(port, entry?.project ?? null);
+    return socketFor(port, entry?.project ?? project);
   }
   const me = canonical(project);
   const mine = running.find((e) => canonical(e.project) === me);
@@ -97,9 +102,14 @@ const notices = [];
 
 function connect() {
   const url = bridgeUrl();
-  socket = new WebSocket(url);
+  // Bind every handler to THIS socket instance, and guard each on `socket === s`,
+  // so a socket that is superseded by a reconnect can neither process a frame nor
+  // (on close) null out or drain the state that now belongs to its replacement.
+  const s = new WebSocket(url);
+  socket = s;
 
-  socket.on("message", (raw) => {
+  s.on("message", (raw) => {
+    if (socket !== s) return;
     let frame;
     try {
       frame = JSON.parse(raw.toString());
@@ -146,7 +156,8 @@ function connect() {
     }
   });
 
-  socket.on("close", () => {
+  s.on("close", () => {
+    if (socket !== s) return; // a stale socket's close must not disturb the live one
     socket = null;
     for (const [id, entry] of pending) {
       clearTimeout(entry.timer);
@@ -160,22 +171,27 @@ function connect() {
     for (const wake of waitingForChoice.splice(0)) wake(null);
     for (const wake of waitingForAnswer.splice(0)) wake(null);
   });
-  socket.on("error", () => {});
+  s.on("error", () => {});
 
   return new Promise((resolve, reject) => {
-    socket.once("open", () => {
+    s.once("open", () => {
       // Identify as an agent, not a page: the bridge must not route page questions
       // here, and approvals have to be relayed to us because MCP cannot be pushed to.
-      socket.send(JSON.stringify({ kind: "hello", role: "agent" }));
+      s.send(JSON.stringify({ kind: "hello", role: "agent" }));
       resolve();
     });
-    socket.once("error", () => reject(new Error(`could not reach the bridge at ${url}`)));
+    s.once("error", () => reject(new Error(`could not reach the bridge at ${url}`)));
   });
 }
 
+// One connection attempt at a time: concurrent callers await the same connect
+// rather than each racing to create (and overwrite) the global socket, which left
+// a caller sending on a socket that was replaced and possibly not yet open.
+let connecting = null;
 async function ready() {
   if (socket?.readyState === WebSocket.OPEN) return;
-  await connect();
+  if (!connecting) connecting = connect().finally(() => { connecting = null; });
+  return connecting;
 }
 
 async function callPage(method, params = {}, timeoutMs = 5000) {
@@ -303,23 +319,26 @@ defs.push({
   },
 });
 
-// A newly mounted question supersedes any earlier one whose answer is still
-// sitting unclaimed in the queue: show_options and ask_choice replace what is on
-// screen, so a queued approval/answer left there can only belong to a question
-// the user can no longer see — a pick made after an earlier await_* had already
-// timed out. Dropping it when the next question is asked is what stops await_*
-// from handing that stale response to the wrong request. Only ever runs for MCP:
-// these queues and the await_* tools exist nowhere else.
-const supersedes = (name, queue) => {
+// A newly mounted question supersedes any earlier one: show_options and ask_choice
+// replace what is on screen, so the previous question can no longer be answered.
+// Two kinds of stale state have to go, or the next answer resolves the wrong
+// request: (1) a queued approval/answer left by an await_* that already timed out,
+// and (2) an await_* STILL blocking on the previous question — its parked waiter
+// would otherwise catch the new question's answer (show A, await A, show B, approve
+// B → A's await returns B's pick). Cancel the waiter (resolve it null, a "nothing
+// picked") so only a fresh await_* for the new question can receive its answer.
+// Only ever runs for MCP: these queues and the await_* tools exist nowhere else.
+const supersedes = (name, queue, waiters) => {
   const def = defs.find((d) => d.name === name);
   const inner = def.run;
   def.run = (args) => {
     queue.length = 0;
+    for (const wake of waiters.splice(0)) wake(null);
     return inner(args);
   };
 };
-supersedes("show_options", choices);
-supersedes("ask_choice", answers);
+supersedes("show_options", choices, waitingForChoice);
+supersedes("ask_choice", answers, waitingForAnswer);
 
 const asJsonSchema = (def) => ({
   type: "object",
