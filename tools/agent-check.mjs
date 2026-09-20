@@ -61,6 +61,16 @@ const check = (n, ok, d) => {
   check("write_file does not follow a symlink onto a file outside the project",
     readFileSync(join(outsideDir, "secret.txt"), "utf8") === "not part of this project");
 
+  // A *dangling* symlink (target does not exist yet) is the sharp edge: existsSync
+  // follows it and reports "no file", so a naive walk-up would treat writing to it
+  // as creating a fresh file and let writeFileSync follow the link out of the project.
+  symlinkSync(join(outsideDir, "created-through-dangling.txt"), join(root, "dangling.txt"));
+  const throughDangling = await ran("write_file", { path: "dangling.txt", content: "pwned" });
+  check("write_file refuses a dangling symlink that points outside the project",
+    throughDangling.failed && /outside the project/.test(throughDangling.text), throughDangling.text.slice(0, 70));
+  check("and nothing is created at the dangling target",
+    !existsSync(join(outsideDir, "created-through-dangling.txt")));
+
   const listThroughLink = await ran("list_dir", { path: "escape" });
   check("list_dir does not follow a symlink out of the project",
     listThroughLink.failed && /outside the project/.test(listThroughLink.text));
