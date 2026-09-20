@@ -38,7 +38,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, basename, resolve as resolvePath } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WIN = process.platform === "win32";
@@ -197,7 +197,14 @@ try {
 const { list: registryList } = await import(join(ROOT, "server", "registry.mjs"));
 const running = () => registryList().find((e) => e.project === project);
 
-const devPidfile = () => join(LOG_DIR, `${basename(project)}-dev.pid`);
+// Per-project files are keyed by a hash of the canonical project path, not the bare
+// basename: two repos that share a leaf name (…/a/frontend and …/b/frontend) would
+// otherwise share one pidfile, so one project's --stop could kill the other's dev
+// server. See server/project-id.mjs. `project` is already realpath-resolved above.
+const { projectSlug } = await import(join(ROOT, "server", "project-id.mjs"));
+const slug = projectSlug(project);
+
+const devPidfile = () => join(LOG_DIR, `${slug}-dev.pid`);
 const devRunning = () => {
   const f = devPidfile();
   if (!existsSync(f)) return null;
@@ -219,7 +226,7 @@ function stopDev() {
 
 async function startDev() {
   mkdirSync(LOG_DIR, { recursive: true });
-  const logPath = join(LOG_DIR, `${basename(project)}-dev.log`);
+  const logPath = join(LOG_DIR, `${slug}-dev.log`);
   const f = devPidfile();
 
   const already = devRunning();
@@ -360,7 +367,7 @@ if (mode === "fg") {
   child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 } else {
   mkdirSync(LOG_DIR, { recursive: true });
-  const logPath = join(LOG_DIR, `${basename(project)}.log`);
+  const logPath = join(LOG_DIR, `${slug}.log`);
   const fd = openSync(logPath, "a");
   // Fully detached: new session (POSIX) or no console (Windows), stdin closed,
   // output to the log. A signal aimed at the caller's shell cannot reach it here.

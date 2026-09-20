@@ -1269,6 +1269,37 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     !/--host|--bind|--allow-network/.test(bin));
 }
 
+// ---------------------------------------- per-project launcher files never collide
+{
+  const { projectSlug } = await import("../server/project-id.mjs");
+
+  // Two unrelated repos that share a leaf directory name (…/company-a/frontend and
+  // …/company-b/frontend) used to derive the same pidfile and log from the bare
+  // basename — so one project's --stop read the other's pidfile and could kill its
+  // dev server. Identity is now the canonical path, not just its leaf.
+  const a = "/home/alice/company-a/frontend";
+  const b = "/home/alice/company-b/frontend";
+  const slugA = projectSlug(a);
+  const slugB = projectSlug(b);
+
+  check("two projects with the same basename get different slugs", slugA !== slugB,
+    `${slugA} vs ${slugB}`);
+  check("so their dev pidfiles differ", `${slugA}-dev.pid` !== `${slugB}-dev.pid`);
+  check("and their dev logs differ", `${slugA}-dev.log` !== `${slugB}-dev.log`);
+  check("so stopping project B can never target project A's dev pidfile",
+    `${slugB}-dev.pid` !== `${slugA}-dev.pid`);
+
+  check("the slug is stable for the same canonical path", projectSlug(a) === slugA);
+  check("and is a single, filesystem-safe path segment",
+    /^[A-Za-z0-9._-]+$/.test(slugA), slugA);
+
+  // Anchor the guarantee to the launcher itself: its per-project files must be
+  // keyed by projectSlug(project), not the bare basename that collided.
+  const launcher = readFileSync(new URL("../bin/uitalk", import.meta.url), "utf8");
+  check("the launcher keys its per-project files by projectSlug, not basename",
+    /projectSlug\(project\)/.test(launcher) && !/basename\(project\)/.test(launcher));
+}
+
 // -------------------------------------------- the message the agent receives
 {
   const bridge = await import("../server/index.mjs");
