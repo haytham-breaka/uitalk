@@ -1483,6 +1483,49 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     /newlyOpenPort\(CANDIDATES/.test(bin) && /openPorts\(CANDIDATES/.test(bin));
 }
 
+// ---------------------------------- --stop only kills a process it can prove it owns
+{
+  const { startToken, writeOwner, readOwner, owns } = await import("../server/proc-identity.mjs");
+
+  const token = startToken(process.pid);
+  check("a process start token is obtained on this platform", typeof token === "string" && token.length > 0,
+    JSON.stringify(token));
+  check("and it is stable across reads", startToken(process.pid) === token);
+
+  const pf = join(mkdtempSync(join(sandbox, "pidfile-")), "dev.pid");
+  writeOwner(pf, process.pid);
+  const rec = readOwner(pf);
+  check("the pidfile records the pid together with its start token",
+    rec.pid === process.pid && rec.token === token, JSON.stringify(rec));
+  writeFileSync(pf, String(process.pid)); // a legacy, pre-ownership bare-number pidfile
+  check("a legacy bare-number pidfile is still read, with an unknown token",
+    readOwner(pf).pid === process.pid && readOwner(pf).token === null);
+
+  check("ownership holds for the live process with the recorded token", owns({ pid: process.pid, token }));
+  check("a reused pid — same number, different start time — is NOT owned",
+    owns({ pid: process.pid, token: "Thu Jan  1 00:00:00 1970" }) === false);
+  check("a dead pid is not owned", owns({ pid: 2147483646, token }) === false);
+  check("a legacy record with no token falls back to pid existence", owns({ pid: process.pid, token: null }) === true);
+
+  // Behavioral: a live but unrelated process (a reused pid) must survive --stop. Mirror
+  // stopDev's decision — kill only when owns() is true — and confirm the process lives.
+  const kid = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], { stdio: "ignore" });
+  await new Promise((r) => setTimeout(r, 150));
+  const stale = { pid: kid.pid, token: "not-the-token-this-pid-actually-has" };
+  check("stop refuses a process whose ownership it cannot establish", owns(stale) === false);
+  if (owns(stale)) { try { process.kill(kid.pid); } catch {} } // stopDev would only kill here
+  await new Promise((r) => setTimeout(r, 100));
+  let stillAlive = true;
+  try { process.kill(kid.pid, 0); } catch { stillAlive = false; }
+  check("so the unrelated process --stop would have targeted is left alive", stillAlive);
+  try { kid.kill("SIGKILL"); } catch {}
+
+  const launcherSrc = readFileSync(new URL("../bin/uitalk", import.meta.url), "utf8");
+  check("the launcher verifies pidfile ownership before --stop kills, and records it on launch",
+    /owns\(rec\)/.test(launcherSrc) && /writeOwner\(/.test(launcherSrc)
+      && !/Number\(readFileSync\(f, "utf8"\)/.test(launcherSrc));
+}
+
 // -------------------------------------------- the message the agent receives
 {
   const bridge = await import("../server/index.mjs");
