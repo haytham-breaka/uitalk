@@ -1262,7 +1262,9 @@ globalThis.UITalk = (() => {
         return el ? { matched: identify(el) } : null;
       }
       if (text) {
-        const found = document.body.innerText.includes(text);
+        // document.body can be momentarily null very early in load; that means
+        // "not present yet", so keep polling rather than rejecting the whole wait.
+        const found = (document.body?.innerText ?? "").includes(text);
         if (gone) return found ? null : { matched: "absent" };
         return found ? { matched: "text" } : null;
       }
