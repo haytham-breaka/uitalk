@@ -9,7 +9,7 @@
 [![test](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml/badge.svg)](https://github.com/haytham-breaka/uitalk/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node ≥ 20.11](https://img.shields.io/badge/node-%E2%89%A5%2020.11-brightgreen.svg)](package.json)
-[![Version 0.6.65](https://img.shields.io/badge/version-0.6.65-informational.svg)](.claude-plugin/plugin.json)
+[![Version 0.6.66](https://img.shields.io/badge/version-0.6.66-informational.svg)](.claude-plugin/plugin.json)
 
 <p align="center">
   <img src="docs/media/hero.gif" alt="Selecting a pricing card, asking for five style options, flipping through Accent border, Soft tint, Gradient fill, Lifted and Glow ring live on the page, approving Lifted, and the agent committing it to style.css" width="100%">
