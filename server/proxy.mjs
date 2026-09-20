@@ -8,6 +8,7 @@
 
 import { request as httpRequest } from "node:http";
 import { connect } from "node:net";
+import { Transform } from "node:stream";
 
 const CLIENT_TAG = `<script src="/__uitalk/client.js" data-uitalk></script>`;
 
@@ -58,6 +59,94 @@ function injectInto(html, tag) {
   return tag + html;
 }
 
+// How far to hold bytes waiting for </head> before placing the tag by fallback,
+// and how much served HTML to keep for locate_source. Both bound memory so it does
+// not grow with the response — a streamed SSR body flows through once injected.
+const HEAD_SEARCH_CAP = 256 * 1024;
+const CAPTURE_CAP = 2 * 1024 * 1024;
+
+/**
+ * Inject the client tag into a streaming HTML response without buffering the whole
+ * body. Bytes are held only until the insertion point is found — normally within
+ * <head>, near the top — then the tag is emitted once and everything after passes
+ * straight through, so a server-rendered response stays streamed and memory stays
+ * bounded. Slicing is done by byte offset, never by re-encoding a decoded string,
+ * so a multi-byte character split across a chunk boundary is preserved intact.
+ */
+class InjectClient extends Transform {
+  constructor(tag, onCapture) {
+    super();
+    this.tag = Buffer.from(tag, "utf8");
+    this.onCapture = onCapture;
+    this.pre = []; // bytes buffered before the injection point
+    this.preLen = 0;
+    this.injected = false;
+    this.cap = []; // bounded copy of the served HTML, for locate_source
+    this.capLen = 0;
+  }
+
+  _capture(chunk) {
+    if (this.capLen >= CAPTURE_CAP) return;
+    const room = CAPTURE_CAP - this.capLen;
+    const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
+    this.cap.push(slice);
+    this.capLen += slice.length;
+  }
+
+  // The byte offset to inject at, or null while </head> may still be coming. The
+  // priority matches injectInto(): before </head>, else (once we stop waiting)
+  // before </body>, else after <html ...>, else the very front.
+  _offset(s, final) {
+    const head = /<\/head\s*>/i.exec(s);
+    if (head) return Buffer.byteLength(s.slice(0, head.index), "utf8");
+    if (!final && this.preLen < HEAD_SEARCH_CAP) return null;
+    const body = final ? /<\/body\s*>/i.exec(s) : null;
+    if (body) return Buffer.byteLength(s.slice(0, body.index), "utf8");
+    const html = /<html[^>]*>/i.exec(s);
+    if (html) return Buffer.byteLength(s.slice(0, html.index + html[0].length), "utf8");
+    return 0; // prepend
+  }
+
+  _emit(buf, at) {
+    this.push(buf.subarray(0, at));
+    this.push(this.tag);
+    this.push(buf.subarray(at));
+    this.injected = true;
+    this.pre = null;
+  }
+
+  _transform(chunk, _enc, cb) {
+    this._capture(chunk);
+    if (this.injected) {
+      this.push(chunk);
+      return cb();
+    }
+    this.pre.push(chunk);
+    this.preLen += chunk.length;
+    const buf = Buffer.concat(this.pre);
+    const s = buf.toString("utf8");
+    if (buf.includes("data-uitalk")) {
+      // already injected upstream (a re-proxied page) — do not inject twice
+      this.injected = true;
+      this.pre = null;
+      this.push(buf);
+      return cb();
+    }
+    const at = this._offset(s, false);
+    if (at !== null) this._emit(buf, at);
+    cb();
+  }
+
+  _flush(cb) {
+    if (!this.injected) {
+      const buf = Buffer.concat(this.pre);
+      this._emit(buf, this._offset(buf.toString("utf8"), true));
+    }
+    this.onCapture?.(Buffer.concat(this.cap).toString("utf8"));
+    cb();
+  }
+}
+
 /** Ask upstream for a full body when we mean to rewrite it, never a 304. */
 export function upstreamHeaders(req, target) {
   const headers = {
@@ -94,36 +183,28 @@ export function createProxy({ target, onInject, onHtml, token }) {
           return;
         }
 
-        // Buffer only HTML, which is small, so the tag can be placed correctly.
-        const chunks = [];
-        up.on("data", (c) => chunks.push(c));
-        up.on("end", () => {
-          const original = Buffer.concat(chunks).toString("utf8");
-          // Keep what was served: for a static site this *is* the source, and for a
-          // rendered one it still locates the block. It is the only source signal
-          // that needs nothing from the framework.
-          onHtml?.(req.url, original);
-          const html = injectInto(original, clientTag);
-          const body = Buffer.from(html, "utf8");
+        // We rewrite the body as it streams, so its length is unknown up front and
+        // no longer whatever upstream said: drop content-length (the response goes
+        // out chunked) and transfer/content-encoding, rather than leaving a stale
+        // length or a chunked header beside our own framing.
+        delete headers["transfer-encoding"];
+        delete headers["content-encoding"];
+        delete headers["content-length"];
+        // A document we rewrote must not be cached or revalidated against upstream's
+        // view of a body we changed. Assets keep their validators (they revalidate
+        // untouched); losing those would make every reload refetch the whole app.
+        for (const name of VALIDATOR_HEADERS) delete headers[name];
+        headers["cache-control"] = "no-store, must-revalidate";
+        res.writeHead(up.statusCode, headers);
 
-          // We buffered and rewrote the body, so it is no longer chunked and no
-          // longer whatever length upstream said. Leaving transfer-encoding in place
-          // beside a content-length is an invalid response that strict clients reject
-          // outright — and most dev servers chunk dynamic HTML.
-          delete headers["transfer-encoding"];
-          delete headers["content-encoding"];
-          delete headers["content-length"];
-          headers["content-length"] = String(body.length);
-
-          // And the document we just built must not be cached or revalidated against
-          // upstream's view of a body we changed. Assets keep their validators: losing
-          // those would make every reload refetch the whole app.
-          for (const name of VALIDATOR_HEADERS) delete headers[name];
-          headers["cache-control"] = "no-store, must-revalidate";
-          res.writeHead(up.statusCode, headers);
-          res.end(body);
-          onInject?.(req.url);
-        });
+        // Inject as the body streams through — the head arrives first, so the tag is
+        // placed and the rest passes straight on without buffering the whole page.
+        // A bounded copy is kept for locate_source (see onHtml): enough to place an
+        // element, not the whole SSR stream.
+        const inject = new InjectClient(clientTag, (html) => onHtml?.(req.url, html));
+        up.on("error", () => res.destroy());
+        inject.on("end", () => onInject?.(req.url));
+        up.pipe(inject).pipe(res);
       },
     );
 
