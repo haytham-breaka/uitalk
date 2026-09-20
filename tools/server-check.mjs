@@ -443,6 +443,37 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       readFileSync(join(repo, "Draft2.css"), "utf8").includes("user kept editing"));
     unlinkSync(join(repo, "Draft2.css"));
   }
+
+  // git octal-quotes a non-ASCII path by default ("caf\303\251.css"); left quoted
+  // it reaches hash-object/checkout as a bogus pathspec, so an accented filename
+  // was silently un-undoable. Both a tracked and a pre-existing untracked one.
+  {
+    writeFileSync(join(repo, "café.css"), ".c { color: red }\n");
+    git("add", ".");
+    git("commit", "-qm", "accented baseline");
+    const snap0 = await snapshots.snapshot(repo, "restyle an accented tracked file");
+    writeFileSync(join(repo, "café.css"), ".c { color: blue }\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+    check("a tracked non-ASCII filename is seen as changed by the agent",
+      snap.changedByAgent.includes("café.css"), JSON.stringify(snap.changedByAgent));
+    const out = await snapshots.revertTo(repo, snap);
+    check("undo restores a tracked non-ASCII file",
+      out.reverted.includes("café.css") && readFileSync(join(repo, "café.css"), "utf8").includes("red"),
+      JSON.stringify(out.reverted));
+  }
+
+  {
+    writeFileSync(join(repo, "résumé.css"), ".r { color: red } /* user's own */\n");
+    const snap0 = await snapshots.snapshot(repo, "restyle a pre-existing untracked accented file");
+    writeFileSync(join(repo, "résumé.css"), ".r { color: blue } /* agent */\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+    const out = await snapshots.revertTo(repo, snap);
+    check("undo restores a pre-existing untracked non-ASCII file to its exact contents",
+      out.reverted.includes("résumé.css") &&
+        readFileSync(join(repo, "résumé.css"), "utf8") === ".r { color: red } /* user's own */\n",
+      JSON.stringify(out));
+    unlinkSync(join(repo, "résumé.css"));
+  }
 }
 
 // ------------------------------------------------------------------- proxy
