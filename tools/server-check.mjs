@@ -1073,6 +1073,21 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       res.writeHead(200, { "content-type": "text/javascript", etag: 'W/"asset-1"' });
       return res.end("console.log(1)");
     }
+    if (req.url === "/login") {
+      // An absolute redirect the app builds from its own Host header. Left alone,
+      // the browser would follow it straight to the dev server's port, outside the
+      // proxy. Host was rewritten to the target, so this points at the target.
+      res.writeHead(302, { location: `http://${req.headers.host}/dashboard` });
+      return res.end();
+    }
+    if (req.url === "/rel-redirect") {
+      res.writeHead(302, { location: "/dashboard" }); // relative — nothing to rewrite
+      return res.end();
+    }
+    if (req.url === "/ext-redirect") {
+      res.writeHead(302, { location: "https://example.com/sso" }); // elsewhere — untouched
+      return res.end();
+    }
     if (req.url === "/api.json") {
       // A non-HTML response with its own CSP: nothing is injected into it, so its
       // policy must survive the proxy untouched.
@@ -1231,6 +1246,23 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   const conditionalAsset = await fetch(at("/asset.js"), { headers: { "if-none-match": 'W/"asset-1"' } });
   check("an asset may still revalidate: only documents we rewrite are forced",
     conditionalAsset.status === 200, `HTTP ${conditionalAsset.status}`);
+
+  // A redirect the app builds from its (rewritten) Host header must be pulled back
+  // to the proxy's origin, or the browser leaves the proxy for the raw dev server.
+  const proxyOrigin = `127.0.0.1:${proxy.address().port}`;
+  const appOrigin = `127.0.0.1:${target.port}`;
+  const absRedirect = await fetch(at("/login"), { redirect: "manual" });
+  check("an absolute redirect to the proxied app is rewritten back to the proxy origin",
+    absRedirect.headers.get("location") === `http://${proxyOrigin}/dashboard`,
+    absRedirect.headers.get("location"));
+  check("so it does not send the browser straight to the dev server's own port",
+    !absRedirect.headers.get("location").includes(appOrigin));
+  const relRedirect = await fetch(at("/rel-redirect"), { redirect: "manual" });
+  check("a relative redirect is left untouched",
+    relRedirect.headers.get("location") === "/dashboard", relRedirect.headers.get("location"));
+  const extRedirect = await fetch(at("/ext-redirect"), { redirect: "manual" });
+  check("an external redirect is left untouched",
+    extRedirect.headers.get("location") === "https://example.com/sso", extRedirect.headers.get("location"));
 
   app.close();
   const dead = await fetch(at("/"));

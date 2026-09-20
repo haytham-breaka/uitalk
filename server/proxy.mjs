@@ -153,6 +153,32 @@ class InjectClient extends Transform {
   }
 }
 
+/**
+ * Keep an upstream redirect inside the proxy. We rewrite the browser's Host to the
+ * dev server (so a dev server that validates Host is happy), but an app that builds
+ * an absolute redirect from that Host — Location: http://127.0.0.1:5173/dashboard —
+ * would then send the browser straight to the dev server's own port, outside the
+ * proxy: the injected panel and its socket vanish, and the tab is stranded on the
+ * raw app. So an absolute Location that points at the proxied target is rewritten
+ * back to the origin the browser actually asked for (its own Host). A relative
+ * Location (/dashboard) needs no change, and an external one (https://example.com/…)
+ * points elsewhere and is left exactly as upstream sent it.
+ */
+export function rewriteRedirect(headers, reqHost, target) {
+  const loc = headers["location"];
+  if (!loc || !reqHost) return;
+  let url;
+  try {
+    url = new URL(loc);
+  } catch {
+    return; // a relative Location has no base here — leave it untouched
+  }
+  if (url.host === `${target.host}:${target.port}`) {
+    url.host = reqHost; // same scheme, path, query and hash; only the authority moves
+    headers["location"] = url.toString();
+  }
+}
+
 /** Ask upstream for a full body when we mean to rewrite it, never a 304. */
 export function upstreamHeaders(req, target) {
   const headers = {
@@ -181,6 +207,9 @@ export function createProxy({ target, onInject, onHtml, token }) {
       },
       (up) => {
         const headers = { ...up.headers };
+        // Before anything else, keep any redirect pointing back through the proxy —
+        // this applies to every response, HTML or not (a 3xx usually has no body).
+        rewriteRedirect(headers, req.headers.host, target);
 
         if (!isHtml(headers)) {
           // A non-HTML response gets nothing injected, so it keeps its own headers —
