@@ -269,7 +269,7 @@ export function toolDefinitions(
                 : null;
               const possibleNote = reuse.possibleFiles
                 ? `${reuse.possibleFiles} other file(s) render a same-named tag, but the import couldn't be ` +
-                  `confirmed as this same component (a namesake elsewhere, a path alias, or no import found) ` +
+                  `confirmed as this same component (a namesake elsewhere, a barrel re-export, or no import found) ` +
                   `— worth a look before assuming they're the same, not decisive on its own.`
                 : null;
               found = {

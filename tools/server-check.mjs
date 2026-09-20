@@ -7,7 +7,7 @@ process.env.UITALK_IMPORT_ONLY = "1"; // importing the bridge must not start one
 
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, mkdirSync, statSync, unlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 
@@ -437,6 +437,63 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     countUsages(proj, "MyWidget", "src/vue/MyWidget.vue")?.confirmedFiles === 1);
 }
 
+// ------------------------------------- usage counting through path aliases
+{
+  const { countUsages } = await import("../server/usage.mjs");
+  const mkFile = (p, rel, body) => { mkdirSync(dirname(join(p, rel)), { recursive: true }); writeFileSync(join(p, rel), body); };
+
+  // tsconfig paths + baseUrl (JSONC, with a comment and a trailing comma): both an
+  // aliased import and a bare baseUrl import resolve to the defining file.
+  {
+    const p = mkdtempSync(join(sandbox, "alias-ts-"));
+    mkFile(p, "tsconfig.json", `{
+      // project config
+      "compilerOptions": {
+        "baseUrl": "src",
+        "paths": { "@/*": ["*"] },
+      }
+    }`);
+    mkFile(p, "src/components/Button.tsx", "export function Button() { return <button/>; }\n");
+    mkFile(p, "src/pages/Aliased.tsx", 'import { Button } from "@/components/Button";\nexport default () => <Button/>;\n');
+    mkFile(p, "src/pages/Bare.tsx", 'import { Button } from "components/Button";\nexport default () => <Button/>;\n');
+    const r = countUsages(p, "Button", "src/components/Button.tsx");
+    check("a tsconfig path alias resolves to confirmed, not possible", r?.confirmedFiles === 2 && r?.possibleFiles === 0, JSON.stringify(r));
+  }
+
+  // jsconfig (no tsconfig) is read the same way.
+  {
+    const p = mkdtempSync(join(sandbox, "alias-js-"));
+    mkFile(p, "jsconfig.json", '{ "compilerOptions": { "paths": { "@components/*": ["src/components/*"] } } }');
+    mkFile(p, "src/components/Button.jsx", "export function Button() { return <button/>; }\n");
+    mkFile(p, "src/pages/A.jsx", 'import { Button } from "@components/Button";\nexport default () => <Button/>;\n');
+    const r = countUsages(p, "Button", "src/components/Button.jsx");
+    check("a jsconfig path alias resolves to confirmed", r?.confirmedFiles === 1, JSON.stringify(r));
+  }
+
+  // Vite object alias: @ -> path.resolve(__dirname, "src"). An alias that isn't
+  // declared anywhere (~) can't be confirmed and stays possible — not a false confirm.
+  {
+    const p = mkdtempSync(join(sandbox, "alias-vite-obj-"));
+    mkFile(p, "vite.config.ts", 'import path from "node:path";\nexport default { resolve: { alias: { "@": path.resolve(__dirname, "src") } } };\n');
+    mkFile(p, "src/components/Button.tsx", "export function Button() { return <button/>; }\n");
+    mkFile(p, "src/pages/A.tsx", 'import { Button } from "@/components/Button";\nexport default () => <Button/>;\n');
+    mkFile(p, "src/pages/Undeclared.tsx", 'import { Button } from "~/components/Button";\nexport default () => <Button/>;\n');
+    const r = countUsages(p, "Button", "src/components/Button.tsx");
+    check("a Vite object alias resolves to confirmed", r?.confirmedFiles === 1, JSON.stringify(r));
+    check("an undeclared alias stays possible, never a false confirm", r?.possibleFiles === 1, JSON.stringify(r));
+  }
+
+  // Vite array alias with the ESM replacement form fileURLToPath(new URL("./src", ...)).
+  {
+    const p = mkdtempSync(join(sandbox, "alias-vite-arr-"));
+    mkFile(p, "vite.config.js", 'import { fileURLToPath } from "node:url";\nexport default { resolve: { alias: [ { find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) } ] } };\n');
+    mkFile(p, "src/components/Button.tsx", "export function Button() { return <button/>; }\n");
+    mkFile(p, "src/x/A.tsx", 'import Button from "@/components/Button";\nexport default () => <Button/>;\n');
+    const r = countUsages(p, "Button", "src/components/Button.tsx");
+    check("a Vite array alias ({ find, replacement }) resolves to confirmed", r?.confirmedFiles === 1, JSON.stringify(r));
+  }
+}
+
 // -------------------------------------------------- project-source candidates
 {
   const { findSourceCandidates } = await import("../server/candidates.mjs");
@@ -466,7 +523,8 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
 
 // ------------------------------------------------ opencode config auto-wiring
 {
-  const { ensureUitalkMcp, parseJsonc } = await import("../server/opencode-config.mjs");
+  const { ensureUitalkMcp } = await import("../server/opencode-config.mjs");
+  const { parseJsonc } = await import("../server/jsonc.mjs");
   const read = (p, f) => readFileSync(join(p, f), "utf8");
 
   // The tolerant parser itself: a // or , inside a string must survive, a real
@@ -474,6 +532,9 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("parseJsonc keeps a // inside a string and drops a trailing comma",
     JSON.stringify(parseJsonc('{ "url": "http://x//y", "a": 1, }')) === '{"url":"http://x//y","a":1}',
     JSON.stringify(parseJsonc('{ "url": "http://x//y", "a": 1, }')));
+  check("parseJsonc strips /* block */ comments and a trailing comma before them",
+    JSON.stringify(parseJsonc('{ /* lead */ "a": 1 /* mid */, "b": 2, /* tail */ }')) === '{"a":1,"b":2}',
+    JSON.stringify(parseJsonc('{ /* lead */ "a": 1 /* mid */, "b": 2, /* tail */ }')));
   check("parseJsonc returns null on genuinely broken input", parseJsonc('{ "a": ') === null);
 
   // No config at all: one is created, valid, pointing at uitalk.
