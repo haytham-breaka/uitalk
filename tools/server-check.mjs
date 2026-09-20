@@ -712,6 +712,41 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       staged("fallback.css").trim() === "B" && out.reverted.includes("fallback.css"),
       `index=${staged("fallback.css").trim()}`);
   }
+
+  {
+    // Precise scope: when the caller knows which files the agent wrote, undo must
+    // touch only those — a file the user edited concurrently during the turn also
+    // differs from the snapshot, but the agent never wrote it, so it stays.
+    writeFileSync(join(repo, "agent.css"), "a: 1\n");
+    writeFileSync(join(repo, "mine.css"), "m: 1\n");
+    git("add", ".");
+    git("commit", "-qm", "scope baseline");
+    const snap0 = await snapshots.snapshot(repo, "scoped edit");
+    writeFileSync(join(repo, "agent.css"), "a: 2\n"); // the agent's edit
+    writeFileSync(join(repo, "mine.css"), "m: 2\n"); // the user, editing concurrently
+
+    const snap = await snapshots.captureAfter(repo, snap0, ["agent.css"]); // only the agent's write is known
+    check("captureAfter scopes to the files the agent actually wrote",
+      snap.changedByAgent.includes("agent.css") && !snap.changedByAgent.includes("mine.css"),
+      JSON.stringify(snap.changedByAgent));
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("undo reverts the agent's file", out.reverted.includes("agent.css") &&
+      readFileSync(join(repo, "agent.css"), "utf8") === "a: 1\n", JSON.stringify(out.reverted));
+    check("and leaves the file the user edited concurrently untouched",
+      !out.reverted.includes("mine.css") && readFileSync(join(repo, "mine.css"), "utf8") === "m: 2\n",
+      readFileSync(join(repo, "mine.css"), "utf8").trim());
+
+    // No write info (an MCP client, or an unseen tool) falls back to the full diff.
+    const snap1 = await snapshots.snapshot(repo, "unscoped");
+    writeFileSync(join(repo, "agent.css"), "a: 3\n");
+    writeFileSync(join(repo, "mine.css"), "m: 3\n");
+    const snapAll = await snapshots.captureAfter(repo, snap1, []);
+    check("with no write info, capture falls back to the whole diff",
+      snapAll.changedByAgent.includes("agent.css") && snapAll.changedByAgent.includes("mine.css"),
+      JSON.stringify(snapAll.changedByAgent));
+    git("checkout", "--", "agent.css", "mine.css");
+  }
 }
 
 // ------------------------------------------------------------------- proxy
@@ -1684,6 +1719,10 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     stream.push({ type: "message.updated", properties: { info: { id: "m1", sessionID: "S", role: "assistant" } } });
     stream.push({ type: "message.part.delta", properties: { sessionID: "S", messageID: "m1", partID: "t1", field: "text", delta: "I edited Header.tsx." } });
     stream.push({ type: "message.part.updated", properties: { part: { type: "tool", callID: "c1", tool: "edit_file", sessionID: "S", messageID: "m1", state: { status: "completed" } } } });
+    // A write tool names the path it touched; a read tool with a path does not get
+    // recorded (reading a file must never make undo revert it).
+    stream.push({ type: "message.part.updated", properties: { part: { type: "tool", callID: "w1", tool: "edit", sessionID: "S", messageID: "m1", state: { status: "completed", input: { filePath: "oc-styles.css" } } } } });
+    stream.push({ type: "message.part.updated", properties: { part: { type: "tool", callID: "r1", tool: "read", sessionID: "S", messageID: "m1", state: { status: "completed", input: { filePath: "oc-readonly.css" } } } } });
     stream.push({ type: "session.idle", properties: { sessionID: "S" } });
     await until(() => p.sent.some((f) => f.kind === "turn_end"), "the OpenCode turn to end");
     check("the model's streamed text reaches the panel", p.sent.some((f) => f.kind === "delta" && /edited Header/.test(f.text)),
@@ -1692,6 +1731,10 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       p.sent.some((f) => f.kind === "tool" && f.name === "edit_file"), JSON.stringify(p.sent.map((f) => f.kind)));
     check("the finished turn is recorded for replay",
       bridge.transcript.some((t) => t.role === "agent" && /edited Header/.test(t.text)), JSON.stringify(bridge.transcript));
+
+    check("an OpenCode write tool's path is recorded, a read tool's is not",
+      bridge.turnWritesForTest().includes("oc-styles.css") && !bridge.turnWritesForTest().includes("oc-readonly.css"),
+      JSON.stringify(bridge.turnWritesForTest()));
 
     // text a delta already covered is not double-relayed by the part's final update.
     p.sent.length = 0;
@@ -1827,6 +1870,52 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       /no page is connected/.test(noPage ?? "") && !agentish.sent.some((f) => f.kind === "rpc"),
       `${noPage} · sent=${JSON.stringify(agentish.sent.map((f) => f.kind))}`);
     agentish.close();
+  }
+
+  // ------------------------------------------------- precise undo (builtin mode)
+  // The built-in session names the files it writes in its tool_use events; undo
+  // scopes to those, so a file the user edits while the agent works is not swept
+  // in. End to end: approve, the agent edits A (a tool_use), the user edits B, the
+  // turn ends, undo restores A and leaves B.
+  {
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    writeFileSync(join(proj, "agent-wrote.css"), "x: 1\n");
+    writeFileSync(join(proj, "user-wrote.css"), "y: 1\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "precise baseline"], { cwd: proj });
+
+    p.deliver({ kind: "approval", label: "precise change", ref: 1, declarations: "color:red", element: {} });
+    await untilPhase("editing");
+    // the agent edits agent-wrote.css (announced via a Write tool_use) …
+    bridge.relay({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: join(proj, "agent-wrote.css") } }] } });
+    writeFileSync(join(proj, "agent-wrote.css"), "x: 2\n");
+    // … while the user edits user-wrote.css in the same window (no tool_use for it)
+    writeFileSync(join(proj, "user-wrote.css"), "y: 2\n");
+    check("only the agent's tool_use path is recorded as written",
+      bridge.turnWritesForTest().includes("agent-wrote.css") && !bridge.turnWritesForTest().includes("user-wrote.css"),
+      JSON.stringify(bridge.turnWritesForTest()));
+
+    bridge.relay({ type: "result", subtype: "success" });
+    await untilPhase("idle");
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the revert to answer");
+    const out = p.sent.find((f) => f.kind === "reverted");
+    check("undo restores the file the agent wrote", out.ok === true && out.files?.includes("agent-wrote.css") &&
+      readFileSync(join(proj, "agent-wrote.css"), "utf8") === "x: 1\n", JSON.stringify(out));
+    check("and leaves the file the user edited concurrently alone",
+      !out.files?.includes("user-wrote.css") && readFileSync(join(proj, "user-wrote.css"), "utf8") === "y: 2\n",
+      readFileSync(join(proj, "user-wrote.css"), "utf8").trim());
+
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
   }
 }
 

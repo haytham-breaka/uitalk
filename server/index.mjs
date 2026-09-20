@@ -18,7 +18,7 @@ import { createServer } from "node:http";
 import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { WebSocketServer } from "ws";
 import { createAdapter, normalize } from "./adapter.mjs";
 import { createProxy, proxyUpgrade } from "./proxy.mjs";
@@ -371,6 +371,11 @@ function approvalCapturedForTest() {
   return Boolean(lastChange?.snap?.postCaptured);
 }
 
+/** The paths the agent is recorded as having written this turn, for tests. */
+function turnWritesForTest() {
+  return [...turnWrites];
+}
+
 // Stands in for `import("@opencode-ai/sdk")` so a test can drive runOpencode's
 // event loop against a fake client — the same seam createAdapter exposes as
 // fetchImpl. A factory (async) so a test can also make it throw for the
@@ -645,6 +650,7 @@ wss.on("connection", (ws) => {
           return;
         }
         approvalPhase = "snapshotting";
+        turnWrites = new Set(); // scope this approval's undo to what the agent writes from here
         record("me", `approved: ${frame.label}`);
         // Neither the external-agent notice nor the edit instruction may reach an
         // agent until the pre-edit snapshot exists — otherwise the agent's own
@@ -771,12 +777,36 @@ function noteTokens(total) {
  * post-edit state gets frozen, once, before a later user edit could otherwise
  * be mistaken for the agent's own change. See snapshots.mjs's captureAfter().
  */
+// The project-relative paths the agent has written since the current approval, as
+// reported by its own tools (builtin's tool_use, the adapter's file tools,
+// OpenCode's tool events). Undo scopes to these so a file the user edited while the
+// agent was working — which also differs from the snapshot — is not swept in. Reset
+// when an approval takes its snapshot; empty when the writes are invisible to the
+// bridge (an MCP client), in which case captureAfter falls back to the full diff.
+let turnWrites = new Set();
+
+// The Claude Agent SDK's file-writing tools, whose tool_use input names the path
+// touched. Read/search tools are deliberately excluded — recording a path the
+// agent only read would let a file the user changed be undone if the agent
+// happened to read it (undo intersects writes with the diff, never reads).
+const BUILTIN_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+// OpenCode's built-in file-writing tools, likewise (its read/list tools are left out).
+const OPENCODE_WRITE_TOOLS = new Set(["write", "edit", "patch"]);
+
+/** Record a file the agent just wrote, normalized to a project-relative POSIX path
+ * so it matches git's diff/ls-files output. Paths outside the project are ignored. */
+function noteAgentWrite(path) {
+  if (typeof path !== "string" || !path) return;
+  const rel = relative(PROJECT, resolve(PROJECT, path));
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) turnWrites.add(rel.split(sep).join("/"));
+}
+
 /** Freeze the post-edit state of the last approved change, once, so a later user
  * edit can be told from the agent's own and undo can scope to exactly those files.
  * See snapshots.mjs's captureAfter(). Idempotent. */
 async function captureApprovedEdit() {
   if (lastChange?.snap && !lastChange.snap.postCaptured) {
-    lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap);
+    lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap, [...turnWrites]);
   }
 }
 
@@ -1041,6 +1071,7 @@ function runAdapter() {
       record,
       onUsage: noteTokens,
       onTurnEnd: () => void noteTurnEnded(),
+      onWrite: noteAgentWrite,
       log,
       systemPrompt: GUIDANCE,
     });
@@ -1242,6 +1273,13 @@ async function runOpencode() {
           } else if (part.type === "tool" && part.state.status !== "pending" && !turn.seenTools.has(part.callID)) {
             turn.seenTools.add(part.callID);
             if (!turn.quiet) toPanel({ kind: "tool", name: part.tool });
+            // OpenCode's edit/write tools carry the path in their input; record it
+            // so undo can scope to the agent's own edits (best-effort — an edit made
+            // some other way just falls back to the full diff).
+            if (OPENCODE_WRITE_TOOLS.has(part.tool)) {
+              const input = part.state?.input ?? {};
+              noteAgentWrite(input.filePath ?? input.path ?? input.file);
+            }
           } else if (part.type === "step-finish") {
             const t = part.tokens ?? {};
             noteTokens((t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0));
@@ -1371,7 +1409,11 @@ function relay(event) {
       noteUsage(event);
       if (internal) return;
       for (const block of event.message?.content ?? []) {
-        if (block.type === "tool_use") toPanel({ kind: "tool", name: block.name });
+        if (block.type !== "tool_use") continue;
+        toPanel({ kind: "tool", name: block.name });
+        // The SDK's file-writing tools name the path they touch; record it so undo
+        // can scope to the agent's own edits (see turnWrites / captureAfter).
+        if (BUILTIN_WRITE_TOOLS.has(block.name)) noteAgentWrite(block.input?.file_path ?? block.input?.notebook_path);
       }
       return;
 
@@ -1504,6 +1546,7 @@ export {
   approvalPhaseForTest,
   setAgentForTest,
   approvalCapturedForTest,
+  turnWritesForTest,
   setOpencodeForTest,
   runOpencode,
   TOKEN as socketToken,
