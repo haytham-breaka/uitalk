@@ -124,6 +124,12 @@ check("and the malformed show_options never reached the page", asked.length === 
 const noted = await rpc("tools/call", { name: "note_edit", arguments: {} });
 check("note_edit is callable and acknowledges over stdio",
   /recorded/.test(noted.result.content[0].text), noted.result.content[0].text.slice(0, 60));
+check("note_edit advertises the optional files list for scoped undo",
+  listed.result.tools.find((t) => t.name === "note_edit")?.inputSchema?.properties?.files?.type === "array",
+  JSON.stringify(listed.result.tools.find((t) => t.name === "note_edit")?.inputSchema?.properties));
+const notedFiles = await rpc("tools/call", { name: "note_edit", arguments: { files: ["src/Button.css", 42, ""] } });
+check("note_edit accepts a files list (junk entries filtered) and still acknowledges",
+  /recorded/.test(notedFiles.result.content[0].text), notedFiles.result.content[0].text.slice(0, 60));
 
 const sel = await rpc("tools/call", { name: "read_selection", arguments: {} });
 check("calling a tool reaches the page", asked.includes("readSelection"), asked.join(", "));

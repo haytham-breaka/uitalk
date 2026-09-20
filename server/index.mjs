@@ -674,9 +674,17 @@ wss.on("connection", (ws) => {
       // Off mode has no turn whose end would freeze the post-edit state: the MCP
       // client edits source with its own tools, invisible to the bridge, then
       // sends this once it has committed the approved change — so undo can scope
-      // to exactly those files instead of refusing forever.
-      case "note_edit":
+      // to exactly those files instead of refusing forever. The client may name the
+      // files it changed; normalize each through noteAgentWrite (project-relative,
+      // in-root only — a path outside the project is ignored) so undo scopes to just
+      // those. With no usable list, turnWrites stays empty and captureApprovedEdit
+      // falls back to the full diff, exactly as before.
+      case "note_edit": {
+        if (Array.isArray(frame.files)) {
+          for (const f of frame.files) if (typeof f === "string" && f) noteAgentWrite(f);
+        }
         return void captureApprovedEdit();
+      }
 
       case "approval": {
         if (typeof frame.label !== "string" || !frame.label || typeof frame.declarations !== "string") {

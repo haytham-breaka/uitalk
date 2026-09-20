@@ -2101,6 +2101,45 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // Off mode with a file list: note_edit may name the files the MCP client changed,
+    // so undo scopes to exactly those instead of the whole diff — a file the user
+    // edited in the same window is then left alone. A path outside the project is
+    // ignored, not restored.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setAgentForTest("off");
+    writeFileSync(join(proj, "mcp-agent.css"), "a: 1\n");
+    writeFileSync(join(proj, "mcp-user.css"), "u: 1\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "mcp scoped baseline"], { cwd: proj });
+
+    p.deliver({ kind: "approval", label: "scoped mcp change", ref: 1, declarations: "color: blue", element: {} });
+    await until(() => bridge.approvalPhaseForTest() === "idle", "the off-mode approval to settle");
+    writeFileSync(join(proj, "mcp-agent.css"), "a: 2\n"); // the MCP client's committed edit
+    writeFileSync(join(proj, "mcp-user.css"), "u: 2\n"); // the user's own edit in the same window
+
+    // The client names only its own file (plus a path outside the root, which is ignored).
+    p.deliver({ kind: "note_edit", files: ["mcp-agent.css", "../outside.css"] });
+    await until(() => bridge.approvalCapturedForTest(), "the scoped post-edit state to be recorded");
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the scoped revert to answer");
+    const out = p.sent.find((f) => f.kind === "reverted");
+    check("a file-scoped note_edit restores only the named file",
+      out.ok === true && out.files?.includes("mcp-agent.css") && !out.files?.includes("mcp-user.css") &&
+        readFileSync(join(proj, "mcp-agent.css"), "utf8") === "a: 1\n", JSON.stringify(out));
+    check("and leaves the user's concurrently-edited file alone",
+      readFileSync(join(proj, "mcp-user.css"), "utf8") === "u: 2\n",
+      readFileSync(join(proj, "mcp-user.css"), "utf8").trim());
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    execFileSync("git", ["checkout", "--", "mcp-user.css"], { cwd: proj });
+    p.close();
+  }
+
+  {
     // An internal ask (compaction/clear) queued behind an open turn must still time
     // out if that turn never ends — otherwise its promise leaks and the compaction
     // that awaits it wedges. Open a turn that never resolves, then queue an ask
