@@ -2918,6 +2918,61 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     bridge.checkServerFreshness() === undefined);
 }
 
+// ------------------------------------ one bridge per project, even under a startup race
+{
+  const { withProjectLock } = await import("../server/project-lock.mjs");
+  const { projectSlug } = await import("../server/project-id.mjs");
+  const proj = mkdtempSync(join(sandbox, "lock-proj-"));
+
+  // The check-and-register step is serialized across processes: two concurrent
+  // holders must never run their critical sections at the same time.
+  let inside = 0;
+  let overlapped = false;
+  const crit = async () => {
+    inside += 1;
+    if (inside > 1) overlapped = true;
+    await new Promise((r) => setTimeout(r, 30));
+    inside -= 1;
+  };
+  await Promise.all([withProjectLock(proj, crit), withProjectLock(proj, crit)]);
+  check("the project startup lock serializes concurrent critical sections", !overlapped);
+
+  // A lock left behind by a process that crashed mid-section must not wedge startup:
+  // the next acquirer sees the holder pid is dead and reclaims it.
+  const lockPath = join(process.env.UITALK_HOME, "locks", `${projectSlug(proj)}.lock`);
+  writeFileSync(lockPath, "2147483646"); // a pid that is not alive
+  let ran = false;
+  await withProjectLock(proj, () => { ran = true; });
+  check("a lock left by a dead process is reclaimed, not fatal", ran);
+
+  // End to end: two bridges started at the same instant for one project leave exactly
+  // one registered — the duplicate stands down instead of running a second session.
+  const home = mkdtempSync(join(sandbox, "dup-home-"));
+  const dupProj = mkdtempSync(join(sandbox, "dup-proj-"));
+  const childEnv = {
+    ...process.env, UITALK_HOME: home, UITALK_PROJECT: dupProj,
+    UITALK_APP_PORT: "39997", UITALK_AGENT: "off",
+  };
+  delete childEnv.UITALK_IMPORT_ONLY; // the children must actually start a bridge
+  const entry = new URL("../server/index.mjs", import.meta.url).pathname;
+  const kids = [
+    spawn(process.execPath, [entry], { env: childEnv, stdio: "ignore" }),
+    spawn(process.execPath, [entry], { env: childEnv, stdio: "ignore" }),
+  ];
+  await new Promise((r) => setTimeout(r, 3000));
+  const instDir = join(home, "instances");
+  const registered = existsSync(instDir)
+    ? readdirSync(instDir)
+        .filter((f) => f.endsWith(".json"))
+        .map((f) => { try { return JSON.parse(readFileSync(join(instDir, f), "utf8")); } catch { return null; } })
+        .filter((e) => e && e.project === dupProj)
+    : [];
+  check("two bridges racing for one project leave exactly one registered",
+    registered.length === 1, `registered ${registered.length}`);
+  for (const k of kids) { try { k.kill("SIGKILL"); } catch {} }
+  await new Promise((r) => setTimeout(r, 200));
+}
+
 rmSync(sandbox, { recursive: true, force: true });
 console.log(fail.length ? `\n${fail.length} failing: ${fail.join(", ")}` : "\nall checks passed");
 process.exit(fail.length ? 1 : 0);
