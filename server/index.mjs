@@ -644,6 +644,11 @@ wss.on("connection", (ws) => {
           } catch (err) {
             approvalPhase = "idle";
             toPanel({ kind: "reverted", ok: false, text: err.message });
+            // A successful revert starts a turn (its notice to the agent) whose end
+            // drains any approval held during the revert; a failed one starts no
+            // turn, so drain here or the held approval waits for an unrelated future
+            // turn. Skip if a chat turn is still streaming — its end will do it.
+            if (!agentBusy() && pendingApprovals.length) beginApproval(pendingApprovals.shift());
           }
         })();
         return;
