@@ -787,6 +787,37 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   wrap.remove();
 }
 
+// --- an anonymous @layer {} is a real layer, below unlayered normal rules — not
+// unlayered itself (which would wrongly make it the strongest)
+{
+  const wrap = window.document.createElement("div");
+  wrap.innerHTML = `<p class="anon">x</p>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  style.textContent = `
+    .anon { color: green; }
+    @layer { .anon { color: red; } }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".anon" });
+  // Unlayered green must win: an anonymous layer sits below unlayered normal rules.
+  // (On a jsdom without @layer support only the green rule exists, so this still
+  // holds — it just isn't exercising the layer path.)
+  check("an unlayered rule beats an anonymous @layer, which is below it",
+    out.winners?.color?.value === "green", JSON.stringify(out.winners?.color));
+  if (out.rules.some((r) => r.layer)) {
+    check("the anonymous layer is reported without leaking the internal sentinel",
+      out.rules.every((r) => !r.layer || !r.layer.includes(" ")) &&
+        !/ /.test(out.winners?.color?.from ?? ""),
+      JSON.stringify(out.rules.map((r) => r.layer).filter(Boolean)));
+  }
+
+  style.remove();
+  wrap.remove();
+}
+
 // --- capture over time: a still frame cannot show motion
 {
   const t0 = Date.now();
