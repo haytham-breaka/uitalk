@@ -531,6 +531,7 @@ export function createAdapter({
   }
 
   /** Serialized: a second message arriving mid-turn waits rather than interleaving. */
+  let chatTurns = 0; // ordinary send() turns in flight (not summarize/clear)
   const queue = (fn) => (busy = busy.then(fn, fn));
 
   return {
@@ -539,6 +540,11 @@ export function createAdapter({
     provider: name,
     model,
     tools: defs.map((d) => d.name),
+
+    /** Whether an ordinary chat turn is being processed right now — so the bridge
+     * can hold an approval that arrives mid-turn rather than snapshotting against
+     * it. summarize()/clear() are excluded: they don't run the post-edit capture. */
+    busy: () => chatTurns > 0,
 
     /** Wired to the credential lookup by the bridge, so this module reads no files itself. */
     useCredentials(fn) {
@@ -552,6 +558,7 @@ export function createAdapter({
 
     send(content) {
       queue(async () => {
+        chatTurns++;
         try {
           const said = await turn(content);
           if (said) {
@@ -569,6 +576,8 @@ export function createAdapter({
           // after a partial failure falls back to the coarser whole-file behavior
           // right when the safer, scoped one matters most.
           onTurnEnd();
+        } finally {
+          chatTurns--;
         }
       });
     },
