@@ -171,6 +171,32 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     fromFile.key === "key-on-disk" && fromFile.from === written, fromFile.from);
   check("a provider with no key anywhere reports none rather than guessing",
     settings.credential("anthropic").key === null, String(settings.credential("anthropic").key));
+
+  // Cross-process: several processes save DIFFERENT providers at once. saveCredential
+  // is a read-modify-write of one shared credentials.json, so without a lock each
+  // would read the same old file and rename its own version over it — the last write
+  // wins and every other provider's key vanishes. Under the lock the final file holds
+  // them all. Uses its own home so it can't disturb the suite's credentials.
+  const credHome = mkdtempSync(join(sandbox, "cred-home-"));
+  const settingsPath = new URL("../server/settings.mjs", import.meta.url).pathname;
+  const credChild = join(credHome, "child.mjs");
+  writeFileSync(credChild, [
+    `const { saveCredential } = await import(${JSON.stringify(settingsPath)});`,
+    `saveCredential(process.argv[2], process.argv[3]);`,
+  ].join("\n"));
+  const providers = ["openai", "anthropic", "gemini", "p4", "p5", "p6"];
+  const credCodes = await Promise.all(providers.map((p) =>
+    new Promise((res) => {
+      const c = spawn(process.execPath, [credChild, p, `key-${p}`],
+        { env: { ...process.env, UITALK_HOME: credHome }, stdio: "ignore" });
+      c.on("exit", (code) => res(code));
+    })));
+  const finalCreds = JSON.parse(readFileSync(join(credHome, "credentials.json"), "utf8"));
+  check("concurrent credential saves for different providers all survive",
+    providers.every((p) => finalCreds[p] === `key-${p}`),
+    `${Object.keys(finalCreds).length} of ${providers.length}: ${Object.keys(finalCreds).join(",")}`);
+  check("and every credential-saving process exited cleanly",
+    credCodes.every((c) => c === 0), JSON.stringify(credCodes));
 }
 
 // ------------------------------------------------------ turn coordinator (FSM)
