@@ -5,10 +5,10 @@
 
 process.env.UITALK_IMPORT_ONLY = "1"; // importing the bridge must not start one
 
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, statSync, unlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, mkdirSync, statSync, unlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 
 const fail = [];
@@ -152,9 +152,159 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("and one serving a different app is not", !registry.servingApp("127.0.0.1", 9999));
 
   registry.remove(process.pid);
-  check("removing the last entry leaves no file behind", !existsSync(registry.registryPath),
-    existsSync(registry.registryPath) ? readFileSync(registry.registryPath, "utf8") : "gone");
+  check("removing the last entry leaves nothing behind", !existsSync(registry.registryPath),
+    existsSync(registry.registryPath) ? readdirSync(registry.registryPath).join(", ") : "gone");
   check("listing an empty registry is empty, not an error", registry.list().length === 0);
+
+  // A malformed instance file must be ignored (and pruned), not crash listing.
+  registry.add({ pid: process.pid, port: 8402, appHost: "127.0.0.1", appPort: 5175, project: "/c" });
+  writeFileSync(join(registry.registryPath, "garbage.json"), "{ not json");
+  const listedWithGarbage = registry.list();
+  check("a malformed instance file is ignored, not fatal",
+    listedWithGarbage.some((e) => e.pid === process.pid) && listedWithGarbage.every((e) => e.pid !== undefined),
+    JSON.stringify(listedWithGarbage.map((e) => e.pid)));
+  check("and the malformed file is pruned", !existsSync(join(registry.registryPath, "garbage.json")));
+  registry.remove(process.pid);
+}
+
+// ------------------------------------------- registry: concurrent registration
+// The bug this design fixes is cross-process: a shared read-modify-write file
+// lost an update when two bridges started at once. Prove it with real separate
+// processes registering at the same time, each writing only its own entry.
+{
+  const registry = await import("../server/registry.mjs");
+  const regUrl = new URL("../server/registry.mjs", import.meta.url).href;
+  const N = 6;
+  const basePort = 8600;
+
+  // Each child registers under its own live pid, then stays alive on stdin so its
+  // pid is still running when the parent inspects — list() prunes dead ones.
+  const childSrc =
+    `const port = Number(process.env.CHILD_PORT);` +
+    `import(process.env.REG_URL).then((reg) => {` +
+    `  reg.add({ pid: process.pid, port, appHost: "127.0.0.1", appPort: port, project: "/proj-" + port });` +
+    `  process.stdout.write("ready " + process.pid + "\\n");` +
+    `  process.stdin.resume();` +
+    `  process.stdin.on("end", () => process.exit(0));` +
+    `});`;
+
+  const children = [];
+  const readyPid = (child) =>
+    new Promise((resolve) => {
+      let buf = "";
+      child.stdout.on("data", (d) => {
+        buf += d;
+        const m = /ready (\d+)/.exec(buf);
+        if (m) resolve(Number(m[1]));
+      });
+    });
+
+  for (let i = 0; i < N; i++) {
+    const child = spawn(process.execPath, ["-e", childSrc], {
+      env: { ...process.env, CHILD_PORT: String(basePort + i), REG_URL: regUrl },
+      stdio: ["pipe", "pipe", "inherit"],
+    });
+    children.push(child);
+  }
+  const pids = await Promise.all(children.map(readyPid));
+
+  const listed = registry.list();
+  check("every one of N concurrent registrations survives (no lost update)",
+    pids.every((pid) => listed.some((e) => e.pid === pid)) && new Set(pids).size === N,
+    `${listed.filter((e) => pids.includes(e.pid)).length} of ${N} present`);
+
+  // Removing one instance must not remove another.
+  registry.remove(pids[0]);
+  const afterRemove = registry.list();
+  check("removing one instance leaves the others",
+    !afterRemove.some((e) => e.pid === pids[0]) && pids.slice(1).every((pid) => afterRemove.some((e) => e.pid === pid)),
+    JSON.stringify(afterRemove.map((e) => e.pid)));
+
+  for (const pid of pids.slice(1)) registry.remove(pid);
+  for (const child of children) child.stdin.end();
+  await Promise.all(children.map((c) => new Promise((r) => c.on("exit", r))));
+}
+
+// -------------------------------------------- token: concurrent first requests
+// A bridge and its MCP server can ask for the same project's token at the same
+// instant; a shared JSON store let each generate a different one and the second
+// write win, so the MCP client held a token the bridge never accepted. Prove
+// separate processes converge on one token.
+{
+  const tokUrl = new URL("../server/token.mjs", import.meta.url).href;
+  // Each child imports token.mjs, says "ready", then waits at a stdin barrier so
+  // the parent can release them all at the same instant — process-boot jitter
+  // otherwise spaces them out enough to hide the read-modify-write window.
+  const tokChild =
+    `import(process.env.TOK_URL).then((t) => {` +
+    `  process.stdout.write("ready\\n");` +
+    `  process.stdin.once("data", () => {` +
+    `    process.stdout.write("TOKEN " + t.projectToken(process.env.PROJECT) + "\\n");` +
+    `    process.exit(0);` +
+    `  });` +
+    `});`;
+  const tokensFrom = (home, project, n) =>
+    new Promise((resolve) => {
+      const kids = [];
+      const tokens = [];
+      const ready = [];
+      for (let i = 0; i < n; i++) {
+        const c = spawn(process.execPath, ["-e", tokChild], {
+          env: { ...process.env, UITALK_HOME: home, PROJECT: project, TOK_URL: tokUrl },
+          stdio: ["pipe", "pipe", "inherit"],
+        });
+        let buf = "";
+        c.stdout.on("data", (d) => {
+          buf += d;
+          if (/ready/.test(buf) && !c.__ready) {
+            c.__ready = true;
+            ready.push(c);
+            if (ready.length === n) for (const k of ready) k.stdin.write("go\n"); // release together
+          }
+          const m = /TOKEN (\S+)/.exec(buf);
+          if (m && !c.__tok) (c.__tok = true), tokens.push(m[1]);
+        });
+        kids.push(c);
+      }
+      Promise.all(kids.map((c) => new Promise((r) => c.on("exit", r)))).then(() => resolve(tokens));
+    });
+  const tokenFrom = (home, project) => tokensFrom(home, project, 1).then((a) => a[0]);
+
+  const home = mkdtempSync(join(sandbox, "tok-home-"));
+  const projA = mkdtempSync(join(sandbox, "tok-projA-"));
+  const projB = mkdtempSync(join(sandbox, "tok-projB-"));
+
+  // Several processes ask for projA's token at the same instant, before it exists.
+  const tokens = await tokensFrom(home, projA, 8);
+  check("every concurrent first request gets a non-empty token",
+    tokens.length === 8 && tokens.every((t) => t.length > 0), JSON.stringify(tokens.map((t) => t.length)));
+  check("and every process gets the identical token (no split-brain)",
+    new Set(tokens).size === 1, `${new Set(tokens).size} distinct`);
+
+  const later = await tokenFrom(home, projA);
+  check("a later request returns the same token", later === tokens[0], `${later.slice(0, 8)} vs ${tokens[0].slice(0, 8)}`);
+
+  const tokB = await tokenFrom(home, projB);
+  check("a different project gets a different token", tokB !== tokens[0] && tokB.length > 0);
+  check("the same project gets the same token again", (await tokenFrom(home, projA)) === tokens[0]);
+
+  if (process.platform !== "win32") {
+    const tokenFileName = readdirSync(join(home, "tokens")).find((f) => f.endsWith(".token"));
+    const mode = statSync(join(home, "tokens", tokenFileName)).mode & 0o777;
+    check("the token file is owner-only (0600)", mode === 0o600, mode.toString(8));
+  }
+
+  // Legacy migration: a token already in the old tokens.json is reused, not rotated.
+  const legacyHome = mkdtempSync(join(sandbox, "tok-legacy-"));
+  const legacyProj = mkdtempSync(join(sandbox, "tok-legacyproj-"));
+  const legacyKey = realpathSync(legacyProj); // token.mjs keys by realpath on this platform
+  const legacyValue = "legacy0000000000000000000000000000000000000000ab";
+  mkdirSync(legacyHome, { recursive: true });
+  writeFileSync(join(legacyHome, "tokens.json"), JSON.stringify({ [legacyKey]: legacyValue }) + "\n");
+  const migrated = await tokenFrom(legacyHome, legacyProj);
+  check("an existing legacy token is reused, not rotated", migrated === legacyValue, `${migrated.slice(0, 12)}…`);
+  check("and it is now stored in the race-safe per-project file",
+    (await tokenFrom(legacyHome, legacyProj)) === legacyValue);
 }
 
 // ---------------------------------------------------------- protocol boundary
