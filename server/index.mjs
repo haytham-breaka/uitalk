@@ -355,6 +355,11 @@ function approvalPhaseForTest() {
   return approvalPhase;
 }
 
+/** Flip the agent mode a test runs under, to exercise off-mode (MCP) paths. */
+function setAgentForTest(mode) {
+  config = { ...config, agent: mode };
+}
+
 const AGENT_MODES = {
   builtin: "the built-in Claude session",
   adapter: "your own model",
@@ -623,6 +628,10 @@ wss.on("connection", (ws) => {
               `project's conventions rather than pasting the preview CSS verbatim, and do not ` +
               `carry over any data-uitalk-* attribute. Tell me which files you changed.`,
           );
+          // Off mode has no local turn whose end would return the phase to idle:
+          // the MCP client owns the edit and the bridge never sees it finish. Free
+          // the next approval here, so a second one is relayed rather than refused.
+          if (config.agent === "off") approvalPhase = "idle";
         })();
         return;
       }
@@ -724,8 +733,11 @@ function noteTokens(total) {
 async function noteTurnEnded() {
   if (lastChange?.snap && !lastChange.snap.postCaptured) {
     lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap);
-    approvalPhase = "idle";
   }
+  // A finished turn frees the next approval whether or not there was a snapshot to
+  // freeze — a project that is not a git repo has none, and leaving the reset
+  // inside the snapshot branch latched the phase at "editing" and refused it.
+  if (approvalPhase === "editing") approvalPhase = "idle";
   maybeCompact();
 }
 
@@ -1442,6 +1454,7 @@ export {
   setSessionForTest,
   setSnapshotForTest,
   approvalPhaseForTest,
+  setAgentForTest,
   TOKEN as socketToken,
 };
 
