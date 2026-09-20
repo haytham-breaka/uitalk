@@ -946,6 +946,15 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       res.writeHead(200, { "content-type": "text/javascript", etag: 'W/"asset-1"' });
       return res.end("console.log(1)");
     }
+    if (req.url === "/asset-drop") {
+      // Promise 100 bytes, send 7, then abruptly drop the socket — as a dev server
+      // does when it restarts mid-response. The unfulfilled content-length makes
+      // the proxy's upstream response stream emit 'error' (ECONNRESET).
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": "100" });
+      res.write("partial");
+      setTimeout(() => res.socket.destroy(), 20);
+      return;
+    }
     if (req.url === "/cached") {
       // The app's own HTML has not changed, so upstream is right to answer 304. The
       // injected tag is not covered by that validator, which is the whole problem.
@@ -1021,6 +1030,22 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("non-html passes through untouched", (await asset.text()) === "console.log(1)");
   check("and an asset keeps its validator, so reloads stay cheap",
     asset.headers.get("etag") === 'W/"asset-1"', asset.headers.get("etag") ?? "stripped");
+
+  // An upstream that drops the connection mid-asset makes the proxy's upstream
+  // response stream emit 'error'. With no handler that was an uncaught exception
+  // that killed the whole bridge (every open page and agent with it). The client
+  // just sees a dropped response; the proxy must stay up.
+  try {
+    // Time-boxed: without the fix the proxy never tears the client response down,
+    // so this would hang — fail fast instead of stalling the whole suite.
+    const r = await fetch(at("/asset-drop"), { signal: AbortSignal.timeout(3000) });
+    await r.arrayBuffer();
+  } catch {
+    // a dropped connection (or the abort above) surfaces as a fetch error — expected
+  }
+  const afterDrop = await fetch(at("/asset.js"), { signal: AbortSignal.timeout(3000) });
+  check("an upstream drop mid-asset does not crash the proxy",
+    (await afterDrop.text()) === "console.log(1)");
 
   // The bug this guards: the injected tag is not covered by upstream's ETag, so a
   // browser that revalidates gets 304, keeps its cached document, and goes on loading
