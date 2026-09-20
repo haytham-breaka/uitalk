@@ -806,19 +806,33 @@ function noteAgentWrite(path) {
 
 /** Freeze the post-edit state of the last approved change, once, so a later user
  * edit can be told from the agent's own and undo can scope to exactly those files.
- * See snapshots.mjs's captureAfter(). Idempotent. */
+ * See snapshots.mjs's captureAfter(). Idempotent. Never throws: a git failure here
+ * must not propagate, because every caller fires it and forgets it, and its own
+ * caller resets the approval phase right after — a throw would drop the reset and
+ * latch approvals off (see noteTurnEnded). Undo simply degrades to the whole-file
+ * fallback for this change, and the reason is logged rather than lost. */
 async function captureApprovedEdit() {
   if (lastChange?.snap && !lastChange.snap.postCaptured) {
-    lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap, [...turnWrites]);
+    try {
+      lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap, [...turnWrites]);
+    } catch (err) {
+      log(`post-edit capture failed, undo falls back to whole-file for this change: ${err.message}`);
+    }
   }
 }
 
 async function noteTurnEnded() {
-  await captureApprovedEdit();
   // A finished turn frees the next approval whether or not there was a snapshot to
   // freeze — a project that is not a git repo has none, and leaving the reset
-  // inside the snapshot branch latched the phase at "editing" and refused it.
-  if (approvalPhase === "editing") approvalPhase = "idle";
+  // inside the snapshot branch latched the phase at "editing" and refused it. The
+  // reset lives in `finally` so that even if the post-edit capture throws, the
+  // phase still advances and approvals are never wedged off (captureApprovedEdit
+  // already guards this, but the invariant belongs here where the phase lives).
+  try {
+    await captureApprovedEdit();
+  } finally {
+    if (approvalPhase === "editing") approvalPhase = "idle";
+  }
   maybeCompact();
 }
 
