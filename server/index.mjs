@@ -366,6 +366,15 @@ function approvalCapturedForTest() {
   return Boolean(lastChange?.snap?.postCaptured);
 }
 
+// Stands in for `import("@opencode-ai/sdk")` so a test can drive runOpencode's
+// event loop against a fake client — the same seam createAdapter exposes as
+// fetchImpl. A factory (async) so a test can also make it throw for the
+// SDK-not-installed path.
+let opencodeSdkForTest = null;
+function setOpencodeForTest(factory) {
+  opencodeSdkForTest = factory;
+}
+
 const AGENT_MODES = {
   builtin: "the built-in Claude session",
   adapter: "your own model",
@@ -1072,7 +1081,7 @@ const unwrapOpencode = (result) => {
 async function runOpencode() {
   let sdk;
   try {
-    sdk = await import("@opencode-ai/sdk");
+    sdk = opencodeSdkForTest ? await opencodeSdkForTest() : await import("@opencode-ai/sdk");
   } catch (err) {
     log("the OpenCode agent needs @opencode-ai/sdk, which is not installed.");
     log(`  npm install @opencode-ai/sdk   (or run with --agent off / --agent adapter / --agent builtin)`);
@@ -1486,6 +1495,8 @@ export {
   approvalPhaseForTest,
   setAgentForTest,
   approvalCapturedForTest,
+  setOpencodeForTest,
+  runOpencode,
   TOKEN as socketToken,
 };
 
