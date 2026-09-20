@@ -45,8 +45,14 @@ const mayBeDocument = (req) => {
 const CONDITIONAL_HEADERS = ["if-none-match", "if-modified-since", "if-match", "if-unmodified-since"];
 const VALIDATOR_HEADERS = ["etag", "last-modified"];
 
+// The exact marker of an already-injected client: uitalk's own script src, which
+// no ordinary page contains. Matching the bare "data-uitalk" substring instead
+// would wrongly suppress injection on any page that merely mentions it — docs, an
+// example, or an unrelated attribute like data-uitalk-demo.
+const INJECTED_MARKER = "/__uitalk/client.js";
+
 function injectInto(html, tag) {
-  if (html.includes("data-uitalk")) return html;
+  if (html.includes(INJECTED_MARKER)) return html;
   const head = html.search(/<\/head\s*>/i);
   if (head !== -1) return html.slice(0, head) + tag + html.slice(head);
   const body = html.search(/<\/body\s*>/i);
@@ -125,7 +131,7 @@ class InjectClient extends Transform {
     this.preLen += chunk.length;
     const buf = Buffer.concat(this.pre);
     const s = buf.toString("utf8");
-    if (buf.includes("data-uitalk")) {
+    if (s.includes(INJECTED_MARKER)) {
       // already injected upstream (a re-proxied page) — do not inject twice
       this.injected = true;
       this.pre = null;
@@ -175,9 +181,12 @@ export function createProxy({ target, onInject, onHtml, token }) {
       },
       (up) => {
         const headers = { ...up.headers };
-        for (const name of CSP_HEADERS) delete headers[name];
 
         if (!isHtml(headers)) {
+          // A non-HTML response gets nothing injected, so it keeps its own headers —
+          // including any Content-Security-Policy. Stripping CSP is only for the HTML
+          // branch below, where the injected <script> would otherwise be blocked;
+          // doing it here would needlessly weaken an API/JSON/asset response's policy.
           res.writeHead(up.statusCode, headers);
           // If upstream drops mid-asset (a dev server restart, a socket reset),
           // `up` emits 'error'; with no listener that is an uncaught exception
@@ -189,6 +198,10 @@ export function createProxy({ target, onInject, onHtml, token }) {
           return;
         }
 
+        // This IS the HTML we inject a <script> into, so drop any Content-Security-
+        // Policy — a strict one would refuse the injected client. (Only here: see the
+        // non-HTML branch above, which keeps a response's CSP intact.)
+        for (const name of CSP_HEADERS) delete headers[name];
         // We rewrite the body as it streams, so its length is unknown up front and
         // no longer whatever upstream said: drop content-length (the response goes
         // out chunked) and transfer/content-encoding, rather than leaving a stale
