@@ -1214,6 +1214,17 @@ async function runBuiltin() {
       options: {
         cwd: PROJECT,
         mcpServers: { page: pageServer },
+        // Filesystem boundary, builtin mode: these are the Claude Agent SDK's OWN
+        // Read/Edit/Write/Grep/Glob — the same engine and reach as the user's Claude
+        // Code. uitalk does NOT sandbox them to PROJECT; cwd only sets the working
+        // directory, and enforcement is the SDK's permission model (permissionMode
+        // below), not local code. That is deliberate: builtin IS the user's own
+        // trusted coding agent, which already has their machine's access, so pinning
+        // it to the project would diverge from how they run it in a terminal. The
+        // ADAPTER mode is different — it exposes uitalk's own minimal file tools to a
+        // bring-your-own-key model, and THOSE are contained to the project by
+        // realpath (see adapter.mjs's insideForWrite + tools/agent-check.mjs). No
+        // Bash here, so an approved edit reaches source through Edit/Write only.
         allowedTools: ["mcp__page__*", "Read", "Edit", "Write", "Grep", "Glob"],
         permissionMode: "acceptEdits",
         appendSystemPrompt: GUIDANCE,
