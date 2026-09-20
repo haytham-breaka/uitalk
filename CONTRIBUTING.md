@@ -102,7 +102,7 @@ that would pass either way.
 | `tools/capture-check.mjs` | frame strips, click-triggered timelines, region cropping |
 | `tools/agent-check.mjs` | the adapter's loop and wiring, and the panel with no agent |
 | `tools/mcp-check.mjs` | the MCP server end to end, over real stdio JSON-RPC |
-| `tools/server-check.mjs` | settings, keys, registry, git snapshots, proxy, tool handlers |
+| `tools/server-check.mjs` | settings, keys, registry, git snapshots, proxy, tool handlers, the frame router and the OpenCode agent loop |
 | `tools/probe-ws.mjs` | HMR passthrough, including a frame packed into the handshake |
 
 `dom-check` runs the real client against a synthetic DOM. The `fake-page*` and `probe-*`
@@ -120,12 +120,12 @@ node tools/probe-variations.mjs    # screenshot-only request still mounts varian
 
 ### Coverage
 
-`npm run coverage` gates the offline suites at 85% lines. It currently sits at **84.6%**
-(client 89.7%, bridge 77.0%), so **the gate fails on `main`**. The gap is `server/index.mjs`
-at 51.8%: `runOpencode` and the `ask_choice` / `choice_answer` plumbing were merged
-without an offline harness. The fix is a fake `opencode serve`, the way `agent-check`
-already fakes the adapter's endpoint — that's an open piece of work, not a reason to
-lower the threshold.
+`npm run coverage` gates the offline suites at 85% lines. It currently sits at **90%**
+and passes. `server/index.mjs` is the lowest module (~76%): the OpenCode agent loop
+is now exercised offline by faking the SDK (`setOpencodeForTest` in `server-check`, the
+way `agent-check` fakes the adapter's `fetchImpl`), and the `ask_choice` / `choice_answer`
+plumbing is covered too. What's left uncovered there is mostly the parts a test can't
+reach without spending money or holding a port (see below).
 
 `server/index.mjs` will always read lower than the rest: it's mostly the parts a test
 can't reach without spending money or holding a port (binding, the live agent session,

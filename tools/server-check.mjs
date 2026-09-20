@@ -1273,6 +1273,106 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     p.close();
   }
 
+  // -------------------------------------------------- the OpenCode agent loop
+  // runOpencode drives an OpenCode session over the SDK's HTTP client and relays
+  // its event stream into the panel. Fake the SDK — the seam createAdapter gives
+  // as fetchImpl — so the whole loop runs offline, no `opencode` binary needed.
+  {
+    // A pushable async-iterable, standing in for client.event.subscribe's stream.
+    const makeStream = () => {
+      const queued = [];
+      let waiting = null;
+      let closed = false;
+      return {
+        push: (ev) => (waiting ? (waiting({ value: ev, done: false }), (waiting = null)) : queued.push(ev)),
+        end: () => (closed = true, waiting && (waiting({ value: undefined, done: true }), (waiting = null))),
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            queued.length
+              ? Promise.resolve({ value: queued.shift(), done: false })
+              : closed
+                ? Promise.resolve({ value: undefined, done: true })
+                : new Promise((r) => (waiting = r)),
+        }),
+      };
+    };
+
+    const p = makePage();
+    const stream = makeStream();
+    const calls = { prompts: [], permissions: [] };
+    const client = {
+      session: {
+        list: async () => ({ data: [] }),
+        create: async () => ({ data: { id: "S" } }),
+        promptAsync: async ({ body }) => (calls.prompts.push(body), { data: {} }),
+      },
+      event: { subscribe: async () => ({ stream }) },
+      postSessionIdPermissionsPermissionId: async ({ path }) => (calls.permissions.push(path.permissionID), { data: {} }),
+    };
+    bridge.setOpencodeForTest(async () => ({
+      createOpencodeClient: () => client,
+      createOpencode: async () => ({ server: { url: "http://fake", close: () => {} } }),
+    }));
+    bridge.setAgentForTest("opencode");
+    // A config that names uitalk skips runOpencode's "not wired to MCP" warning.
+    writeFileSync(join(process.env.UITALK_PROJECT, "opencode.jsonc"), '{ "mcp": { "uitalk": {} } }\n');
+
+    await bridge.runOpencode();
+    check("an OpenCode session is announced ready to the panel",
+      p.sent.some((f) => f.kind === "status" && /opencode/.test(f.text)), JSON.stringify(p.sent.map((f) => f.kind)));
+
+    // A full turn: prompt -> assistant message -> text delta -> a tool -> idle.
+    p.sent.length = 0;
+    bridge.transcript.length = 0;
+    bridge.pushToAgent("make the header bold");
+    await until(() => calls.prompts.length === 1, "the prompt to reach OpenCode");
+    stream.push({ type: "message.updated", properties: { info: { id: "m1", sessionID: "S", role: "assistant" } } });
+    stream.push({ type: "message.part.delta", properties: { sessionID: "S", messageID: "m1", partID: "t1", field: "text", delta: "I edited Header.tsx." } });
+    stream.push({ type: "message.part.updated", properties: { part: { type: "tool", callID: "c1", tool: "edit_file", sessionID: "S", messageID: "m1", state: { status: "completed" } } } });
+    stream.push({ type: "session.idle", properties: { sessionID: "S" } });
+    await until(() => p.sent.some((f) => f.kind === "turn_end"), "the OpenCode turn to end");
+    check("the model's streamed text reaches the panel", p.sent.some((f) => f.kind === "delta" && /edited Header/.test(f.text)),
+      JSON.stringify(p.sent.map((f) => f.kind)));
+    check("a tool the model used is named in the panel",
+      p.sent.some((f) => f.kind === "tool" && f.name === "edit_file"), JSON.stringify(p.sent.map((f) => f.kind)));
+    check("the finished turn is recorded for replay",
+      bridge.transcript.some((t) => t.role === "agent" && /edited Header/.test(t.text)), JSON.stringify(bridge.transcript));
+
+    // text a delta already covered is not double-relayed by the part's final update.
+    p.sent.length = 0;
+    bridge.pushToAgent("again");
+    await until(() => calls.prompts.length === 2, "the second prompt");
+    stream.push({ type: "message.updated", properties: { info: { id: "m2", sessionID: "S", role: "assistant" } } });
+    stream.push({ type: "message.part.delta", properties: { sessionID: "S", messageID: "m2", partID: "t2", field: "text", delta: "done" } });
+    stream.push({ type: "message.part.updated", properties: { part: { type: "text", id: "t2", text: "done", sessionID: "S", messageID: "m2" } } });
+    stream.push({ type: "session.idle", properties: { sessionID: "S" } });
+    await until(() => p.sent.some((f) => f.kind === "turn_end"), "the second turn to end");
+    check("a part's final update does not re-send text its deltas already sent",
+      p.sent.filter((f) => f.kind === "delta").length === 1, JSON.stringify(p.sent.filter((f) => f.kind === "delta")));
+
+    // A session error surfaces and still ends the turn.
+    p.sent.length = 0;
+    bridge.pushToAgent("break it");
+    await until(() => calls.prompts.length === 3, "the third prompt");
+    stream.push({ type: "session.error", properties: { sessionID: "S", error: { message: "model exploded" } } });
+    await until(() => p.sent.some((f) => f.kind === "error"), "the error to surface");
+    check("a session error is surfaced and still ends the turn",
+      p.sent.some((f) => f.kind === "error" && /exploded/.test(f.text)) && p.sent.some((f) => f.kind === "turn_end"),
+      JSON.stringify(p.sent.map((f) => f.kind)));
+
+    // A permission request is auto-approved (edits are gated by uitalk's approval upstream).
+    stream.push({ type: "permission.updated", properties: { sessionID: "S", id: "perm1" } });
+    await until(() => calls.permissions.includes("perm1"), "the permission to be approved");
+    check("an OpenCode permission request is auto-approved", calls.permissions.includes("perm1"), JSON.stringify(calls.permissions));
+
+    stream.end();
+    bridge.setOpencodeForTest(null);
+    bridge.setAgentForTest("builtin");
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
   // ------------------------------------------------- RPC answers are bound to
   // ------------------------------------------------- the socket asked, not id alone
   {
