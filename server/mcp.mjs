@@ -92,6 +92,7 @@ const answers = [];
 const waitingForAnswer = [];
 // Things that happened in the page which this client has to know about but cannot be
 // told: it is a server, nothing can call it. They ride out on the next tool result.
+const NOTICE_CAP = 64; // most recent bridge notices held for the next tool result
 const notices = [];
 
 function connect() {
@@ -121,6 +122,10 @@ function connect() {
     // so a client does not re-apply an edit the user has just undone.
     if (frame.kind === "notice" && frame.text) {
       notices.push(frame.text);
+      // Flushed on the next tool result; a client that receives notices but never
+      // calls another tool would otherwise let this grow without bound. Keep the
+      // most recent, dropping the oldest — a stale revert notice is the least useful.
+      if (notices.length > NOTICE_CAP) notices.shift();
       return;
     }
 
