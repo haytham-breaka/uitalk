@@ -81,9 +81,30 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   delete process.env.UITALK_COMPACT_AT_PERCENT;
 
   writeFileSync(join(project, ".uitalk.json"), "{ not json");
-  check("a corrupt project file falls back rather than throwing",
-    settings.load(project).compactAtPercent === 11, String(settings.load(project).compactAtPercent));
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => warnings.push(a.join(" "));
+  let corrupt;
+  try {
+    corrupt = settings.load(project);
+  } finally {
+    console.warn = realWarn;
+  }
+  check("a corrupt project file falls back rather than throwing", corrupt.compactAtPercent === 11,
+    String(corrupt.compactAtPercent));
+  check("and the corrupt file is called out, not silently ignored",
+    warnings.some((w) => /\.uitalk\.json/.test(w) && /not valid JSON/.test(w)), warnings.join(" | "));
   rmSync(join(project, ".uitalk.json"));
+  // An absent file, by contrast, is the normal case and must stay silent.
+  const quiet = [];
+  const realWarn2 = console.warn;
+  console.warn = (...a) => quiet.push(a.join(" "));
+  try {
+    settings.load(project);
+  } finally {
+    console.warn = realWarn2;
+  }
+  check("an absent config is silent, not warned about", quiet.length === 0, quiet.join(" | "));
 
   // Who answers the panel is a setting, so a project can commit its own choice.
   const agentOff = settings.validate({ agent: "off" });
