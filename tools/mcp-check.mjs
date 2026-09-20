@@ -19,7 +19,9 @@ const bridge = spawn("node", ["-e", `
   const { createServer } = await import("node:http");
   const http = createServer((req, res) => res.end("ok"));
   http.on("upgrade", (req, socket, head) => {
-    if (req.url !== "/__uitalk/socket") return socket.destroy();
+    // Match on the pathname, like the real bridge — the MCP client now appends a
+    // ?token=… query the exact-string check would (wrongly) reject.
+    if (new URL(req.url, "http://127.0.0.1").pathname !== "/__uitalk/socket") return socket.destroy();
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
   // Exit cleanly on SIGTERM: a killed process writes no coverage, and this child
@@ -170,6 +172,20 @@ check("a user's ask_choice answer reaches a client that cannot be pushed to",
 const noAnswer = await rpc("tools/call", { name: "await_answer", arguments: { timeout: 1000 } });
 check("waiting when nobody answers times out rather than hanging",
   /did not answer/.test(noAnswer.result.content[0].text), noAnswer.result.content[0].text.slice(0, 60));
+
+// Superseding a question must cancel an await still waiting on the previous one:
+// show A, await A, show B — A's await must return "nothing picked" now, so the next
+// approval can't resolve it as if it were A's answer.
+await rpc("tools/call", { name: "show_options", arguments: { ref: 1, options: [{ label: "A1", declarations: "color:red" }, { label: "A2", declarations: "color:blue" }] } });
+const awaitA = rpc("tools/call", { name: "await_choice", arguments: { timeout: 8000 } });
+await new Promise((r) => setTimeout(r, 100)); // let await_choice park its waiter
+await rpc("tools/call", { name: "show_options", arguments: { ref: 2, options: [{ label: "B1", declarations: "color:green" }, { label: "B2", declarations: "color:black" }] } });
+const aSettled = await Promise.race([
+  awaitA.then((r) => r.result.content[0].text),
+  new Promise((res) => setTimeout(() => res(null), 800)),
+]);
+check("superseding a question cancels its still-waiting await, not leaving it to catch the next answer",
+  aSettled !== null && /did not pick anything/.test(aSettled), aSettled ?? "(still waiting — old waiter not cancelled)");
 
 // Something happened in the page that this client has to know about. It cannot be
 // told — it is a server — so it has to arrive on the next thing it asks for.

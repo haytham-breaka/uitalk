@@ -448,8 +448,12 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("and the error names what is registered, to diagnose the mismatch",
     noMatch?.includes(projA) && noMatch?.includes(":8500"), noMatch);
 
-  check("an explicit port to an unregistered bridge is honoured without a token",
-    bridgeUrl({ port: 9999, project: join(sandbox, "not-registered") }) === "ws://127.0.0.1:9999/__uitalk/socket",
+  // The bridge rejects EVERY tokenless connection, so an explicit port to a bridge
+  // not in the registry must still carry a token — derived from UITALK_PROJECT, which
+  // authenticates when it matches the bridge's own project. A tokenless URL here
+  // (the old behavior) could never connect.
+  check("an explicit port to an unregistered bridge derives its token from the given project",
+    bridgeUrl({ port: 9999, project: join(sandbox, "not-registered") }) === urlFor(9999, join(sandbox, "not-registered")),
     bridgeUrl({ port: 9999, project: join(sandbox, "not-registered") }));
   check("an explicit port to a registered bridge still carries that bridge's token",
     bridgeUrl({ port: 8500, project: join(sandbox, "irrelevant") }) === urlFor(8500, projA),
