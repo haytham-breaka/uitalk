@@ -935,6 +935,17 @@ globalThis.UITalk = (() => {
   function tryStyle({ ref, selector, declarations, also }) {
     const { el, sel } = resolveTarget({ ref, selector });
     dismissOptions();
+    // try_style shows one preview at a time — a new call replaces the shared
+    // sheet's single rule. A selector target stamped for a PREVIOUS preview is no
+    // longer styled, so drop its handle: otherwise the stray data-uitalk-target
+    // lingers on the live DOM and reconcileTargets keeps re-resolving a dead
+    // target on every RPC. Keep the one this call just resolved (if it is one).
+    const keep = el.getAttribute(TARGET_ATTR);
+    for (const [token, entry] of targeted) {
+      if (token === keep) continue;
+      entry.el.removeAttribute(TARGET_ATTR);
+      targeted.delete(token);
+    }
     sheet().replaceSync(ruleText(sel, declarations, also));
     return { applied: true, target: identify(el), matchedBy: sel };
   }
