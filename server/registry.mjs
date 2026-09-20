@@ -3,13 +3,20 @@
 // One bridge serves one app. Running four of them against four projects from four
 // terminals is the normal case, not an edge case, so nothing here may assume a
 // fixed port or a single instance.
+//
+// Each bridge owns one file, <home>/instances/<pid>.json, written temp-and-rename
+// so a reader never sees a partial one. A single shared file would need a
+// read-modify-write that two bridges starting at once can lose an update through
+// (both read [], each writes its own single-element array, the second wins); one
+// file per process removes that shared state entirely.
 
-import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const DIR = process.env.UITALK_HOME ?? join(homedir(), ".uitalk");
-const FILE = join(DIR, "instances.json");
+const HOME = process.env.UITALK_HOME ?? join(homedir(), ".uitalk");
+const DIR = join(HOME, "instances");
+const LEGACY = join(HOME, "instances.json"); // the pre-per-pid single-file registry
 
 const alive = (pid) => {
   try {
@@ -20,47 +27,97 @@ const alive = (pid) => {
   }
 };
 
-function read() {
+const entryFile = (pid) => join(DIR, `${pid}.json`);
+
+const validEntry = (e) => Boolean(e) && typeof e === "object" && typeof e.pid === "number";
+
+/** Drop the instances directory when it holds nothing, so "nothing running"
+ * leaves nothing behind — rmdir throws (harmlessly) while it still has files. */
+function pruneEmptyDir() {
   try {
-    const list = JSON.parse(readFileSync(FILE, "utf8"));
-    return Array.isArray(list) ? list : [];
+    rmdirSync(DIR);
+  } catch {}
+}
+
+/** The old single-file registry, if one is still around to migrate. */
+function readLegacy() {
+  try {
+    const list = JSON.parse(readFileSync(LEGACY, "utf8"));
+    return Array.isArray(list) ? list.filter(validEntry) : [];
   } catch {
     return [];
   }
 }
 
-// Temp-and-rename so a reader never sees a half-written file. An empty registry
-// is represented by no file at all, so "nothing running" leaves nothing behind.
-function write(list) {
-  if (!list.length) {
-    try {
-      unlinkSync(FILE);
-    } catch {}
-    return;
-  }
-  mkdirSync(DIR, { recursive: true });
-  const tmp = `${FILE}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(list, null, 2));
-  renameSync(tmp, FILE);
-}
-
-/** Registered instances whose process is still running; prunes the dead ones. */
-export function list() {
-  const live = read().filter((e) => alive(e.pid));
-  if (live.length !== read().length) write(live);
-  return live;
-}
-
 export function add(entry) {
-  write([...list().filter((e) => e.pid !== entry.pid), { ...entry, startedAt: new Date().toISOString() }]);
+  mkdirSync(DIR, { recursive: true });
+  const full = { ...entry, startedAt: entry.startedAt ?? new Date().toISOString() };
+  const file = entryFile(entry.pid);
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(full, null, 2));
+  renameSync(tmp, file); // atomic replace of only this pid's entry
 }
 
 export function remove(pid = process.pid) {
-  write(list().filter((e) => e.pid !== pid));
+  try {
+    unlinkSync(entryFile(pid));
+  } catch {}
+  pruneEmptyDir();
+}
+
+/** Registered instances whose process is still running; prunes the dead ones,
+ * ignores anything malformed, and folds in a legacy single-file registry once. */
+export function list() {
+  const live = new Map(); // pid -> entry
+
+  let names = [];
+  try {
+    names = readdirSync(DIR);
+  } catch {} // no directory yet: nothing registered here
+
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const file = join(DIR, name);
+    let entry;
+    try {
+      entry = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      entry = null;
+    }
+    if (!validEntry(entry) || !alive(entry.pid)) {
+      try {
+        unlinkSync(file); // malformed or dead — prune it
+      } catch {}
+      continue;
+    }
+    live.set(entry.pid, entry);
+  }
+
+  // A registry written by an older build still points at bridges that may be
+  // running. Migrate the live ones forward to per-pid files, then retire the
+  // legacy file so this only happens once.
+  const legacy = readLegacy();
+  if (legacy.length) {
+    for (const entry of legacy) {
+      if (alive(entry.pid) && !live.has(entry.pid)) {
+        live.set(entry.pid, entry);
+        try {
+          add(entry);
+        } catch {}
+      }
+    }
+    try {
+      unlinkSync(LEGACY);
+    } catch {}
+  }
+
+  pruneEmptyDir();
+  return [...live.values()];
 }
 
 /** Another instance already fronting this app is almost always a duplicate. */
 export const servingApp = (appHost, appPort) =>
   list().find((e) => e.appPort === appPort && e.appHost === appHost);
 
-export const registryPath = FILE;
+// The directory the per-instance files live in (was a single JSON file before).
+export const registryPath = DIR;
