@@ -23,6 +23,7 @@ import { WebSocketServer } from "ws";
 import { createAdapter, normalize } from "./adapter.mjs";
 import { createProxy, proxyUpgrade } from "./proxy.mjs";
 import * as registry from "./registry.mjs";
+import { withProjectLock } from "./project-lock.mjs";
 import * as settings from "./settings.mjs";
 import * as snapshots from "./snapshots.mjs";
 import { countUsages } from "./usage.mjs";
@@ -1684,18 +1685,34 @@ function listen(candidates) {
 // held. The legal transitions and their preconditions are in turn-coordinator.mjs.
 let started = false;
 
-function ready() {
+async function ready() {
   // Each retry registers another listen callback, so without this guard a
   // successful bind after a retry would start a second agent session in the
   // same process.
   if (started) return;
   started = true;
 
+  // "Is one already serving this project? if not, claim it" must be indivisible
+  // across processes, or two launchers racing for the same project each see nothing
+  // and both become a bridge for it. Do the check and the registration together
+  // under a per-project lock; a duplicate stands down cleanly rather than running a
+  // second agent session against the same project.
+  const incumbent = await withProjectLock(PROJECT, () => {
+    const existing = registry.list().find((e) => e.project === PROJECT && e.pid !== process.pid);
+    if (existing) return existing;
+    registry.add({ pid: process.pid, port, appHost: APP_HOST, appPort: APP_PORT, project: PROJECT });
+    return null;
+  });
+  if (incumbent) {
+    log(`another bridge (pid ${incumbent.pid}) already serves ${PROJECT} at http://127.0.0.1:${incumbent.port}`);
+    log(`this one is a duplicate; stopping so the two do not both drive the project`);
+    process.exit(0);
+  }
+
   const twin = registry.servingApp(APP_HOST, APP_PORT);
-  if (twin) {
+  if (twin && twin.pid !== process.pid) {
     log(`note: bridge on :${twin.port} (pid ${twin.pid}) already fronts ${APP_HOST}:${APP_PORT}`);
   }
-  registry.add({ pid: process.pid, port, appHost: APP_HOST, appPort: APP_PORT, project: PROJECT });
 
   const others = registry.list().filter((e) => e.pid !== process.pid);
   log(`proxying 127.0.0.1:${port} -> ${APP_HOST}:${APP_PORT}`);
