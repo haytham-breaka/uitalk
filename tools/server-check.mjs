@@ -991,8 +991,10 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
 
   // The snapshot and captureAfter are real git subprocess calls; how long they
   // take is the machine's business, so wait for the state rather than a duration.
+  // The ceiling is a stuck-test backstop, not a deadline — generous enough that a
+  // loaded CI runner spawning git doesn't fail a passing test (10ms x 1500 = 15s).
   const until = async (cond, what) => {
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < 1500; i++) {
       if (cond()) return;
       await new Promise((r) => setTimeout(r, 10));
     }
