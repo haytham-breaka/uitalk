@@ -173,6 +173,56 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     settings.credential("anthropic").key === null, String(settings.credential("anthropic").key));
 }
 
+// ------------------------------------------------------ turn coordinator (FSM)
+{
+  const { TurnCoordinator } = await import("../server/turn-coordinator.mjs");
+  const threw = (fn) => { try { fn(); return false; } catch { return true; } };
+
+  // The legal happy paths.
+  const a = new TurnCoordinator();
+  check("a fresh coordinator is idle", a.isIdle && a.phase === "idle");
+  a.snapshotting();
+  a.editing();
+  check("idle -> snapshotting -> editing is legal", a.phase === "editing");
+  a.settle();
+  check("settling returns to idle", a.isIdle);
+  a.reverting();
+  check("idle -> reverting is legal", a.phase === "reverting");
+  a.settle();
+  check("and reverting settles back to idle", a.isIdle);
+
+  // The illegal transitions must throw, not silently corrupt the phase.
+  const b = new TurnCoordinator();
+  check("editing without a snapshot is refused", threw(() => b.editing()) && b.phase === "idle");
+  check("reverting during a snapshot is refused", (b.snapshotting(), threw(() => b.reverting())) && b.phase === "snapshotting");
+  check("a second snapshot while one is in flight is refused", threw(() => b.snapshotting()));
+  b.editing();
+  check("reverting while editing is refused", threw(() => b.reverting()) && b.phase === "editing");
+  b.settle();
+
+  // clear() abandons whatever was in flight and resets the gated state.
+  const c = new TurnCoordinator();
+  c.snapshotting();
+  c.lastChange = { snap: {}, label: "x" };
+  c.pendingApprovals.push({});
+  c.noteWrite("a.css");
+  c.clear();
+  check("clear() resets phase, lastChange, held approvals and writes",
+    c.isIdle && c.lastChange === null && c.pendingApprovals.length === 0 && c.writes.paths.size === 0 && c.writes.complete);
+
+  // Write attribution: scoped only when complete AND non-empty; otherwise full diff.
+  const w = new TurnCoordinator();
+  check("no writes -> full-diff fallback (null scope)", w.writeScope() === null);
+  w.noteWrite("a.css");
+  w.noteWrite("b.css");
+  check("complete writes -> scoped to those paths",
+    JSON.stringify(w.writeScope()?.sort()) === JSON.stringify(["a.css", "b.css"]));
+  w.markWritesIncomplete();
+  check("an opaque tool makes it incomplete -> full-diff fallback", w.writeScope() === null);
+  w.snapshotting();
+  check("snapshotting() resets the write set", w.writes.paths.size === 0 && w.writes.complete);
+}
+
 // ---------------------------------------------------------------- registry
 {
   const registry = await import("../server/registry.mjs");
@@ -1581,6 +1631,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       JSON.stringify(bridge.transcript));
 
     bridge.setSessionForTest(null);
+    await cleared.catch(() => {}); // let the concurrent New Session fully finish before the next block
     p2.close();
   }
 
