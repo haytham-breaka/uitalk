@@ -28,9 +28,15 @@ import * as snapshots from "./snapshots.mjs";
 import { countUsages } from "./usage.mjs";
 import { findSourceCandidates } from "./candidates.mjs";
 import { ensureUitalkMcp } from "./opencode-config.mjs";
+import { TurnCoordinator } from "./turn-coordinator.mjs";
 import { isFrame } from "./protocol.mjs";
 import { projectToken } from "./token.mjs";
 import { timingSafeEqual } from "node:crypto";
+
+// The turn/approval lifecycle FSM and the state it gates (phase, lastChange,
+// pendingApprovals, write attribution). The builtin inbox below (backlog/wake/
+// internal/builtinTurnOpen) is transport and stays separate.
+const coord = new TurnCoordinator();
 
 // A fixed port would stop the second bridge from ever starting. An explicit
 // UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
@@ -351,7 +357,7 @@ function setSessionForTest(s) {
   session = s;
   builtinTurnOpen = false;
   backlog.length = 0;
-  pendingApprovals.length = 0;
+  coord.clear();
   const stale = new Error("the test session was replaced");
   while (afterBuiltinTurn.length) afterBuiltinTurn.shift().fail?.(stale);
   if (internal) {
@@ -373,7 +379,7 @@ function setSnapshotForTest(fn) {
 /** captureAfter() sends no panel frame of its own, so a test polls this instead
  * of sleeping for a duration a slower machine may not honour. */
 function approvalPhaseForTest() {
-  return approvalPhase;
+  return coord.phase;
 }
 
 /** Flip the agent mode a test runs under, to exercise off-mode (MCP) paths. */
@@ -384,13 +390,13 @@ function setAgentForTest(mode) {
 /** Whether the last approved change's post-edit state has been frozen — a test
  * polls this instead of sleeping, since captureAfter() emits no frame. */
 function approvalCapturedForTest() {
-  return Boolean(lastChange?.snap?.postCaptured);
+  return Boolean(coord.lastChange?.snap?.postCaptured);
 }
 
 /** The write-attribution this turn, for tests: the recorded paths and whether that
  * set is complete (no opaque/shell tool ran that could have written elsewhere). */
 function turnWritesForTest() {
-  return { paths: [...turnWrites.paths], complete: turnWrites.complete };
+  return { paths: [...coord.writes.paths], complete: coord.writes.complete };
 }
 
 // Stands in for `import("@opencode-ai/sdk")` so a test can drive runOpencode's
@@ -425,13 +431,12 @@ const backlog = [];
 let builtinTurnOpen = false;
 const afterBuiltinTurn = [];
 
-// Approvals that arrived while an agent turn was still streaming. Processing one
-// then would snapshot the pre-edit state against the WRONG turn: the unrelated
-// turn's end runs the post-edit capture before the approved edit is even made,
-// finalizing an empty snapshot so undo silently does nothing. So an approval that
-// races a turn waits here and is processed once that turn ends — the same point
-// the normal (no-turn-in-flight) approval would have snapshotted from.
-const pendingApprovals = [];
+// Approvals that arrive while an agent turn is still streaming wait in
+// coord.pendingApprovals: processing one then would snapshot the pre-edit state
+// against the WRONG turn (its end runs the post-edit capture before the approved
+// edit is even made, finalizing an empty snapshot so undo silently does nothing),
+// so they are held and processed once that turn ends — the point the normal
+// (no-turn-in-flight) approval would have snapshotted from.
 
 /** Whether an ordinary CHAT turn is streaming right now, across modes — the only
  * kind whose end runs the post-edit capture, so the only kind an approval must not
@@ -579,18 +584,18 @@ wss.on("connection", (ws) => {
         // lastChange the instant that snapshot resolved. A revert is issued at
         // "idle", so this refuses only the overlap. (The legitimate off-mode case,
         // idle but not yet committed, is caught by the postCaptured gate below.)
-        if (approvalPhase !== "idle") {
+        if (!coord.isIdle) {
           toPanel({
             kind: "reverted",
             ok: false,
-            text: approvalPhase === "reverting"
+            text: coord.phase === "reverting"
               ? "already undoing the last change — wait for that to finish"
               : "the agent hasn't finished making this change yet — wait for it to finish, then undo",
           });
           return;
         }
         void (async () => {
-          if (!lastChange?.snap) {
+          if (!coord.lastChange?.snap) {
             toPanel({ kind: "reverted", ok: false, text: "there is nothing to go back to" });
             return;
           }
@@ -598,7 +603,7 @@ wss.on("connection", (ws) => {
           // genuinely finished (see noteTurnEnded()). Reverting before then would
           // race that turn's own writes with git checkout — safer to say so than
           // to interleave with a file the agent may still be in the middle of.
-          if (!lastChange.snap.postCaptured) {
+          if (!coord.lastChange.snap.postCaptured) {
             toPanel({
               kind: "reverted",
               ok: false,
@@ -606,11 +611,12 @@ wss.on("connection", (ws) => {
             });
             return;
           }
-          approvalPhase = "reverting";
+          const change = coord.lastChange;
+          coord.reverting();
           try {
-            const out = await snapshots.revertTo(PROJECT, lastChange.snap);
+            const out = await snapshots.revertTo(PROJECT, change.snap);
             log(
-              `revert of "${lastChange.label}": restored ${out.reverted.length}, ` +
+              `revert of "${change.label}": restored ${out.reverted.length}, ` +
                 `removed ${out.removed.length}, left ${out.skipped.length} alone (edited again since)`,
             );
             toPanel({
@@ -620,7 +626,7 @@ wss.on("connection", (ws) => {
               removed: out.removed,
               skipped: out.skipped,
               note: out.note,
-              label: lastChange.label,
+              label: change.label,
             });
             const summary =
               [
@@ -633,23 +639,23 @@ wss.on("connection", (ws) => {
                 .filter(Boolean)
                 .join(". ") || "nothing changed";
             notifyAgents(
-              `The user reverted the last change ("${lastChange.label}"). ${summary}. ` +
+              `The user reverted the last change ("${change.label}"). ${summary}. ` +
                 `Do not re-apply it unless asked.`,
             );
             pushToAgent(
-              `I reverted the last change ("${lastChange.label}") in the working tree. ${summary}. ` +
+              `I reverted the last change ("${change.label}") in the working tree. ${summary}. ` +
                 `Do not re-apply it unless I ask.`,
             );
-            lastChange = null;
-            approvalPhase = "idle";
+            coord.lastChange = null;
+            coord.settle();
           } catch (err) {
-            approvalPhase = "idle";
+            coord.settle();
             toPanel({ kind: "reverted", ok: false, text: err.message });
             // A successful revert starts a turn (its notice to the agent) whose end
             // drains any approval held during the revert; a failed one starts no
             // turn, so drain here or the held approval waits for an unrelated future
             // turn. Skip if a chat turn is still streaming — its end will do it.
-            if (!agentBusy() && pendingApprovals.length) beginApproval(pendingApprovals.shift());
+            if (!agentBusy() && coord.pendingApprovals.length) beginApproval(coord.pendingApprovals.shift());
           }
         })();
         return;
@@ -677,7 +683,7 @@ wss.on("connection", (ws) => {
       // to exactly those files instead of refusing forever. The client may name the
       // files it changed; normalize each through noteAgentWrite (project-relative,
       // in-root only — a path outside the project is ignored) so undo scopes to just
-      // those. With no usable list, turnWrites stays empty and captureApprovedEdit
+      // those. With no usable list, coord.writes stays empty and captureApprovedEdit
       // falls back to the full diff, exactly as before.
       case "note_edit": {
         if (Array.isArray(frame.files)) {
@@ -691,7 +697,7 @@ wss.on("connection", (ws) => {
           toPanel({ kind: "approval_rejected", label: frame.label, text: "that approval was missing its label or declarations" });
           return;
         }
-        if (approvalPhase !== "idle") {
+        if (!coord.isIdle) {
           toPanel({
             kind: "approval_rejected",
             label: frame.label,
@@ -704,7 +710,7 @@ wss.on("connection", (ws) => {
         // an empty capture and break undo). Hold it; noteTurnEnded starts it once
         // the turn ends, exactly where a non-racing approval would have begun.
         if (agentBusy()) {
-          pendingApprovals.push(frame);
+          coord.pendingApprovals.push(frame);
           return;
         }
         beginApproval(frame);
@@ -811,21 +817,13 @@ function noteTokens(total) {
  * post-edit state gets frozen, once, before a later user edit could otherwise
  * be mistaken for the agent's own change. See snapshots.mjs's captureAfter().
  */
-// The project-relative paths the agent has written since the current approval, as
-// reported by its own tools (builtin's tool_use, the adapter's file tools,
-// OpenCode's tool events). Undo scopes to these so a file the user edited while the
-// agent was working — which also differs from the snapshot — is not swept in. Reset
-// when an approval takes its snapshot; empty when the writes are invisible to the
-// bridge (an MCP client), in which case captureAfter falls back to the full diff.
-// What the agent wrote this turn, so undo can scope to exactly those files rather
-// than the whole diff (which would also sweep in a file the user edited while the
-// agent worked). `complete` says whether that set is the WHOLE story: it stays true
-// only while every tool the agent ran was a structured write (path recorded) or a
-// known read. The moment a tool runs that could mutate files at paths we cannot see
-// — a shell/bash tool, or any tool we don't recognize — it flips false, and undo
-// falls back to the full diff rather than silently missing that write. Reset when
-// an approval takes its snapshot.
-let turnWrites = { paths: new Set(), complete: true };
+// What the agent wrote this turn lives in coord.writes { paths, complete }: undo
+// scopes to those paths so a file the user edited while the agent worked (which also
+// differs from the snapshot) is not swept in. `complete` stays true only while every
+// tool the agent ran was a structured write (path recorded) or a known read; the
+// moment a tool runs that could mutate files at paths we cannot see — a shell/bash
+// tool, or any tool we don't recognize — it flips false and undo falls back to the
+// full diff rather than silently missing that write. Reset when an approval snapshots.
 
 // The Claude Agent SDK's file-writing tools, whose tool_use input names the path
 // touched, and its read/search tools, which don't mutate the tree. Recording a path
@@ -844,18 +842,18 @@ const OPENCODE_READ_TOOLS = new Set(["read", "grep", "glob", "list", "ls"]);
  * incomplete — we know a write happened but not where. */
 function noteAgentWrite(path) {
   if (typeof path !== "string" || !path) {
-    turnWrites.complete = false;
+    coord.markWritesIncomplete();
     return;
   }
   const rel = relative(PROJECT, resolve(PROJECT, path));
-  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) turnWrites.paths.add(rel.split(sep).join("/"));
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) coord.noteWrite(rel.split(sep).join("/"));
 }
 
 /** A tool ran that could have mutated files at paths the bridge cannot determine
  * (a shell tool, or one we don't recognize). Undo must then fall back to the full
  * diff, since scoping to the known writes could silently miss this one. */
 function markOpaqueTool() {
-  turnWrites.complete = false;
+  coord.markWritesIncomplete();
 }
 
 /** Classify a tool the agent just used for write-attribution: a structured write
@@ -880,14 +878,13 @@ function noteOpencodeTool(tool, input) {
  * latch approvals off (see noteTurnEnded). Undo simply degrades to the whole-file
  * fallback for this change, and the reason is logged rather than lost. */
 async function captureApprovedEdit() {
-  if (lastChange?.snap && !lastChange.snap.postCaptured) {
+  if (coord.lastChange?.snap && !coord.lastChange.snap.postCaptured) {
     try {
       // Scope to the agent's own writes only when we saw the WHOLE set: every tool
       // was a structured write or a known read. If a shell/opaque tool ran, or no
       // structured write was seen at all (an MCP client's edit is invisible here),
-      // fall back to the full diff so no write is missed.
-      const scoped = turnWrites.complete && turnWrites.paths.size ? [...turnWrites.paths] : null;
-      lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap, scoped);
+      // writeScope() returns null and captureAfter falls back to the full diff.
+      coord.lastChange.snap = await snapshots.captureAfter(PROJECT, coord.lastChange.snap, coord.writeScope());
     } catch (err) {
       log(`post-edit capture failed, undo falls back to whole-file for this change: ${err.message}`);
     }
@@ -904,12 +901,12 @@ async function noteTurnEnded() {
   try {
     await captureApprovedEdit();
   } finally {
-    if (approvalPhase === "editing") approvalPhase = "idle";
+    if (coord.phase === "editing") coord.settle();
   }
   // A turn just ended, so the queue serializes no other turn against it now: an
   // approval that arrived mid-turn can be snapshotted here, lined up with its own
   // edit turn rather than the one that just finished.
-  if (approvalPhase === "idle" && pendingApprovals.length) beginApproval(pendingApprovals.shift());
+  if (coord.isIdle && coord.pendingApprovals.length) beginApproval(coord.pendingApprovals.shift());
   maybeCompact();
 }
 
@@ -917,8 +914,7 @@ async function noteTurnEnded() {
  * turn. Split out of the "approval" frame handler so a mid-turn approval held in
  * pendingApprovals can be started later, from noteTurnEnded, on identical terms. */
 function beginApproval(frame) {
-  approvalPhase = "snapshotting";
-  turnWrites = { paths: new Set(), complete: true }; // scope this approval's undo to what the agent writes from here
+  coord.snapshotting(); // idle -> snapshotting; also resets this approval's write set
   record("me", `approved: ${frame.label}`);
   // Neither the external-agent notice nor the edit instruction may reach an agent
   // until the pre-edit snapshot exists — otherwise the agent's own write can land
@@ -934,17 +930,22 @@ function beginApproval(frame) {
       // must never leave the phase latched at "snapshotting" or become an unhandled
       // rejection: return to idle, tell the user, and let the next approval run.
       log(`could not prepare undo for approval "${frame.label}": ${err.message}`);
-      approvalPhase = "idle";
+      coord.settle();
       toPanel({
         kind: "approval_rejected",
         label: frame.label,
         text: `couldn't prepare undo for this change (${err.message}) — try approving it again`,
       });
-      if (!agentBusy() && pendingApprovals.length) beginApproval(pendingApprovals.shift());
+      if (!agentBusy() && coord.pendingApprovals.length) beginApproval(coord.pendingApprovals.shift());
       return;
     }
-    lastChange = { snap, label: frame.label };
-    approvalPhase = "editing";
+    // A New Session (or a test swapping the session) can clear the lifecycle while
+    // the snapshot is still resolving. If it did, the phase is no longer
+    // "snapshotting" — this approval was abandoned, so drop it rather than force it
+    // to "editing" and push an edit into a session that is gone.
+    if (coord.phase !== "snapshotting") return;
+    coord.lastChange = { snap, label: frame.label };
+    coord.editing();
     toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label });
     toAgents(frame); // an external agent cannot be sent a message; it waits for this
     pushToAgent(
@@ -961,7 +962,7 @@ function beginApproval(frame) {
     // Off mode has no local turn whose end would return the phase to idle: the MCP
     // client owns the edit and the bridge never sees it finish. Free the next
     // approval here, so a second one is relayed rather than refused.
-    if (config.agent === "off") approvalPhase = "idle";
+    if (config.agent === "off") coord.settle();
   })();
 }
 
@@ -1082,16 +1083,14 @@ async function clearSession() {
   if (session) await session.clear().catch((err) => log(`clear failed: ${err.message}`));
   transcript.length = 0;
   resetContextMeter();
-  lastChange = null;
-  approvalPhase = "idle"; // abandon any approval whose turn will now never end
+  coord.clear(); // abandon any in-flight approval, held approvals, and its undo point
   // A new session also abandons any in-flight builtin turn and everything queued
   // behind it: unsent prompts in the backlog, internal asks waiting on a turn that
-  // will now never end, and approvals held for a turn that is being discarded.
+  // will now never end (the held approvals were just cleared above).
   // Leaving builtinTurnOpen set would strand the next approval (held as if a turn
   // were still streaming) and the next askAgent (queued behind a phantom turn).
   builtinTurnOpen = false;
   backlog.length = 0;
-  pendingApprovals.length = 0;
   const abandoned = new Error("the session was cleared");
   while (afterBuiltinTurn.length) afterBuiltinTurn.shift().fail?.(abandoned);
   toPanel({ kind: "cleared" });
@@ -1678,17 +1677,11 @@ function listen(candidates) {
   http.listen(next, "127.0.0.1", ready);
 }
 
-let lastChange = null;
-
-// One approval's snapshot-then-edit lifecycle at a time. "idle": nothing in
-// flight, or the previous edit's turn already ended and got captured — a new
-// approval may proceed. "snapshotting": the pre-edit snapshot hasn't resolved
-// yet, so the agent must not be told about the edit. "editing": the agent has
-// the instruction and is expected to write, and captureAfter() is still owed
-// once its turn ends (see noteTurnEnded()). A second approval arriving in
-// either of the non-idle phases is refused rather than raced — see the
-// "approval" case below.
-let approvalPhase = "idle";
+// The approval lifecycle (phase, lastChange, pendingApprovals, write attribution)
+// lives in `coord` (a TurnCoordinator, declared near the top). One approval's
+// snapshot-then-edit runs at a time: idle -> snapshotting -> editing -> idle, or
+// idle -> reverting -> idle; a second approval arriving mid-lifecycle is refused or
+// held. The legal transitions and their preconditions are in turn-coordinator.mjs.
 let started = false;
 
 function ready() {
