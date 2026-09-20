@@ -1193,6 +1193,14 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     String(bridge.context.tokens));
   bridge.resetContextMeter();
   check("resetting clears the meter", bridge.context.tokens === 0 && bridge.context.percent === 0);
+
+  // A long session with no compaction must not grow the dedup set without bound.
+  for (let i = 0; i < 2000; i++) {
+    bridge.noteUsage({ type: "assistant", message: { id: `seen-${i}`, usage: { input_tokens: 1 } } });
+  }
+  check("the usage-dedup set is bounded, not grown for the whole session",
+    bridge.context.seen.size <= 512, `seen=${bridge.context.seen.size}`);
+  bridge.resetContextMeter();
 }
 
 // --------------------------------------------------------------- page tools
