@@ -179,6 +179,12 @@ export function createProxy({ target, onInject, onHtml, token }) {
 
         if (!isHtml(headers)) {
           res.writeHead(up.statusCode, headers);
+          // If upstream drops mid-asset (a dev server restart, a socket reset),
+          // `up` emits 'error'; with no listener that is an uncaught exception
+          // that takes down the whole bridge. Tear the response down instead. Pair
+          // it with the reverse so a client that aborts doesn't crash us either.
+          up.on("error", () => res.destroy());
+          res.on("error", () => up.destroy());
           up.pipe(res);
           return;
         }
@@ -202,7 +208,13 @@ export function createProxy({ target, onInject, onHtml, token }) {
         // A bounded copy is kept for locate_source (see onHtml): enough to place an
         // element, not the whole SSR stream.
         const inject = new InjectClient(clientTag, (html) => onHtml?.(req.url, html));
-        up.on("error", () => res.destroy());
+        // Any stream in the chain can fail — upstream dropping, the transform
+        // throwing, the client aborting — and an unhandled 'error' on any of them
+        // would crash the bridge. Tear the whole chain down on any of them.
+        const teardown = () => { up.destroy(); inject.destroy(); res.destroy(); };
+        up.on("error", teardown);
+        inject.on("error", teardown);
+        res.on("error", teardown);
         inject.on("end", () => onInject?.(req.url));
         up.pipe(inject).pipe(res);
       },
@@ -212,10 +224,14 @@ export function createProxy({ target, onInject, onHtml, token }) {
       // A dev server that restarted on a different port is the usual cause, and a
       // bare ECONNREFUSED gives no hint of it. Look before reporting.
       const elsewhere = await findDevServers(target.port);
+      if (res.headersSent) return res.destroy(); // already streaming a body; can't send a 502 now
       res.writeHead(502, { "content-type": "text/html; charset=utf-8" });
       res.end(diagnosis({ target, err, elsewhere, clientTag }));
     });
 
+    // A client that aborts its request mid-upload would otherwise surface as an
+    // unhandled 'error' on req; drop the upstream leg with it.
+    req.on("error", () => upstream.destroy());
     req.pipe(upstream);
   };
 }
