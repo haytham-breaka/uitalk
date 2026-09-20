@@ -271,19 +271,24 @@ const pending = new Map();
 // the selection is somebody else's — so route to the page the user last used.
 let activePage = null;
 
-// Not every socket is a page. A standalone MCP server connects here too, on behalf
-// of an editor that is not Claude Code; it must never be mistaken for a page to send
-// requests to, and it needs to hear about approvals a page cannot push to it.
+// A socket's role is not known the instant it connects — it is in `clients` but
+// has said nothing yet. Only once it identifies itself do we know: a page (the
+// injected client's hello/focus) or an agent (a standalone MCP server's
+// role:"agent" hello). Until then it is neither, and a page RPC must not be
+// routed to it — inferring "page" from "in clients, not yet in agents" would send
+// a page's question to an MCP socket during that opening window, where it can
+// never be answered. So a page is only ever a socket that announced itself as one.
 const agents = new Set();
+const pages = new Set();
 
 function markActive(ws) {
-  if (!agents.has(ws)) activePage = ws;
+  if (pages.has(ws)) activePage = ws;
 }
 
 function currentPage() {
-  if (activePage && activePage.readyState === activePage.OPEN && !agents.has(activePage)) return activePage;
-  const open = [...clients].filter((ws) => ws.readyState === ws.OPEN && !agents.has(ws));
-  return open.at(-1) ?? null; // most recently connected
+  if (activePage && activePage.readyState === activePage.OPEN && pages.has(activePage)) return activePage;
+  const open = [...pages].filter((ws) => ws.readyState === ws.OPEN);
+  return open.at(-1) ?? null; // most recently announced page
 }
 
 const toAgents = (frame) => {
@@ -471,6 +476,7 @@ wss.on("connection", (ws) => {
       case "hello":
       case "focus": {
         if (frame.role === "agent") {
+          pages.delete(ws);
           agents.add(ws);
           log(`an external agent attached (${agents.size} connected)`);
           return;
@@ -480,7 +486,9 @@ wss.on("connection", (ws) => {
         // visible, on window focus, and on a click inside the panel. Every other
         // frame kind is something a page sends once it is already the active one,
         // not evidence that a different, possibly stale or background, socket
-        // deserves to become it.
+        // deserves to become it. This is also where an unclassified socket becomes
+        // a known page, so a page RPC can be routed to it.
+        pages.add(ws);
         markActive(ws);
         const others = [...clients].filter((c) => c !== ws && c.readyState === c.OPEN).length;
         toPanel({ kind: "pages", total: others + 1, activeUrl: frame.url });
@@ -676,6 +684,7 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     clients.delete(ws);
     agents.delete(ws);
+    pages.delete(ws);
     if (activePage === ws) activePage = null;
     rejectPending(ws);
     log(`page disconnected (${clients.size} open)`);

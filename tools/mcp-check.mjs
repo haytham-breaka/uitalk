@@ -55,6 +55,10 @@ page.on("message", (raw) => {
   page.send(JSON.stringify({ kind: "rpc_result", id: f.id, result }));
 });
 await new Promise((r) => page.on("open", r));
+// The real injected client announces itself on connect (client/ui.js's hello);
+// the bridge routes page RPCs only to a socket that has, so do the same here.
+page.send(JSON.stringify({ kind: "hello", url: "http://127.0.0.1:8400/", visible: true }));
+await new Promise((r) => setTimeout(r, 50));
 
 // The MCP client: plain JSON-RPC over the server's stdio.
 const mcp = spawn("node", ["server/mcp.mjs"], {

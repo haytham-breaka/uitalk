@@ -1740,6 +1740,45 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     a.close();
     b.close();
   }
+
+  // ------------------------------------------------- role-classification window
+  // A socket is in `clients` the instant it connects, before it has said whether
+  // it is a page or an MCP agent. A page RPC must not be routed to such an
+  // unclassified socket — it could be an MCP client that cannot answer. Start from
+  // an empty set so the fallback (not activePage) is what's exercised.
+  {
+    for (const c of [...bridge.clients]) c.close();
+
+    const unclassified = makePage(); // connected, has announced nothing yet
+    unclassified.sent.length = 0;
+    let rejected = null;
+    await bridge.callPage("readSelection", {}, 200).catch((e) => (rejected = e.message));
+    check("a page RPC is refused, not routed to an unclassified socket",
+      /no page is connected/.test(rejected ?? "") && !unclassified.sent.some((f) => f.kind === "rpc"),
+      `${rejected} · sent=${JSON.stringify(unclassified.sent.map((f) => f.kind))}`);
+
+    // Once it announces itself as a page it becomes a valid RPC target.
+    unclassified.deliver({ kind: "focus", url: "http://127.0.0.1:8400/", visible: true });
+    unclassified.sent.length = 0;
+    const inflight = bridge.callPage("readSelection", {}, 500);
+    check("a socket that has announced itself as a page does receive the RPC",
+      unclassified.sent.some((f) => f.kind === "rpc"), JSON.stringify(unclassified.sent.map((f) => f.kind)));
+    const rpc = unclassified.sent.find((f) => f.kind === "rpc");
+    if (rpc) unclassified.deliver({ kind: "rpc_result", id: rpc.id, result: {} });
+    await inflight;
+
+    // A socket that declares itself an agent is never used as the page fallback.
+    const agentish = makePage();
+    agentish.deliver({ kind: "hello", role: "agent" });
+    unclassified.close();
+    agentish.sent.length = 0;
+    let noPage = null;
+    await bridge.callPage("readSelection", {}, 200).catch((e) => (noPage = e.message));
+    check("an agent socket is never the page fallback",
+      /no page is connected/.test(noPage ?? "") && !agentish.sent.some((f) => f.kind === "rpc"),
+      `${noPage} · sent=${JSON.stringify(agentish.sent.map((f) => f.kind))}`);
+    agentish.close();
+  }
 }
 
 // ------------------------------------------ the WebSocket upgrade trust boundary
