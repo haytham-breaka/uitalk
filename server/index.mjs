@@ -911,23 +911,37 @@ let internal = null;
 
 function askAgent(text, timeoutMs) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    // Every exit runs through here: it clears the timer, unhooks this ask from
+    // wherever it is parked (the queue or the live slot), and settles once.
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const queued = afterBuiltinTurn.indexOf(arm);
+      if (queued !== -1) afterBuiltinTurn.splice(queued, 1);
+      if (internal === waiter) internal = null;
+      fn(arg);
+    };
+    const waiter = {
+      buffer: "",
+      done: (value) => settle(resolve, value),
+      fail: (err) => settle(reject, err),
+    };
     const arm = () => {
-      const timer = setTimeout(() => {
-        internal = null;
-        reject(new Error("the agent did not finish in time"));
-      }, timeoutMs);
-      internal = {
-        buffer: "",
-        done: (value) => {
-          clearTimeout(timer);
-          internal = null;
-          resolve(value);
-        },
-      };
+      if (settled) return; // timed out or was released before its turn came up
+      internal = waiter;
       pushToAgent(text);
     };
-    // An ordinary turn already has the SDK's one "result" event spoken for;
-    // arming here too would steal it. Wait for that turn to finish first.
+    arm.fail = waiter.fail;
+    // Arm the timeout when the ask is made, not inside arm(): an ask queued behind
+    // an open turn must still time out even if that turn never ends (the SDK loop
+    // dying mid-turn emits no "result", so the queue would otherwise never drain
+    // and this promise would leak — wedging the compaction/clear that awaits it).
+    timer = setTimeout(() => waiter.fail(new Error("the agent did not finish in time")), timeoutMs);
+    // An ordinary turn already has the SDK's one "result" event spoken for; arming
+    // here too would steal it. Wait for that turn to finish first.
     if (builtinTurnOpen) afterBuiltinTurn.push(arm);
     else arm();
   });
@@ -1072,6 +1086,17 @@ async function runBuiltin() {
   } catch (err) {
     log("agent session ended:", err.message);
     toPanel({ kind: "error", text: err.message });
+  } finally {
+    // The SDK loop is gone; it will emit no more "result" events. Release anything
+    // waiting on one — the live internal ask and any queued behind it — so a
+    // compaction or clear awaiting it fails fast instead of waiting out its full
+    // timeout, and no waiter promise is left dangling.
+    builtinTurnOpen = false;
+    const ended = new Error("the agent session ended before this finished");
+    const live = internal;
+    internal = null;
+    live?.fail?.(ended);
+    while (afterBuiltinTurn.length) afterBuiltinTurn.shift().fail?.(ended);
   }
 }
 
