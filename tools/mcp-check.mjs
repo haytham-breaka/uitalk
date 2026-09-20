@@ -102,6 +102,20 @@ check("a mutating tool is not flagged read-only",
   listed.result.tools.find((t) => t.name === "try_style")?.annotations?.readOnlyHint === false);
 check("schemas are real JSON Schema, not a Zod object",
   listed.result.tools.every((t) => t.inputSchema?.type === "object"));
+{
+  const opts = listed.result.tools.find((t) => t.name === "show_options")?.inputSchema?.properties?.options;
+  check("MCP exposes show_options' minItems/maxItems constraint",
+    opts?.minItems === 2 && opts?.maxItems === 10, JSON.stringify(opts && { minItems: opts.minItems, maxItems: opts.maxItems }));
+}
+
+// A malformed tool call is rejected at the boundary with a useful message, and
+// never reaches the page (asked stays empty for it).
+const beforeBad = asked.length;
+const badOptions = await rpc("tools/call", { name: "show_options", arguments: { options: [] } });
+check("show_options with too few options fails cleanly over the real MCP path",
+  badOptions.result?.isError === true && /between 2 and 10/.test(badOptions.result.content[0].text),
+  badOptions.result?.content?.[0]?.text?.slice(0, 60));
+check("and the malformed show_options never reached the page", asked.length === beforeBad);
 
 const noted = await rpc("tools/call", { name: "note_edit", arguments: {} });
 check("note_edit is callable and acknowledges over stdio",

@@ -138,6 +138,18 @@ const check = (n, ok, d) => {
     !("properties" in decl.parameters) && !("required" in decl.parameters),
     JSON.stringify(decl.parameters));
 
+  // A schema constraint (show_options' minItems/maxItems) must survive shaping for
+  // every provider — including gemini's stripEmpty — or a client would not enforce it.
+  const { toolDefinitions } = await import("../server/tool-defs.mjs");
+  const showDef = toolDefinitions(async () => ({})).find((d) => d.name === "show_options");
+  const kept = (opts) => opts?.minItems === 2 && opts?.maxItems === 10;
+  check("openai keeps show_options' minItems/maxItems",
+    kept(providers.openai.body("m", "S", history, [showDef]).tools[0].function.parameters.properties.options));
+  check("anthropic keeps show_options' minItems/maxItems",
+    kept(providers.anthropic.body("m", "S", history, [showDef]).tools[0].input_schema.properties.options));
+  check("gemini's stripEmpty keeps show_options' minItems/maxItems",
+    kept(providers.gemini.body("m", "S", history, [showDef]).tools[0].functionDeclarations[0].parameters.properties.options));
+
   // The one real difference between the three: where an image may appear.
   const call = { id: "c1", name: "capture" };
   const shot = [{ text: "Frame 1" }, { png: "PNGDATA" }];

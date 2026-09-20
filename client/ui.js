@@ -760,6 +760,11 @@
 
   /** ask_choice's question, rendered as tappable buttons instead of retyped text. */
   function renderAskChoice({ question, options = [] }) {
+    // Defense in depth behind the tool boundary, so a malformed request cannot
+    // render a question with no answers.
+    if (typeof question !== "string" || !Array.isArray(options) || options.length < 2 || options.length > 6) {
+      throw new Error("ask_choice needs a question and between 2 and 6 options");
+    }
     const el = say("agent", question);
     const box = document.createElement("div");
     box.className = "choices";

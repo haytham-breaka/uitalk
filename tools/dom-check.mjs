@@ -185,6 +185,35 @@ check("chosen option carries identity + page", chosen.label === "Bold" && chosen
 UITalk.resetPreview();
 check("reset drops every preview sheet", window.document.adoptedStyleSheets.length === 0, String(window.document.adoptedStyleSheets.length));
 
+// --- show_options guards against a malformed request rather than adopt(undefined)
+{
+  const threw = (fn) => { try { fn(); return false; } catch { return true; } };
+  const sheetsBefore = window.document.adoptedStyleSheets.length;
+  check("show_options with zero options throws instead of adopting an undefined sheet",
+    threw(() => UITalk.showOptions({ ref: 2, options: [] })));
+  check("show_options with one option throws",
+    threw(() => UITalk.showOptions({ ref: 2, options: [{ label: "a", declarations: "color: red" }] })));
+  check("a rejected show_options leaves no preview state mounted",
+    UITalk.optionState == null && window.document.adoptedStyleSheets.length === sheetsBefore,
+    `state=${UITalk.optionState} sheets=${window.document.adoptedStyleSheets.length}`);
+
+  const two = UITalk.showOptions({ ref: 2, options: [
+    { label: "A", declarations: "color: red" },
+    { label: "B", declarations: "color: blue" },
+  ]});
+  check("show_options with 2 options mounts", two.mounted === 2);
+  UITalk.resetPreview();
+
+  const ten = UITalk.showOptions({ ref: 2, options: Array.from({ length: 10 }, (_, i) => ({ label: "o" + i, declarations: "color: red" })) });
+  check("show_options with 10 options mounts", ten.mounted === 10);
+  UITalk.resetPreview();
+
+  check("show_options with 11 options throws",
+    threw(() => UITalk.showOptions({ ref: 2, options: Array.from({ length: 11 }, (_, i) => ({ label: "o" + i, declarations: "color: red" })) })));
+  check("and still leaves nothing mounted",
+    UITalk.optionState == null && window.document.adoptedStyleSheets.length === 0);
+}
+
 // --- try_markup is a visual mockup, not a faithful preview, and must say so
 {
   const card = window.document.createElement("div");

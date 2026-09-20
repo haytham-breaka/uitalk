@@ -938,6 +938,57 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   answer = { ok: true };
   const noneShot = await run("capture", { inventory: false });
   check("a capture with no image still answers rather than hanging", Array.isArray(noneShot.content));
+
+  // Malformed show_options / ask_choice must be rejected at the tool boundary with
+  // a useful message, and the page must never be asked (no half-mounted preview).
+  answer = { ok: true };
+  const opt = (n) => Array.from({ length: n }, (_, i) => ({ label: "o" + i, declarations: "color: red" }));
+  const before = () => calls.length;
+  const rejects = async (name, args, re) => {
+    const at = before();
+    const res = await run(name, args);
+    return res.isError === true && re.test(res.content[0].text) && calls.length === at; // page untouched
+  };
+  const accepts = async (name, args) => {
+    const at = before();
+    const res = await run(name, args);
+    return res.isError !== true && calls.length === at + 1; // reached the page
+  };
+
+  check("show_options with zero options is rejected cleanly",
+    await rejects("show_options", { options: [] }, /between 2 and 10/));
+  check("show_options with one option is rejected cleanly",
+    await rejects("show_options", { options: opt(1) }, /between 2 and 10/));
+  check("show_options with a non-array options is rejected cleanly",
+    await rejects("show_options", { options: "nope" }, /between 2 and 10/));
+  check("show_options with 2 options is accepted", await accepts("show_options", { options: opt(2) }));
+  check("show_options with 10 options is accepted", await accepts("show_options", { options: opt(10) }));
+  check("show_options with 11 options is rejected cleanly",
+    await rejects("show_options", { options: opt(11) }, /between 2 and 10/));
+  check("show_options with an empty label is rejected cleanly",
+    await rejects("show_options", { options: [{ label: "", declarations: "x" }, { label: "b", declarations: "y" }] }, /label/));
+  check("show_options with missing declarations is rejected cleanly",
+    await rejects("show_options", { options: [{ label: "a" }, { label: "b", declarations: "y" }] }, /declarations/));
+
+  check("ask_choice with one option is rejected cleanly",
+    await rejects("ask_choice", { question: "Which?", options: ["only"] }, /between 2 and 6/));
+  check("ask_choice with 2 options is accepted", await accepts("ask_choice", { question: "Which?", options: ["a", "b"] }));
+  check("ask_choice with 6 options is accepted",
+    await accepts("ask_choice", { question: "Which?", options: ["a", "b", "c", "d", "e", "f"] }));
+  check("ask_choice with 7 options is rejected cleanly",
+    await rejects("ask_choice", { question: "Which?", options: ["a", "b", "c", "d", "e", "f", "g"] }, /between 2 and 6/));
+  check("ask_choice with a non-string question is rejected cleanly",
+    await rejects("ask_choice", { question: 5, options: ["a", "b"] }, /needs a question/));
+  check("ask_choice with an empty option string is rejected cleanly",
+    await rejects("ask_choice", { question: "Which?", options: ["a", ""] }, /non-empty string/));
+
+  // The JSON Schema must carry the same contract the prose promises.
+  const { toolDefinitions } = await import("../server/tool-defs.mjs");
+  const defs = Object.fromEntries(toolDefinitions(async () => ({})).map((d) => [d.name, d]));
+  check("show_options schema declares minItems/maxItems",
+    defs.show_options.schema.options.minItems === 2 && defs.show_options.schema.options.maxItems === 10);
+  check("ask_choice schema declares minItems/maxItems",
+    defs.ask_choice.schema.options.minItems === 2 && defs.ask_choice.schema.options.maxItems === 6);
 }
 
 // ------------------------------------------------- the bridge's frame router
@@ -1248,6 +1299,23 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     p.deliver({ kind: "approval" });
     check("an approval with no label or declarations is rejected rather than forwarded",
       p.sent.some((f) => f.kind === "approval_rejected"), JSON.stringify(p.sent.map((f) => f.kind)));
+    p.close();
+  }
+
+  {
+    // An ask_choice answer is a plain reply: it must not go through the CSS-approval
+    // path (no snapshot, no revertable), or a tapped answer would look like an edit
+    // the user could "undo".
+    const p = makePage();
+    p.sent.length = 0;
+    bridge.transcript.length = 0;
+    p.deliver({ kind: "choice_answer", label: "Use flexbox" });
+    await new Promise((r) => setTimeout(r, 30));
+    check("a choice_answer is recorded as a plain user reply",
+      bridge.transcript.some((t) => t.role === "me" && t.text === "Use flexbox"), JSON.stringify(bridge.transcript));
+    check("and is not routed through the CSS-approval path",
+      bridge.approvalPhaseForTest() === "idle" && !p.sent.some((f) => f.kind === "revertable"),
+      `phase=${bridge.approvalPhaseForTest()} frames=${JSON.stringify(p.sent.map((f) => f.kind))}`);
     p.close();
   }
 

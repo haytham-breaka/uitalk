@@ -918,6 +918,11 @@ globalThis.UITalk = (() => {
   }
 
   function showOptions({ ref, selector, options }) {
+    // Defense in depth behind the tool boundary: never adopt(undefined) or leave a
+    // half-mounted preview if a malformed request reaches the page.
+    if (!Array.isArray(options) || options.length < 2 || options.length > 10) {
+      throw new Error("show_options needs between 2 and 10 alternatives");
+    }
     const { el, sel } = resolveTarget({ ref, selector });
     dismissOptions();
     optionSheets = options.map((opt) => {

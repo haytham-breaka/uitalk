@@ -14,6 +14,31 @@ export const failed = (err) => ({
   isError: true,
 });
 
+const isText = (v) => typeof v === "string" && v.trim().length > 0;
+const countBetween = (arr, min, max) => Array.isArray(arr) && arr.length >= min && arr.length <= max;
+
+// The tool boundary is the primary place to reject malformed arguments: a
+// provider or MCP client may ignore the JSON Schema and send zero, too many, or
+// ill-shaped options, and show_options mounts them in the browser (adopt() of an
+// undefined sheet, a half-built preview) rather than failing usefully. Validate
+// here so the caller gets a clear message and the page is never touched.
+function badShowOptions(args) {
+  if (!countBetween(args?.options, 2, 10)) return "show_options needs between 2 and 10 alternatives";
+  for (const opt of args.options) {
+    if (!opt || typeof opt !== "object" || !isText(opt.label) || typeof opt.declarations !== "string") {
+      return "each show_options alternative needs a non-empty label and a declarations string";
+    }
+  }
+  return null;
+}
+
+function badAskChoice(args) {
+  if (!isText(args?.question)) return "ask_choice needs a question";
+  if (!countBetween(args?.options, 2, 6)) return "ask_choice needs between 2 and 6 options";
+  if (!args.options.every(isText)) return "each ask_choice option must be a non-empty string";
+  return null;
+}
+
 /**
  * @param {(method: string, params?: unknown, timeout?: number) => Promise<any>} callPage
  * @param {(method: string, message: string) => void} report
@@ -356,6 +381,8 @@ export function toolDefinitions(
         options: {
           type: "array",
           description: "Between 2 and 10 alternatives",
+          minItems: 2,
+          maxItems: 10,
           items: {
             type: "object",
             properties: {
@@ -368,7 +395,10 @@ export function toolDefinitions(
         },
       },
       required: ["options"],
-      run: (args) => ask("showOptions", args),
+      run: (args) => {
+        const bad = badShowOptions(args);
+        return bad ? failed(new Error(bad)) : ask("showOptions", args);
+      },
     },
     {
       name: "ask_choice",
@@ -385,11 +415,16 @@ export function toolDefinitions(
         options: {
           type: "array",
           description: "Between 2 and 6 short answers to choose from",
+          minItems: 2,
+          maxItems: 6,
           items: { type: "string" },
         },
       },
       required: ["question", "options"],
-      run: (args) => ask("askChoice", args),
+      run: (args) => {
+        const bad = badAskChoice(args);
+        return bad ? failed(new Error(bad)) : ask("askChoice", args);
+      },
     },
     {
       name: "reset_preview",
