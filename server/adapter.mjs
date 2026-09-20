@@ -13,7 +13,7 @@
 // rather than token by token. Everything else the panel shows — tool names, the
 // context meter, compaction — works the same as with the built-in session.
 
-import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, existsSync, lstatSync } from "node:fs";
 import { resolve, relative, join, dirname, sep, isAbsolute } from "node:path";
 import { toolDefinitions, text, failed } from "./tool-defs.mjs";
 import { countUsages } from "./usage.mjs";
@@ -67,17 +67,37 @@ export function fileTools(project, report = () => {}) {
     return full;
   };
 
+  // Does a filesystem entry exist at this exact path — following NO symlink? A
+  // dangling symlink (its target missing) is an entry here, though existsSync,
+  // which follows the link, says it is not; writeFileSync would still follow it
+  // and create the target, so it must count as present and be resolved.
+  const entryExists = (p) => {
+    try {
+      lstatSync(p);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   // write_file can create a path that doesn't exist yet, so there is nothing at
   // `full` to realpath. Walk up to the nearest ancestor that does exist — a
   // symlinked directory anywhere on the way there is exactly as much an escape
   // as a symlinked file would be — and check that instead. If `full` itself
   // already exists (overwriting a file, or a symlink writeFileSync would follow),
-  // that ancestor search starts, and ends, at `full`.
+  // that ancestor search starts, and ends, at `full`. A dangling symlink can't be
+  // realpath'd — where it would land is unknowable — so refuse rather than follow it.
   const insideForWrite = (path) => {
     const full = lexicallyInside(path);
     let check = full;
-    while (!existsSync(check)) check = dirname(check);
-    if (!withinRoot(realpathSync(check))) throw outside(path);
+    while (!entryExists(check)) check = dirname(check);
+    let real;
+    try {
+      real = realpathSync(check);
+    } catch {
+      throw outside(path); // a dangling symlink on the path: writeFileSync would follow it out
+    }
+    if (!withinRoot(real)) throw outside(path);
     return full;
   };
 
