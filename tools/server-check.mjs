@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSy
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 
 const fail = [];
@@ -1716,6 +1717,59 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       rev?.ok === true && readFileSync(join(proj, "race.css"), "utf8") === ".r{color:red}\n",
       JSON.stringify({ rev, now: readFileSync(join(proj, "race.css"), "utf8").trim() }));
 
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
+    // A held approval must still run if the revert it waited behind FAILS. The
+    // successful-revert path starts a turn (its notice to the agent) whose end
+    // drains the queue; a failed revert starts no turn, so without an explicit
+    // drain the held approval is stranded (and later fires on some unrelated turn).
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    writeFileSync(join(proj, "revfail.css"), ".x{color:red}\n");
+    const hash = createHash("sha256").update(readFileSync(join(proj, "revfail.css"))).digest("hex");
+    // "Already captured", but with a ref git cannot resolve and a matching changed
+    // file — so revertTo() reaches its git restore and throws.
+    const badSnap = () => ({
+      ref: "uitalk-unresolvable-ref", label: "x", at: Date.now(), postCaptured: true,
+      changedByAgent: ["revfail.css"], postHashes: { "revfail.css": hash },
+      createdByAgent: [], createdHashes: {}, modifiedUntracked: [], untrackedBlobs: {},
+    });
+    bridge.setSnapshotForTest(badSnap);
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+
+    // A committed, revertable change.
+    p.deliver({ kind: "approval", label: "committed", ref: 1, declarations: "color:red", element: {} });
+    await untilPhase("editing");
+    bridge.relay({ type: "result", subtype: "success" });
+    await untilPhase("idle");
+
+    // A chat turn is streaming; an approval arrives and is held.
+    bridge.pushToAgent("meanwhile, a question");
+    p.sent.length = 0;
+    p.deliver({ kind: "approval", label: "held", ref: 2, declarations: "color:blue", element: {} });
+    await new Promise((r) => setTimeout(r, 20));
+    // Undo the committed change while the chat turn is still open, so the revert is
+    // in flight ("reverting") when that turn ends — the point the inline drain skips.
+    p.deliver({ kind: "revert" });
+    bridge.relay({ type: "result", subtype: "success" });
+
+    let ran = false;
+    for (let i = 0; i < 200 && !ran; i++) {
+      ran = p.sent.some((f) => f.kind === "revertable" && f.label === "held");
+      if (!ran) await new Promise((r) => setTimeout(r, 10));
+    }
+    check("a held approval is not stranded when the revert it waited behind fails", ran,
+      JSON.stringify(p.sent.map((f) => `${f.kind}:${f.label ?? ""}`)));
+
+    bridge.setSnapshotForTest(null);
     bridge.setSessionForTest(null);
     await bridge.clearSession();
     p.close();
