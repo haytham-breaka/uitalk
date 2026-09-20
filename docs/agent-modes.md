@@ -34,8 +34,11 @@ Or commit the choice to the project, in `.uitalk.json`:
 | Context meter, compaction, New session | ✅ | ✅ | ✅ | ❌ — the conversation is in your editor |
 | Undo a committed change | ✅ | ✅ | ✅ | ✅ — and the MCP client is told, so it will not re-apply it |
 | Streams the reply token by token | ✅ | ❌ — a turn arrives whole | ✅ | n/a |
+| Filesystem reach | the Claude Agent SDK's, at your access level — **not** sandboxed to the project by uitalk | **contained to the project** by uitalk's own file tools (realpath, symlink-safe) | OpenCode's own, per its config | your editor's |
 
 `builtin` needs `@anthropic-ai/claude-agent-sdk` and `opencode` needs `@opencode-ai/sdk` — both **optional** dependencies, so neither is required by the other. `npm install --omit=optional` gives you a uitalk that runs the adapter and MCP modes with neither installed.
+
+**A note on the filesystem boundary.** Only `adapter` mode's file tools are sandboxed to the project by uitalk itself — `read_file`/`edit_file`/`write_file`/`list_dir` resolve every path through `realpath` and refuse anything, including a symlink, that lands outside the project root (a bring-your-own-key model should not roam your disk). `builtin` and `opencode` run their own agent's real file tools at your access level: `builtin` is the same engine as the Claude Code you already run in a terminal, so uitalk deliberately does not pin it to the project — its boundary is the Agent SDK's permission model (uitalk runs it with `permissionMode: "acceptEdits"` and no shell tool), exactly the reach you already grant Claude Code. If you want edits strictly confined to the project, use `adapter` (or `off`, where your editor owns the files).
 
 ## Your own key, or no key at all
 
