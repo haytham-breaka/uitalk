@@ -274,6 +274,7 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
 
   // more than one top-level element is refused outright, not silently truncated
   const solo = window.document.createElement("div");
+  solo.className = "solo";
   window.document.body.appendChild(solo);
   const soloPick = UITalk.pick(solo);
   let multiError = null;
@@ -285,6 +286,20 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   check("more than one top-level element is refused, not silently truncated to the first",
     /2 top-level elements/.test(multiError ?? ""), multiError);
   check("the original element is untouched after the refusal", solo.isConnected && solo.parentElement === window.document.body);
+
+  // try_markup needs a ref; a call without one must be refused BEFORE resolving a
+  // target, or resolving a selector would stamp a data-uitalk-target attribute on
+  // the page and leave it there on a rejected call.
+  let refError = null;
+  try {
+    UITalk.tryMarkup({ selector: ".solo", html: "<div>x</div>" });
+  } catch (e) {
+    refError = e.message;
+  }
+  check("try_markup without a ref is refused", /needs a selection ref/.test(refError ?? ""), refError);
+  check("and a refused try_markup leaves no stray target attribute on the page",
+    !solo.hasAttribute("data-uitalk-target") && !window.document.querySelector("[data-uitalk-target]"),
+    solo.getAttribute("data-uitalk-target") ?? "none");
 
   UITalk.unpick(soloPick.ref);
   solo.remove();
