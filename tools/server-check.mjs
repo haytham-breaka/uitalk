@@ -771,6 +771,42 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     unlinkSync(join(repo, "Draft2.css"));
   }
 
+  // A pre-existing untracked file the agent DELETES must come back on undo — its
+  // bytes were blobbed at snapshot time even though it no longer exists after.
+  {
+    writeFileSync(join(repo, "Draft3.css"), ".d { color: red } /* user's own */\n");
+    const snap0 = await snapshots.snapshot(repo, "agent deletes an untracked file");
+    unlinkSync(join(repo, "Draft3.css")); // the "agent" deletes it
+    const snap = await snapshots.captureAfter(repo, snap0);
+    check("a deleted pre-existing untracked file is seen as the agent's to restore",
+      snap.deletedUntracked?.includes("Draft3.css"), JSON.stringify(snap.deletedUntracked));
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("undo restores a deleted pre-existing untracked file",
+      out.reverted.includes("Draft3.css") && existsSync(join(repo, "Draft3.css")), JSON.stringify(out));
+    check("and its exact pre-deletion contents come back",
+      readFileSync(join(repo, "Draft3.css"), "utf8") === ".d { color: red } /* user's own */\n",
+      readFileSync(join(repo, "Draft3.css"), "utf8").trim());
+    unlinkSync(join(repo, "Draft3.css"));
+  }
+
+  // The same, but the user recreates that path after the agent's turn: undo must
+  // not clobber what they put back.
+  {
+    writeFileSync(join(repo, "Draft4.css"), ".d { color: red }\n");
+    const snap0 = await snapshots.snapshot(repo, "agent deletes, user recreates");
+    unlinkSync(join(repo, "Draft4.css")); // the "agent" deletes it
+    const snap = await snapshots.captureAfter(repo, snap0);
+    writeFileSync(join(repo, "Draft4.css"), ".d { color: green } /* user put it back */\n");
+
+    const out = await snapshots.revertTo(repo, snap);
+    check("a deleted file the user recreated is skipped, not clobbered",
+      out.skipped.includes("Draft4.css") && !out.reverted.includes("Draft4.css"), JSON.stringify(out));
+    check("the user's recreated file survives untouched",
+      readFileSync(join(repo, "Draft4.css"), "utf8").includes("user put it back"));
+    unlinkSync(join(repo, "Draft4.css"));
+  }
+
   // git octal-quotes a non-ASCII path by default ("caf\303\251.css"); left quoted
   // it reaches hash-object/checkout as a bogus pathspec, so an accented filename
   // was silently un-undoable. Both a tracked and a pre-existing untracked one.
