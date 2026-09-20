@@ -36,7 +36,7 @@ const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", ".c
  * file tools. Every path is resolved and checked to be inside the project: a model
  * asking for ../../.ssh/id_rsa gets a refusal, not a read.
  */
-export function fileTools(project, report = () => {}) {
+export function fileTools(project, report = () => {}, onWrite = () => {}) {
   const root = resolve(project);
   const realRoot = realpathSync(root);
   const outside = (path) => new Error(`${path} is outside the project, so it will not be touched`);
@@ -155,6 +155,7 @@ export function fileTools(project, report = () => {}) {
         if (count === 0) throw new Error(`that text is not in ${path} — read it again`);
         if (count > 1) throw new Error(`that text appears ${count} times in ${path}; include more context`);
         writeFileSync(full, body.replace(find, replace));
+        onWrite(path); // so undo can scope to what the agent actually wrote
         return `edited ${path}`;
       }),
     },
@@ -170,6 +171,7 @@ export function fileTools(project, report = () => {}) {
       required: ["path", "content"],
       run: guard("write_file", ({ path, content }) => {
         writeFileSync(insideForWrite(path), content);
+        onWrite(path); // so undo can scope to what the agent actually wrote
         return `wrote ${path} (${content.length} bytes)`;
       }),
     },
@@ -428,6 +430,7 @@ export function createAdapter({
   record = () => {},
   onUsage = () => {},
   onTurnEnd = () => {},
+  onWrite = () => {},
   log = () => {},
   systemPrompt = "",
   fetchImpl = globalThis.fetch,
@@ -446,7 +449,7 @@ export function createAdapter({
       (name, file) => countUsages(project, name, file),
       (needles) => findSourceCandidates(project, needles),
     ),
-    ...fileTools(project, report),
+    ...fileTools(project, report, onWrite),
   ];
   const system =
     `${systemPrompt}\n\n` +

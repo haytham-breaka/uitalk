@@ -103,16 +103,27 @@ export async function snapshot(cwd, label) {
  * edit would get baked in as if the agent had made it. revertTo() uses this to
  * tell "only the agent has touched this since the snapshot" apart from "someone
  * touched it again after," and to know which new files are the agent's to remove.
+ *
+ * `touched` is the set of paths the agent is known to have written this turn (from
+ * its own tool calls). When given, the buckets are scoped to it: a file the user
+ * edited concurrently during the turn differs from the snapshot too, but the agent
+ * never wrote it, so it must not be undone. Intersecting with the diff means a path
+ * the agent only read never counts. When it is empty (an MCP client, or an edit
+ * made through a tool the bridge cannot see) the scope falls back to the whole
+ * diff — the same best-effort behaviour as before.
  */
-export async function captureAfter(cwd, snap) {
+export async function captureAfter(cwd, snap, touched = null) {
   if (!snap || snap.postCaptured) return snap;
 
-  const changedByAgent = lines(await git(cwd, ["diff", "--name-only", snap.ref, "--"]));
+  const only = touched?.length ? new Set(touched) : null;
+  const scope = (files) => (only ? files.filter((f) => only.has(f)) : files);
+
+  const changedByAgent = scope(lines(await git(cwd, ["diff", "--name-only", snap.ref, "--"])));
   const postHashes = {};
   for (const file of changedByAgent) postHashes[file] = hashFile(join(cwd, file));
 
   const before = new Set(snap.untrackedBefore ?? []);
-  const createdByAgent = (await untracked(cwd)).filter((f) => !before.has(f));
+  const createdByAgent = scope((await untracked(cwd)).filter((f) => !before.has(f)));
   const createdHashes = {};
   for (const file of createdByAgent) createdHashes[file] = hashFile(join(cwd, file));
 
@@ -120,7 +131,7 @@ export async function captureAfter(cwd, snap) {
   // snapshot. git diff never lists it (it is untracked) and it is not "created"
   // (it predates the snapshot), so it needs its own bucket. Freeze the post-edit
   // hash too, to tell a later user edit apart from the agent's own change.
-  const stillUntracked = (snap.untrackedBefore ?? []).filter((f) => existsSync(join(cwd, f)));
+  const stillUntracked = scope((snap.untrackedBefore ?? []).filter((f) => existsSync(join(cwd, f))));
   const nowBlobs = await blobIds(cwd, stillUntracked);
   const modifiedUntracked = [];
   const modifiedHashes = {};

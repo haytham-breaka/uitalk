@@ -24,7 +24,8 @@ const check = (n, ok, d) => {
   writeFileSync(join(root, "src", "app.css"), ".hero {\n  padding: 14px;\n}\n.card { gap: 8px; }\n");
   writeFileSync(join(root, "node_modules", "huge.css"), ".hero { padding: 999px; }\n");
 
-  const tools = Object.fromEntries(fileTools(root).map((t) => [t.name, t]));
+  const wrote = [];
+  const tools = Object.fromEntries(fileTools(root, () => {}, (p) => wrote.push(p)).map((t) => [t.name, t]));
   const ran = (name, args) => tools[name].run(args).then((r) => ({
     text: r.content.map((c) => c.text).join("\n"),
     failed: Boolean(r.isError),
@@ -100,6 +101,15 @@ const check = (n, ok, d) => {
 
   const nothing = await ran("search_files", { query: "zzz-not-here" });
   check("a search with no match says so plainly", /no match/.test(nothing.text), nothing.text);
+
+  // The write tools report the path they touched (for precise undo scoping); the
+  // read/search tools and refused writes do not — reading a file must never make
+  // undo revert it.
+  await ran("write_file", { path: "src/new.css", content: ".n{}" });
+  check("only successful writes are reported for undo scoping",
+    wrote.includes("src/app.css") && wrote.includes("src/new.css") &&
+      !wrote.includes("src/dup.css") && !wrote.includes("."),
+    JSON.stringify(wrote));
 }
 
 // ------------------------------------------------------------------- wires
