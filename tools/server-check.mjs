@@ -1069,6 +1069,24 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       res.writeHead(200, { "content-type": "text/javascript", etag: 'W/"asset-1"' });
       return res.end("console.log(1)");
     }
+    if (req.url === "/api.json") {
+      // A non-HTML response with its own CSP: nothing is injected into it, so its
+      // policy must survive the proxy untouched.
+      res.writeHead(200, { "content-type": "application/json", "content-security-policy": "default-src 'none'" });
+      return res.end('{"ok":true}');
+    }
+    if (req.url === "/mentions-uitalk") {
+      // A page that merely mentions the string data-uitalk (docs, an example, an
+      // unrelated attribute) must still get the client injected.
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end('<html><head><title>d</title></head><body><code>data-uitalk-demo</code></body></html>');
+    }
+    if (req.url === "/already-injected") {
+      // A page that already carries the uitalk client (a re-proxied page) must not
+      // get a second copy.
+      res.writeHead(200, { "content-type": "text/html" });
+      return res.end('<html><head><script src="/__uitalk/client.js" data-uitalk></script></head><body>x</body></html>');
+    }
     if (req.url === "/asset-drop") {
       // Promise 100 bytes, send 7, then abruptly drop the socket — as a dev server
       // does when it restarts mid-response. The unfulfilled content-length makes
@@ -1153,6 +1171,26 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("non-html passes through untouched", (await asset.text()) === "console.log(1)");
   check("and an asset keeps its validator, so reloads stay cheap",
     asset.headers.get("etag") === 'W/"asset-1"', asset.headers.get("etag") ?? "stripped");
+
+  // A non-HTML response keeps its own CSP — stripping is only for the HTML we inject
+  // into. (Stripping it here would needlessly weaken an API/asset response.)
+  const api = await fetch(at("/api.json"));
+  check("a non-HTML response keeps its Content-Security-Policy",
+    api.headers.get("content-security-policy") === "default-src 'none'",
+    api.headers.get("content-security-policy") ?? "stripped");
+
+  // Injection detection uses the exact client src, not the bare "data-uitalk" text,
+  // so a page that merely mentions it is still injected...
+  const mentions = await fetch(at("/mentions-uitalk"));
+  const mentionsHtml = await mentions.text();
+  check("a page that merely mentions data-uitalk is still injected",
+    mentionsHtml.includes('src="/__uitalk/client.js"') && mentionsHtml.includes("data-uitalk-demo"),
+    mentionsHtml.slice(0, 80));
+  // ...while a page that already carries the client is not injected twice.
+  const already = await (await fetch(at("/already-injected"))).text();
+  check("a page already carrying the client is not injected twice",
+    (already.match(/__uitalk\/client\.js/g) ?? []).length === 1,
+    `${(already.match(/__uitalk\/client\.js/g) ?? []).length} client tags`);
 
   // An upstream that drops the connection mid-asset makes the proxy's upstream
   // response stream emit 'error'. With no handler that was an uncaught exception
