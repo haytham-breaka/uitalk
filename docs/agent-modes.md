@@ -28,7 +28,7 @@ Or commit the choice to the project, in `.uitalk.json`:
 
 | | `builtin` | `adapter` | `opencode` | `off` |
 | --- | --- | --- | --- | --- |
-| The 12 page tools | ✅ | ✅ | ⚠️ only if `opencode.jsonc` points at uitalk's MCP server — see below | ✅ |
+| The 12 page tools | ✅ | ✅ | ✅ uitalk wires its MCP server into `opencode.jsonc` on startup — see below | ✅ |
 | Edits source after an approval | ✅ Claude Code's own file tools | ✅ `read_file`, `edit_file`, `write_file`, `list_dir`, `search_files`, scoped to the project | ✅ OpenCode's own file tools | ✅ your editor's |
 | Chat in the panel | ✅ | ✅ | ✅ | ❌ — type in your editor; the panel says so instead of swallowing it |
 | Context meter, compaction, New session | ✅ | ✅ | ✅ | ❌ — the conversation is in your editor |
@@ -74,7 +74,7 @@ uitalk doesn't bundle or manage OpenCode — it only talks to an existing instal
 
    This finds an `opencode serve` already running on its default port (`4096`) and uses it, or starts one itself if nothing answers there. To use one already running elsewhere, set `opencodeServerUrl` in `.uitalk.json`.
 
-4. **Let it see the page.** OpenCode has no way to receive custom tools programmatically — a session only gets tools from its own config — so add uitalk's MCP server to this project's `opencode.jsonc`:
+4. **Let it see the page.** OpenCode has no way to receive custom tools programmatically — a session only gets tools from its own config — so it needs uitalk's MCP server named in this project's `opencode.jsonc` / `opencode.json`:
 
    ```jsonc
    {
@@ -89,7 +89,7 @@ uitalk doesn't bundle or manage OpenCode — it only talks to an existing instal
    }
    ```
 
-   Without this step, `opencode` mode still chats in the panel and edits files — it just can't select elements, screenshot, or preview, since it never sees those tools. uitalk checks for this at startup and logs a warning if it looks missing, but never writes to `opencode.jsonc` itself — comments in a hand-edited JSONC file would not survive a parse-and-rewrite round-trip.
+   **uitalk wires this up for you** on startup in `opencode` mode: it creates `opencode.json` when the project has none, or splices the `uitalk` entry into an existing config. An existing file is *edited, not rewritten* — the entry is inserted at a single spot and every other byte, comments included, is left exactly as it was, and the result is re-parsed before it's saved. If it can't do that safely (a config it can't parse, or an `mcp` key that isn't an object) it leaves the file untouched and logs how to add the block by hand. Without this entry, `opencode` mode still chats in the panel and edits files — it just can't select elements, screenshot, or preview, since it never sees those tools.
 
 ## `off`: any MCP editor
 
