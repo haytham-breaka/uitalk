@@ -1107,6 +1107,55 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // A revert clicked while a NEW approval's snapshot is still being taken must be
+    // refused, not run concurrently with that snapshot and then clobber lastChange
+    // the moment it resolves. Force the snapshot to be slow so the window is real.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+
+    // A prior, fully-captured change that undo could legitimately restore.
+    writeFileSync(join(proj, "race.css"), ".r{color:red}\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "prior baseline"], { cwd: proj });
+    p.deliver({ kind: "approval", label: "prior change", ref: 1, declarations: "color:red", element: {} });
+    await untilPhase("editing");
+    writeFileSync(join(proj, "race.css"), ".r{color:blue}\n");
+    bridge.relay({ type: "result", subtype: "success" });
+    await untilPhase("idle");
+
+    // The next approval's snapshot hangs until we release it — the "snapshotting" window.
+    let releaseSnap;
+    bridge.setSnapshotForTest(
+      (label) => new Promise((r) => { releaseSnap = () => r({ ref: "HEAD", label, at: Date.now() }); }),
+    );
+    p.deliver({ kind: "approval", label: "next change", ref: 2, declarations: "color:green", element: {} });
+    await untilPhase("snapshotting");
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" }); // clicked mid-snapshot
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the mid-snapshot revert to answer");
+    check("a revert during an approval's snapshot window is refused, not run concurrently",
+      p.sent.find((f) => f.kind === "reverted")?.ok === false,
+      JSON.stringify(p.sent.find((f) => f.kind === "reverted")));
+    check("and the prior change is left intact (its revert did not run)",
+      readFileSync(join(proj, "race.css"), "utf8") === ".r{color:blue}\n",
+      readFileSync(join(proj, "race.css"), "utf8").trim());
+
+    releaseSnap();
+    await untilPhase("editing"); // the approval completes normally once its snapshot resolves
+
+    bridge.setSnapshotForTest(null);
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  {
     // A finished turn must return the phase to idle even when the project is not a
     // git repo (snapshot() returns null) — otherwise the reset was skipped and the
     // phase latched at "editing", refusing every later approval.
