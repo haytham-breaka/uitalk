@@ -22,6 +22,15 @@ globalThis.UITalkShell = (() => {
 
   const state = { device: "fit", portrait: true, zoom: 0, dock: "right" };
   const CUSTOM = DEVICES[0]; // the "Fit" slot doubles as the custom size
+
+  // The frame names a same-origin path via the hash (#/dashboard). A hash like
+  // #//evil.com would resolve cross-origin through the origin base, loading a
+  // foreign page into the stage; the frame is meant to be same-origin (see top),
+  // so anything that resolves elsewhere falls back to the root.
+  const frameHref = (raw) => {
+    const u = new URL(raw || "/", location.origin);
+    return (u.origin === location.origin ? u : new URL("/", location.origin)).href;
+  };
   const listeners = new Set();
   let frame = null;
   let bar = null;
@@ -145,7 +154,7 @@ globalThis.UITalkShell = (() => {
     shim.id = "uitalk-shim";
     frame = document.createElement("iframe");
     frame.id = "uitalk-app";
-    frame.src = new URL(location.hash.slice(1) || "/", location.origin).href;
+    frame.src = frameHref(location.hash.slice(1));
     shim.appendChild(frame);
     for (const edge of ["e", "s", "se"]) {
       const grip = document.createElement("div");
@@ -249,7 +258,7 @@ globalThis.UITalkShell = (() => {
       } catch {}
       if (have !== null && want !== have) {
         try {
-          frame.contentWindow.location.replace(new URL(want, location.origin).href);
+          frame.contentWindow.location.replace(frameHref(want));
         } catch {}
       }
     };

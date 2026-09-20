@@ -1744,6 +1744,34 @@ check("Escape with a selection clears it rather than the tool", UITalk.picked.le
   check("and where they put the icon",
     coldRoot?.querySelector(".fab")?.style.right === "120px", coldRoot?.querySelector(".fab")?.style.right);
 
+  // A reply that streams a code block with a bare number must not crash the
+  // markdown renderer (the syntax highlighter threw on the number, freezing the
+  // whole reply). Feed a js fence and confirm it renders highlighted spans.
+  {
+    const sock = sockets[0];
+    sock.onmessage({ data: JSON.stringify({ kind: "delta", text: "```js\nconst port = 3000;\n```" }) });
+    await tick();
+    await tick();
+    const md = [...root.querySelectorAll(".md-run")].map((r) => r.innerHTML).join("");
+    check("a js code block with a number renders instead of crashing the reply",
+      /tok-number">3000/.test(md) && /tok-keyword">const/.test(md), md.slice(0, 140) || "(nothing rendered)");
+    sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+    await tick();
+  }
+
+  // A non-JSON (or binary) bridge frame must be dropped, not thrown out of the
+  // socket handler where it would go uncaught and drop the frame with no trace.
+  {
+    const sock = sockets[0];
+    let threw = false;
+    try {
+      sock.onmessage({ data: "this is not json {" });
+    } catch {
+      threw = true;
+    }
+    check("a non-JSON bridge frame is dropped without throwing out of the handler", !threw);
+  }
+
   // A tab that has never opened it must still start closed.
   const virgin = new JSDOM(HTML, { url: "http://127.0.0.1:8400/", pretendToBeVisual: true,
     runScripts: "outside-only", virtualConsole: vc });
