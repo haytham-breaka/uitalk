@@ -917,7 +917,24 @@ function beginApproval(frame) {
   // in what undo believes was the "before" state. See snapshots.mjs's snapshot(),
   // a real subprocess call, not something that resolves before this returns.
   void (async () => {
-    const snap = await snapshotFn(frame.label);
+    let snap;
+    try {
+      snap = await snapshotFn(frame.label);
+    } catch (err) {
+      // snapshotFn is not expected to reject — snapshot() catches its own git
+      // errors and returns null (undo unavailable, handled below). But a rejection
+      // must never leave the phase latched at "snapshotting" or become an unhandled
+      // rejection: return to idle, tell the user, and let the next approval run.
+      log(`could not prepare undo for approval "${frame.label}": ${err.message}`);
+      approvalPhase = "idle";
+      toPanel({
+        kind: "approval_rejected",
+        label: frame.label,
+        text: `couldn't prepare undo for this change (${err.message}) — try approving it again`,
+      });
+      if (!agentBusy() && pendingApprovals.length) beginApproval(pendingApprovals.shift());
+      return;
+    }
     lastChange = { snap, label: frame.label };
     approvalPhase = "editing";
     toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label });
