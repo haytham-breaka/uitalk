@@ -34,7 +34,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { createConnection } from "node:net";
 import {
-  existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync,
+  mkdirSync, openSync, readFileSync, unlinkSync,
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -64,15 +64,6 @@ function portOpen(port, host = "127.0.0.1") {
     sock.once("error", () => finish(false));
   });
 }
-
-const alive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 /** Kill a process and, where the platform supports it, everything under it. */
 function killTree(pid, signal = "SIGTERM") {
@@ -204,21 +195,30 @@ const running = () => registryList().find((e) => e.project === project);
 const { projectSlug } = await import(join(ROOT, "server", "project-id.mjs"));
 const slug = projectSlug(project);
 const { openPorts, newlyOpenPort } = await import(join(ROOT, "server", "dev-ports.mjs"));
+// The dev pidfile records the process's start token, not just its pid, so a pid the
+// OS has recycled after a crash is not mistaken for the dev server we launched and
+// killed by --stop. See server/proc-identity.mjs.
+const { owns, readOwner, writeOwner } = await import(join(ROOT, "server", "proc-identity.mjs"));
 
 const devPidfile = () => join(LOG_DIR, `${slug}-dev.pid`);
+// The pid only if it is still the process we launched (start token matches). A stale
+// pidfile left by a crash whose pid has been reused returns null — never that pid.
 const devRunning = () => {
-  const f = devPidfile();
-  if (!existsSync(f)) return null;
-  const pid = Number(readFileSync(f, "utf8").trim());
-  return alive(pid) ? pid : null;
+  const rec = readOwner(devPidfile());
+  return owns(rec) ? rec.pid : null;
 };
 
 function stopDev() {
   const f = devPidfile();
-  const pid = devRunning();
-  if (pid) {
-    killTree(pid);
-    console.log(`[uitalk] stopped the dev server (pid ${pid})`);
+  const rec = readOwner(f);
+  if (rec && !owns(rec)) {
+    // The pidfile points at a live process that is NOT the one we started (a reused
+    // pid, or a legacy record we cannot vouch for after a token mismatch). Refuse to
+    // kill it and clear the stale file rather than risk an unrelated process.
+    console.log(`[uitalk] not stopping pid ${rec.pid}: it is not the dev server this project started (stale pidfile)`);
+  } else if (rec) {
+    killTree(rec.pid);
+    console.log(`[uitalk] stopped the dev server (pid ${rec.pid})`);
   }
   try {
     unlinkSync(f);
@@ -256,7 +256,7 @@ async function startDev() {
   console.error(`[uitalk] starting: ${devCmd}`);
   const fd = openSync(logPath, "a");
   const child = spawnShell(devCmd, { cwd: project, detached: true, stdio: ["ignore", fd, fd] });
-  writeFileSync(f, String(child.pid));
+  writeOwner(f, child.pid); // pid + start token, so --stop can prove it is still ours
   child.unref();
   console.error(`[uitalk] dev log: ${logPath}`);
 
