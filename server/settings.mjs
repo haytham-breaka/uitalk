@@ -173,8 +173,12 @@ export function load(projectRoot) {
 export function save(projectRoot, patch) {
   const { clean, rejected } = validate(patch);
   const file = join(projectRoot, PROJECT_FILE);
-  const current = readJson(file);
-  const next = { ...current, ...clean };
+  // Base the saved file on the RECOGNIZED current settings, not the raw JSON, so an
+  // unknown or mistyped key a hand-edit left behind is normalized away rather than
+  // persisted forever. load() already ignores such keys (it validates the file on
+  // read), so this only makes the written file match what is actually used; existing
+  // recognized values are re-validated and clamped in passing.
+  const next = { ...validate(readJson(file)).clean, ...clean };
 
   mkdirSync(projectRoot, { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
