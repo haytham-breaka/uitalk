@@ -2973,6 +2973,42 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   await new Promise((r) => setTimeout(r, 200));
 }
 
+// ---------------------------- the file lock is a real cross-process mutex
+{
+  // Not two async calls in one process: N separate OS processes each take the lock
+  // and do a read-modify-write of a shared counter. If the lock ever admits two at
+  // once (the window where a just-created-but-empty lock file is mistaken for stale
+  // and deleted), an increment is lost and the total comes out below N.
+  const dir = mkdtempSync(join(sandbox, "flock-"));
+  const lockPath = join(dir, "m.lock");
+  const counter = join(dir, "count");
+  writeFileSync(counter, "0");
+
+  const fileLock = new URL("../server/file-lock.mjs", import.meta.url).pathname;
+  const childFile = join(dir, "child.mjs");
+  writeFileSync(childFile, [
+    `import { withLock } from ${JSON.stringify(fileLock)};`,
+    `import { readFileSync, writeFileSync } from "node:fs";`,
+    `const [lockPath, counter] = process.argv.slice(2);`,
+    `await withLock(lockPath, async () => {`,
+    `  const n = Number(readFileSync(counter, "utf8"));`,
+    `  await new Promise((r) => setTimeout(r, Math.random() * 15));`, // hold, to force real contention
+    `  writeFileSync(counter, String(n + 1));`,
+    `});`,
+  ].join("\n"));
+
+  const N = 12;
+  const codes = await Promise.all(Array.from({ length: N }, () =>
+    new Promise((res) => {
+      const p = spawn(process.execPath, [childFile, lockPath, counter], { stdio: "ignore" });
+      p.on("exit", (code) => res(code));
+    })));
+  const total = Number(readFileSync(counter, "utf8"));
+  check("a shared file lock serializes N separate processes with no lost update",
+    total === N, `counted ${total} of ${N}`);
+  check("and every locked process exited cleanly", codes.every((c) => c === 0), JSON.stringify(codes));
+}
+
 rmSync(sandbox, { recursive: true, force: true });
 console.log(fail.length ? `\n${fail.length} failing: ${fail.join(", ")}` : "\nall checks passed");
 process.exit(fail.length ? 1 : 0);
