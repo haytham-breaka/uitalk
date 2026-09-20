@@ -1,6 +1,6 @@
 {
   "name": "uitalk",
   "description": "Edit a running web app from inside the page: a floating panel for picking elements, previewing changes, choosing between alternatives, and committing the approved one to source.",
-  "version": "0.6.53",
+  "version": "0.6.54",
   "author": { "name": "Haytham Breaka" }
 }

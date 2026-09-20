@@ -770,6 +770,7 @@ function record(role, text) {
 // A step's total input IS the conversation size at that moment: the prompt the
 // API was sent. Dedup by message id, because parallel tool calls repeat it, and
 // skip subagents, whose context is their own.
+const SEEN_CAP = 512; // recent message ids kept for usage dedup — see noteUsage
 const context = { tokens: 0, percent: 0, seen: new Set(), turnsSinceCompact: 99, compacting: false };
 
 function noteUsage(event) {
@@ -777,6 +778,10 @@ function noteUsage(event) {
   const msg = event.message;
   if (!msg?.id || context.seen.has(msg.id)) return;
   context.seen.add(msg.id);
+  // Only a message's own parallel tool calls repeat its id, and those arrive
+  // together, so a bounded recent-window is all the dedup needs — an old id never
+  // recurs. Cap it so a long session with no compaction can't grow the set forever.
+  if (context.seen.size > SEEN_CAP) context.seen.delete(context.seen.values().next().value);
   const u = msg.usage ?? {};
   const total =
     (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
