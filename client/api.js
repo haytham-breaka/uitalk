@@ -126,9 +126,11 @@ globalThis.UITalk = (() => {
 
   const specificity = (selector) => {
     // Good enough to order rules and explain why one won; not a full CSS engine —
-    // cascade layers, multiple stylesheet origins, and CSS nesting aren't modeled,
-    // and :is()/:not() nested more than one level deep falls back to the same
-    // approximation as before (scored as an ordinary pseudo-class).
+    // multiple stylesheet origins and CSS nesting aren't modeled, and :is()/:not()
+    // nested more than one level deep falls back to the same approximation as
+    // before (scored as an ordinary pseudo-class). Cascade layers ARE modeled, but
+    // in matchedRules' winner selection, not here — layer order overrides
+    // specificity, so it can't live in a per-selector specificity score.
     let bare = selector.replace(/:where\((?:[^()]|\([^()]*\))*\)/g, ""); // :where() is always zero-specificity
 
     // :is()/:not() take the specificity of their most specific argument, not
@@ -175,9 +177,43 @@ globalThis.UITalk = (() => {
     return out;
   };
 
+  // The declaration order of cascade layers — first mention wins a rank. Layer
+  // order overrides specificity: among normal declarations a later-declared layer
+  // (and any unlayered rule) beats an earlier one; for !important the order
+  // reverses. Built from @layer statement rules (which declare order up front) and
+  // the blocks themselves, in document order. Anonymous layers are folded into
+  // their nearest named ancestor — a rare case not worth its own bookkeeping.
+  function collectLayerOrder() {
+    const rank = new Map();
+    const visit = (list, prefix) => {
+      for (const rule of list ?? []) {
+        const kind = rule.constructor?.name ?? "";
+        if (kind === "CSSLayerStatementRule") {
+          for (const name of rule.nameList ?? []) {
+            const path = prefix ? `${prefix}.${name}` : name;
+            if (!rank.has(path)) rank.set(path, rank.size);
+          }
+        } else if (kind === "CSSLayerBlockRule") {
+          const path = rule.name ? (prefix ? `${prefix}.${rule.name}` : rule.name) : prefix;
+          if (rule.name && !rank.has(path)) rank.set(path, rank.size);
+          visit(rule.cssRules, path);
+        } else if (rule.cssRules && !rule.selectorText) {
+          visit(rule.cssRules, prefix); // @media/@supports/@container can hold layers too
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) {
+      try {
+        visit(sheet.cssRules, "");
+      } catch {} // cross-origin: unreadable, contributes no layer order
+    }
+    return rank;
+  }
+
   function matchedRules(el, { properties = null, max = 40 } = {}) {
     const rules = [];
     const skipped = [];
+    const layerRank = collectLayerOrder();
 
     // Whether a conditional group applies right now. A rule inside an @media that
     // doesn't match this viewport, or an @supports the browser rejects, is still
@@ -209,14 +245,20 @@ globalThis.UITalk = (() => {
       return true; // @layer always applies; @container and the rest can't be judged from here
     };
 
-    const walk = (list, context, active = true) => {
+    const walk = (list, context, active = true, layer = null) => {
       for (const rule of list ?? []) {
         if (rule.cssRules && !rule.selectorText) {
           // @media, @supports, @layer: carry the condition down with the rules,
-          // and whether it currently holds.
+          // and whether it currently holds. A named @layer block also extends the
+          // layer path its rules belong to; an anonymous one keeps the nearest
+          // named ancestor, matching how collectLayerOrder folds it.
           const label = rule.conditionText ?? rule.media?.mediaText ?? rule.name ?? "";
           const kind = rule.constructor.name.replace("CSS", "").replace("Rule", "");
-          walk(rule.cssRules, label ? [...context, `${kind} ${label}`] : context, active && applies(rule));
+          const childLayer =
+            rule.constructor.name === "CSSLayerBlockRule" && rule.name
+              ? layer ? `${layer}.${rule.name}` : rule.name
+              : layer;
+          walk(rule.cssRules, label ? [...context, `${kind} ${label}`] : context, active && applies(rule), childLayer);
           continue;
         }
         if (!rule.selectorText) continue;
@@ -255,6 +297,7 @@ globalThis.UITalk = (() => {
             declarations: kept,
             important: important.length ? important : undefined,
             active: active ? undefined : false,
+            layer: layer || undefined,
           });
           break;
         }
@@ -271,30 +314,46 @@ globalThis.UITalk = (() => {
       if (rules.length >= max) break;
     }
 
-    // Later and more specific wins, which is what decides where an edit belongs.
-    // !important beats any non-important declaration outright; among peers of the
-    // same importance, specificity is compared id, then class, then type, before
-    // falling back to source order — skipping the type component would let a rule
-    // like ".foo *" beat ".foo div" on order alone, even though it is less specific.
+    // What decides where an edit belongs. !important beats any non-important
+    // declaration outright. Next comes cascade-layer order, which overrides
+    // specificity: among normal declarations a later-declared layer wins and an
+    // unlayered rule beats every layer; for !important that order reverses. Only
+    // then does specificity decide — id, then class, then type (skipping the type
+    // component would let ".foo *" beat ".foo div" on order alone) — and finally
+    // source order.
     const ordered = rules.map((r, i) => ({ ...r, order: i }));
+
+    // Cascade-layer priority within one importance tier; higher is stronger. An
+    // unlayered normal declaration is strongest, an unlayered important one is
+    // weakest, and a layer we never saw declared sorts after those we did.
+    const layerValue = (layer, important) => {
+      if (!layer) return important ? -Infinity : Infinity;
+      const rank = layerRank.get(layer) ?? layerRank.size;
+      return important ? -rank : rank;
+    };
+
     const winnerFor = {};
     for (const r of ordered) {
       for (const [prop, value] of Object.entries(r.declarations)) {
         const held = winnerFor[prop];
         const important = r.important?.includes(prop) ?? false;
         const heldImportant = held?.important ?? false;
-        const beats =
-          !held ||
-          (important && !heldImportant) ||
-          (important === heldImportant &&
-            (r.specificity[0] > held.specificity[0] ||
-              (r.specificity[0] === held.specificity[0] &&
-                (r.specificity[1] > held.specificity[1] ||
-                  (r.specificity[1] === held.specificity[1] &&
-                    (r.specificity[2] > held.specificity[2] ||
-                      (r.specificity[2] === held.specificity[2] && r.order > held.order)))))));
+        let beats = !held || (important && !heldImportant);
+        if (!beats && important === heldImportant) {
+          const lv = layerValue(r.layer, important);
+          const heldLv = layerValue(held.layer, heldImportant);
+          beats =
+            lv > heldLv ||
+            (lv === heldLv &&
+              (r.specificity[0] > held.specificity[0] ||
+                (r.specificity[0] === held.specificity[0] &&
+                  (r.specificity[1] > held.specificity[1] ||
+                    (r.specificity[1] === held.specificity[1] &&
+                      (r.specificity[2] > held.specificity[2] ||
+                        (r.specificity[2] === held.specificity[2] && r.order > held.order)))))));
+        }
         if (beats && !r.state && r.active !== false) {
-          winnerFor[prop] = { value, selector: r.selector, source: r.source, specificity: r.specificity, order: r.order, important };
+          winnerFor[prop] = { value, selector: r.selector, source: r.source, specificity: r.specificity, order: r.order, important, layer: r.layer ?? null };
         }
       }
     }
@@ -307,7 +366,7 @@ globalThis.UITalk = (() => {
       winners: Object.fromEntries(
         Object.entries(winnerFor).map(([k, v]) => [
           k,
-          { value: v.value, from: `${v.selector} in ${v.source}`, important: v.important || undefined },
+          { value: v.value, from: `${v.selector} in ${v.source}${v.layer ? ` (layer ${v.layer})` : ""}`, important: v.important || undefined },
         ]),
       ),
       inline: inline || undefined,

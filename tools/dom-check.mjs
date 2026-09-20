@@ -711,6 +711,58 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   wrap.remove();
 }
 
+// --- cascade layers (@layer): layer order overrides specificity and source order,
+// so the winner the agent is sent to edit must respect it, not fall back to "last
+// rule wins". Each case is built so layer order and source order disagree.
+{
+  const wrap = window.document.createElement("div");
+  wrap.innerHTML = `<p class="lyr">x</p>`;
+  window.document.body.appendChild(wrap);
+
+  const style = window.document.createElement("style");
+  style.textContent = `
+    @layer base, theme;
+    /* (a) an unlayered normal declaration beats a layered one, even though the
+       layer rule appears later in source order. */
+    .lyr { color: green; }
+    @layer theme { .lyr { color: red; } }
+    /* (b) among layers, the later-declared layer wins even when its block appears
+       earlier in source order (theme block precedes base block here). */
+    @layer theme { .lyr { background: teal; } }
+    @layer base { .lyr { background: navy; } }
+    /* (c) for !important the layer order reverses: the earlier-declared layer wins,
+       even though its block appears first (so source order would pick the other). */
+    @layer base { .lyr { border-color: navy !important; } }
+    @layer theme { .lyr { border-color: teal !important; } }
+  `;
+  window.document.head.appendChild(style);
+
+  const out = UITalk.describeStyles({ selector: ".lyr" });
+  const layered = out.rules.some((r) => r.layer);
+  if (!layered) {
+    // A jsdom without @layer in its CSSOM cannot exercise this; skip rather than
+    // assert a false pass. Current jsdom does parse it — see tools comment.
+    check("jsdom exposes cascade layers for this suite", false,
+      "no rule carried a layer; @layer support may have regressed");
+  } else {
+    check("an unlayered normal declaration beats a later layered one",
+      out.winners?.color?.value === "green", JSON.stringify(out.winners?.color));
+    check("among layers the later-declared layer wins regardless of source order",
+      out.winners?.background?.value === "teal", JSON.stringify(out.winners?.background));
+    check("the winning layer is named so the agent knows where to edit",
+      /layer theme/.test(out.winners?.background?.from ?? ""), out.winners?.background?.from);
+    check("for !important the earlier-declared layer wins (order reversed)",
+      out.winners?.["border-color"]?.value === "navy" && out.winners?.["border-color"]?.important === true,
+      JSON.stringify(out.winners?.["border-color"]));
+    check("layered rules carry their layer path in the rules list",
+      out.rules.some((r) => r.layer === "theme") && out.rules.some((r) => r.layer === "base"),
+      JSON.stringify(out.rules.map((r) => r.layer).filter(Boolean)));
+  }
+
+  style.remove();
+  wrap.remove();
+}
+
 // --- capture over time: a still frame cannot show motion
 {
   const t0 = Date.now();

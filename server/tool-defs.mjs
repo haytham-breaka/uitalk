@@ -301,9 +301,10 @@ export function toolDefinitions(
         "the difference between editing the right line and editing one that loses the cascade. " +
         "A rule inside an @media or @supports block that does not currently apply is still " +
         "listed — marked active: false — but never wins: it's the rule that would win at another " +
-        "viewport, not the one controlling what the user sees now. This is not a full CSS engine: " +
-        "cascade layers, multiple stylesheet origins, and CSS nesting are not modeled, so treat " +
-        "the named winner as a strong hint, not a guarantee, when a selector uses those. " +
+        "viewport, not the one controlling what the user sees now. @layer order is honored (it " +
+        "overrides specificity, and the winning layer is named in each winner's 'from'). This is " +
+        "not a full CSS engine: multiple stylesheet origins and CSS nesting are not modeled, so " +
+        "treat the named winner as a strong hint, not a guarantee, when a selector uses those. " +
         ":is()/:not()/:where() are scored correctly one level deep (the specificity of the most " +
         "specific argument, :where() always zero); nested more than that, they fall back to the " +
         "same approximation. Call this before writing CSS to source.",
