@@ -624,6 +624,94 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       JSON.stringify(out));
     unlinkSync(join(repo, "résumé.css"));
   }
+
+  // Undo restores the worktree but must NOT touch the index — a `git checkout
+  // <ref> -- <path>` would rewrite staging too. These assert the index explicitly.
+  const staged = (file) => git("show", `:${file}`).toString(); // the index version of a path
+  const porcelain = () => git("status", "--porcelain=v1").toString().trim();
+
+  {
+    // Staged B, unstaged worktree C, agent -> D, undo. Worktree must come back to
+    // C while the index keeps B — the two versions must not collapse into one.
+    writeFileSync(join(repo, "split.css"), "A\n");
+    git("add", "split.css");
+    git("commit", "-qm", "split A");
+    writeFileSync(join(repo, "split.css"), "B\n");
+    git("add", "split.css"); // index = B
+    writeFileSync(join(repo, "split.css"), "C\n"); // worktree = C
+    const indexBefore = staged("split.css");
+    const statusBefore = porcelain();
+
+    const snap0 = await snapshots.snapshot(repo, "restyle a staged+unstaged file");
+    writeFileSync(join(repo, "split.css"), "D\n"); // agent
+    const snap = await snapshots.captureAfter(repo, snap0);
+    const out = await snapshots.revertTo(repo, snap);
+
+    check("undo restores the unstaged worktree version", readFileSync(join(repo, "split.css"), "utf8") === "C\n",
+      readFileSync(join(repo, "split.css"), "utf8").trim());
+    check("and leaves the staged version untouched (index not collapsed)",
+      staged("split.css") === indexBefore && indexBefore.trim() === "B", `index=${staged("split.css").trim()}`);
+    check("and the staged/unstaged split survives undo byte-for-byte",
+      porcelain() === statusBefore, `${porcelain()} vs ${statusBefore}`);
+    check("undo reported the file as reverted", out.reverted.includes("split.css"), JSON.stringify(out));
+  }
+
+  {
+    // A pre-existing UNSTAGED edit (index A, worktree B), agent -> C, undo. The
+    // file must return to B and stay unstaged — undo must not stage it.
+    writeFileSync(join(repo, "unstaged.css"), "A\n");
+    git("add", "unstaged.css");
+    git("commit", "-qm", "unstaged A");
+    writeFileSync(join(repo, "unstaged.css"), "B\n"); // unstaged edit
+    const statusBefore = porcelain();
+
+    const snap0 = await snapshots.snapshot(repo, "restyle an unstaged file");
+    writeFileSync(join(repo, "unstaged.css"), "C\n"); // agent
+    const snap = await snapshots.captureAfter(repo, snap0);
+    await snapshots.revertTo(repo, snap);
+
+    check("undo restores the pre-agent unstaged content", readFileSync(join(repo, "unstaged.css"), "utf8") === "B\n",
+      readFileSync(join(repo, "unstaged.css"), "utf8").trim());
+    check("and the file stays unstaged, not turned into a staged change",
+      /^ M unstaged\.css$/m.test(porcelain()) && porcelain() === statusBefore, porcelain());
+  }
+
+  {
+    // A clean committed file, agent -> B, undo -> A, with the index left clean.
+    writeFileSync(join(repo, "clean.css"), "A\n");
+    git("add", "clean.css");
+    git("commit", "-qm", "clean A");
+    const snap0 = await snapshots.snapshot(repo, "restyle a clean file");
+    writeFileSync(join(repo, "clean.css"), "B\n");
+    const snap = await snapshots.captureAfter(repo, snap0);
+    await snapshots.revertTo(repo, snap);
+
+    check("undo restores a clean tracked file", readFileSync(join(repo, "clean.css"), "utf8") === "A\n",
+      readFileSync(join(repo, "clean.css"), "utf8").trim());
+    check("and leaves nothing staged for it",
+      !/clean\.css/.test(porcelain()), porcelain() || "clean");
+  }
+
+  {
+    // The !postCaptured fallback (undo pressed before the turn ended) must keep the
+    // same index invariant. Stage B, edit worktree to C, agent -> D, revert with no
+    // captureAfter: worktree back to C, staged B untouched.
+    writeFileSync(join(repo, "fallback.css"), "A\n");
+    git("add", "fallback.css");
+    git("commit", "-qm", "fallback A");
+    writeFileSync(join(repo, "fallback.css"), "B\n");
+    git("add", "fallback.css"); // index = B
+    writeFileSync(join(repo, "fallback.css"), "C\n"); // worktree = C
+    const snap0 = await snapshots.snapshot(repo, "fallback split");
+    writeFileSync(join(repo, "fallback.css"), "D\n"); // agent, turn not yet ended
+    const out = await snapshots.revertTo(repo, snap0); // no captureAfter → fallback branch
+
+    check("the pre-capture fallback restores the worktree", readFileSync(join(repo, "fallback.css"), "utf8") === "C\n",
+      readFileSync(join(repo, "fallback.css"), "utf8").trim());
+    check("and the fallback leaves the index untouched too",
+      staged("fallback.css").trim() === "B" && out.reverted.includes("fallback.css"),
+      `index=${staged("fallback.css").trim()}`);
+  }
 }
 
 // ------------------------------------------------------------------- proxy
