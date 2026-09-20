@@ -10,6 +10,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseJsonc } from "./jsonc.mjs";
 
 const CANDIDATES = ["opencode.jsonc", "opencode.json"];
 
@@ -17,72 +18,6 @@ const CANDIDATES = ["opencode.jsonc", "opencode.json"];
 // to this project, so it finds the right bridge in the registry.
 function uitalkEntry(project) {
   return { type: "local", command: ["uitalk-mcp"], environment: { UITALK_PROJECT: project } };
-}
-
-// Read the config to a plain value, tolerating JSONC (line/block comments and
-// trailing commas), string-aware so a `//`, `/*` or `,` inside a string is left
-// alone. Returns null when it isn't valid enough to reason about. Exported for
-// tests that need to re-read what was written the same forgiving way.
-export function parseJsonc(text) {
-  let out = "";
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    if (c === '"') {
-      out += c;
-      i++;
-      while (i < n) {
-        out += text[i];
-        if (text[i] === "\\") {
-          out += text[i + 1] ?? "";
-          i += 2;
-          continue;
-        }
-        if (text[i] === '"') {
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    if (c === "/" && text[i + 1] === "/") {
-      i += 2;
-      while (i < n && text[i] !== "\n") i++;
-      continue;
-    }
-    if (c === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < n && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i = Math.min(i + 2, n);
-      continue;
-    }
-    if (c === ",") {
-      // A trailing comma is one followed only by whitespace before a } or ]. We
-      // are past comment stripping for the chars we emit, but the source may still
-      // hold comments between the comma and the bracket, so skip those too.
-      let j = i + 1;
-      while (j < n) {
-        const d = text[j];
-        if (d === " " || d === "\t" || d === "\r" || d === "\n") { j++; continue; }
-        if (d === "/" && text[j + 1] === "/") { j += 2; while (j < n && text[j] !== "\n") j++; continue; }
-        if (d === "/" && text[j + 1] === "*") { j += 2; while (j < n && !(text[j] === "*" && text[j + 1] === "/")) j++; j = Math.min(j + 2, n); continue; }
-        break;
-      }
-      if (text[j] === "}" || text[j] === "]") {
-        i++; // drop the trailing comma
-        continue;
-      }
-    }
-    out += c;
-    i++;
-  }
-  try {
-    return JSON.parse(out);
-  } catch {
-    return null;
-  }
 }
 
 // The byte offset just after the opening brace we should splice a new member in
