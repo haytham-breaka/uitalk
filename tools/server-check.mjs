@@ -1150,6 +1150,47 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     p.close();
   }
 
+  {
+    // Off mode: the MCP client edits source in its own editor, invisible to the
+    // bridge, then sends note_edit once it has committed the approved change. That
+    // signal is what lets undo scope to those files — before it, undo declines the
+    // same way it would mid-turn; after it, undo restores the change.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setAgentForTest("off");
+    writeFileSync(join(proj, "mcp-edit.css"), ".m { color: red }\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "mcp baseline"], { cwd: proj });
+
+    p.deliver({ kind: "approval", label: "mcp change", ref: 1, declarations: "color: blue", element: {} });
+    await until(() => bridge.approvalPhaseForTest() === "idle", "the off-mode approval to settle");
+    writeFileSync(join(proj, "mcp-edit.css"), ".m { color: blue }\n"); // the MCP client's own edit
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the pre-signal revert to answer");
+    check("in off mode, undo declines until the client says it committed the edit",
+      p.sent.find((f) => f.kind === "reverted")?.ok === false,
+      JSON.stringify(p.sent.find((f) => f.kind === "reverted")));
+
+    p.deliver({ kind: "note_edit" });
+    await until(() => bridge.approvalCapturedForTest(), "the post-edit state to be recorded");
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the post-signal revert to answer");
+    const reverted = p.sent.find((f) => f.kind === "reverted");
+    check("after note_edit, undo restores the MCP-committed change",
+      reverted?.ok === true && reverted.files?.includes("mcp-edit.css"), JSON.stringify(reverted));
+    check("and the file is back to its pre-approval contents",
+      readFileSync(join(proj, "mcp-edit.css"), "utf8") === ".m { color: red }\n",
+      readFileSync(join(proj, "mcp-edit.css"), "utf8").trim());
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    p.close();
+  }
+
   // ------------------------------------------------- RPC answers are bound to
   // ------------------------------------------------- the socket asked, not id alone
   {
