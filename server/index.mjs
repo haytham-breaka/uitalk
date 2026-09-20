@@ -387,9 +387,10 @@ function approvalCapturedForTest() {
   return Boolean(lastChange?.snap?.postCaptured);
 }
 
-/** The paths the agent is recorded as having written this turn, for tests. */
+/** The write-attribution this turn, for tests: the recorded paths and whether that
+ * set is complete (no opaque/shell tool ran that could have written elsewhere). */
 function turnWritesForTest() {
-  return [...turnWrites];
+  return { paths: [...turnWrites.paths], complete: turnWrites.complete };
 }
 
 // Stands in for `import("@opencode-ai/sdk")` so a test can drive runOpencode's
@@ -808,22 +809,59 @@ function noteTokens(total) {
 // agent was working — which also differs from the snapshot — is not swept in. Reset
 // when an approval takes its snapshot; empty when the writes are invisible to the
 // bridge (an MCP client), in which case captureAfter falls back to the full diff.
-let turnWrites = new Set();
+// What the agent wrote this turn, so undo can scope to exactly those files rather
+// than the whole diff (which would also sweep in a file the user edited while the
+// agent worked). `complete` says whether that set is the WHOLE story: it stays true
+// only while every tool the agent ran was a structured write (path recorded) or a
+// known read. The moment a tool runs that could mutate files at paths we cannot see
+// — a shell/bash tool, or any tool we don't recognize — it flips false, and undo
+// falls back to the full diff rather than silently missing that write. Reset when
+// an approval takes its snapshot.
+let turnWrites = { paths: new Set(), complete: true };
 
 // The Claude Agent SDK's file-writing tools, whose tool_use input names the path
-// touched. Read/search tools are deliberately excluded — recording a path the
-// agent only read would let a file the user changed be undone if the agent
+// touched, and its read/search tools, which don't mutate the tree. Recording a path
+// the agent only read would let a file the user changed be undone if the agent
 // happened to read it (undo intersects writes with the diff, never reads).
 const BUILTIN_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-// OpenCode's built-in file-writing tools, likewise (its read/list tools are left out).
+const BUILTIN_READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead"]);
+// OpenCode's built-in file-writing and read/list tools, likewise. Anything else it
+// runs (notably `bash`) is treated as an opaque possible mutator — see markOpaqueTool.
 const OPENCODE_WRITE_TOOLS = new Set(["write", "edit", "patch"]);
+const OPENCODE_READ_TOOLS = new Set(["read", "grep", "glob", "list", "ls"]);
 
 /** Record a file the agent just wrote, normalized to a project-relative POSIX path
- * so it matches git's diff/ls-files output. Paths outside the project are ignored. */
+ * so it matches git's diff/ls-files output. A path outside the project is ignored
+ * (undo never touches it); a write tool that named no readable path marks the turn
+ * incomplete — we know a write happened but not where. */
 function noteAgentWrite(path) {
-  if (typeof path !== "string" || !path) return;
+  if (typeof path !== "string" || !path) {
+    turnWrites.complete = false;
+    return;
+  }
   const rel = relative(PROJECT, resolve(PROJECT, path));
-  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) turnWrites.add(rel.split(sep).join("/"));
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) turnWrites.paths.add(rel.split(sep).join("/"));
+}
+
+/** A tool ran that could have mutated files at paths the bridge cannot determine
+ * (a shell tool, or one we don't recognize). Undo must then fall back to the full
+ * diff, since scoping to the known writes could silently miss this one. */
+function markOpaqueTool() {
+  turnWrites.complete = false;
+}
+
+/** Classify a tool the agent just used for write-attribution: a structured write
+ * records its path, a known read is ignored, anything else is opaque. `mcp__` tools
+ * are uitalk's own page tools (and the MCP client's), which preview in the browser
+ * and never write project source. */
+function noteBuiltinTool(name, input) {
+  if (BUILTIN_WRITE_TOOLS.has(name)) noteAgentWrite(input?.file_path ?? input?.notebook_path);
+  else if (!BUILTIN_READ_TOOLS.has(name) && !name.startsWith("mcp__")) markOpaqueTool();
+}
+
+function noteOpencodeTool(tool, input) {
+  if (OPENCODE_WRITE_TOOLS.has(tool)) noteAgentWrite(input?.filePath ?? input?.path ?? input?.file);
+  else if (!OPENCODE_READ_TOOLS.has(tool)) markOpaqueTool();
 }
 
 /** Freeze the post-edit state of the last approved change, once, so a later user
@@ -836,7 +874,12 @@ function noteAgentWrite(path) {
 async function captureApprovedEdit() {
   if (lastChange?.snap && !lastChange.snap.postCaptured) {
     try {
-      lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap, [...turnWrites]);
+      // Scope to the agent's own writes only when we saw the WHOLE set: every tool
+      // was a structured write or a known read. If a shell/opaque tool ran, or no
+      // structured write was seen at all (an MCP client's edit is invisible here),
+      // fall back to the full diff so no write is missed.
+      const scoped = turnWrites.complete && turnWrites.paths.size ? [...turnWrites.paths] : null;
+      lastChange.snap = await snapshots.captureAfter(PROJECT, lastChange.snap, scoped);
     } catch (err) {
       log(`post-edit capture failed, undo falls back to whole-file for this change: ${err.message}`);
     }
@@ -867,7 +910,7 @@ async function noteTurnEnded() {
  * pendingApprovals can be started later, from noteTurnEnded, on identical terms. */
 function beginApproval(frame) {
   approvalPhase = "snapshotting";
-  turnWrites = new Set(); // scope this approval's undo to what the agent writes from here
+  turnWrites = { paths: new Set(), complete: true }; // scope this approval's undo to what the agent writes from here
   record("me", `approved: ${frame.label}`);
   // Neither the external-agent notice nor the edit instruction may reach an agent
   // until the pre-edit snapshot exists — otherwise the agent's own write can land
@@ -1390,13 +1433,11 @@ async function runOpencode() {
           } else if (part.type === "tool" && part.state.status !== "pending" && !turn.seenTools.has(part.callID)) {
             turn.seenTools.add(part.callID);
             if (!turn.quiet) toPanel({ kind: "tool", name: part.tool });
-            // OpenCode's edit/write tools carry the path in their input; record it
-            // so undo can scope to the agent's own edits (best-effort — an edit made
-            // some other way just falls back to the full diff).
-            if (OPENCODE_WRITE_TOOLS.has(part.tool)) {
-              const input = part.state?.input ?? {};
-              noteAgentWrite(input.filePath ?? input.path ?? input.file);
-            }
+            // Classify for undo scoping: a write records its path, a read is
+            // ignored, anything else (bash, an unknown tool) marks the turn's write
+            // set incomplete so undo falls back to the full diff instead of missing
+            // whatever that tool touched.
+            noteOpencodeTool(part.tool, part.state?.input ?? {});
           } else if (part.type === "step-finish") {
             const t = part.tokens ?? {};
             noteTokens((t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0));
@@ -1542,9 +1583,11 @@ function relay(event) {
       for (const block of event.message?.content ?? []) {
         if (block.type !== "tool_use") continue;
         toPanel({ kind: "tool", name: block.name });
-        // The SDK's file-writing tools name the path they touch; record it so undo
-        // can scope to the agent's own edits (see turnWrites / captureAfter).
-        if (BUILTIN_WRITE_TOOLS.has(block.name)) noteAgentWrite(block.input?.file_path ?? block.input?.notebook_path);
+        // Classify for undo scoping: a write records its path, a read is ignored,
+        // anything else marks the turn's write set incomplete (see turnWrites /
+        // captureAfter). The builtin session allows no shell today, so this stays
+        // complete in practice — but it must not silently miss one if that changes.
+        noteBuiltinTool(block.name, block.input);
       }
       return;
 

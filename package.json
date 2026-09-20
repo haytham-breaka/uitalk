@@ -1,6 +1,6 @@
 {
   "name": "uitalk",
-  "version": "0.6.57",
+  "version": "0.6.58",
   "private": true,
   "type": "module",
   "description": "Edit a running web app from inside the page: pick elements, preview changes, compare variants, and commit the approved one to source \u2014 driven by a local coding agent.",

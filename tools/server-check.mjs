@@ -2141,7 +2141,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       bridge.transcript.some((t) => t.role === "agent" && /edited Header/.test(t.text)), JSON.stringify(bridge.transcript));
 
     check("an OpenCode write tool's path is recorded, a read tool's is not",
-      bridge.turnWritesForTest().includes("oc-styles.css") && !bridge.turnWritesForTest().includes("oc-readonly.css"),
+      bridge.turnWritesForTest().paths.includes("oc-styles.css") && !bridge.turnWritesForTest().paths.includes("oc-readonly.css"),
       JSON.stringify(bridge.turnWritesForTest()));
 
     // text a delta already covered is not double-relayed by the part's final update.
@@ -2336,7 +2336,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     // … while the user edits user-wrote.css in the same window (no tool_use for it)
     writeFileSync(join(proj, "user-wrote.css"), "y: 2\n");
     check("only the agent's tool_use path is recorded as written",
-      bridge.turnWritesForTest().includes("agent-wrote.css") && !bridge.turnWritesForTest().includes("user-wrote.css"),
+      bridge.turnWritesForTest().paths.includes("agent-wrote.css") && !bridge.turnWritesForTest().paths.includes("user-wrote.css"),
       JSON.stringify(bridge.turnWritesForTest()));
 
     bridge.relay({ type: "result", subtype: "success" });
@@ -2353,6 +2353,94 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
 
     bridge.setSessionForTest(null);
     await bridge.clearSession();
+    p.close();
+  }
+
+  // --------------------------------- write attribution: complete vs incomplete
+  // The write set is only trusted (scoped) when it is COMPLETE — every tool was a
+  // structured write or a known read. A shell/opaque tool marks it incomplete, so
+  // undo falls back to the full diff instead of silently missing that tool's writes.
+  {
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    const scenario = async (label, content) => {
+      p.deliver({ kind: "approval", label, ref: 1, declarations: "color:red", element: {} });
+      await untilPhase("editing");
+      bridge.relay({ type: "assistant", message: { content } });
+      const w = bridge.turnWritesForTest();
+      bridge.relay({ type: "result", subtype: "success" });
+      await untilPhase("idle");
+      return w;
+    };
+    const tool = (name, input) => ({ type: "tool_use", name, input });
+
+    const structured = await scenario("structured only", [tool("Edit", { file_path: join(proj, "A.css") }), tool("Write", { file_path: join(proj, "B.css") })]);
+    check("only structured edits → complete, scoped to those paths",
+      structured.complete && structured.paths.includes("A.css") && structured.paths.includes("B.css"), JSON.stringify(structured));
+
+    const shellOnly = await scenario("shell only", [tool("Bash", { command: "sed -i s/a/b/ x.css" })]);
+    check("a shell/opaque tool → incomplete, so undo falls back to the full diff",
+      shellOnly.complete === false && shellOnly.paths.length === 0, JSON.stringify(shellOnly));
+
+    const mixed = await scenario("structured + shell", [tool("Edit", { file_path: join(proj, "A.css") }), tool("Bash", { command: "echo x >> B.css" })]);
+    check("structured edit + shell → incomplete even though a path was recorded",
+      mixed.complete === false && mixed.paths.includes("A.css"), JSON.stringify(mixed));
+
+    const reads = await scenario("no known writes", [tool("Read", { file_path: join(proj, "A.css") }), tool("Grep", { pattern: "x" })]);
+    check("only reads → complete with no paths (captureAfter then uses the full diff)",
+      reads.complete === true && reads.paths.length === 0, JSON.stringify(reads));
+
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    p.close();
+  }
+
+  // End to end: the dangerous case — the agent edits one file through a structured
+  // tool and another through shell. Undo must restore BOTH; scoping to the recorded
+  // path alone (the old behavior) silently left the shell-written file changed.
+  {
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setSessionForTest({
+      mode: "builtin", label: "claude",
+      summarize: (r) => bridge.askAgent(r, 5000),
+      clear: () => bridge.askAgent("/clear", 5000),
+    });
+    writeFileSync(join(proj, "struct.css"), "a: 1\n");
+    writeFileSync(join(proj, "shell.css"), "b: 1\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "attribution baseline"], { cwd: proj });
+
+    p.deliver({ kind: "approval", label: "mixed edit", ref: 1, declarations: "color:red", element: {} });
+    await untilPhase("editing");
+    bridge.relay({ type: "assistant", message: { content: [
+      { type: "tool_use", name: "Edit", input: { file_path: join(proj, "struct.css") } },
+      { type: "tool_use", name: "Bash", input: { command: "printf 'b: 2\\n' > shell.css" } },
+    ] } });
+    writeFileSync(join(proj, "struct.css"), "a: 2\n"); // the structured edit
+    writeFileSync(join(proj, "shell.css"), "b: 2\n"); // the shell-written file the bridge can't attribute
+
+    bridge.relay({ type: "result", subtype: "success" });
+    await untilPhase("idle");
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the revert to answer");
+    const out = p.sent.find((f) => f.kind === "reverted");
+    check("undo restores BOTH the structured edit and the shell-written file",
+      out.ok === true && out.files?.includes("struct.css") && out.files?.includes("shell.css") &&
+        readFileSync(join(proj, "struct.css"), "utf8") === "a: 1\n" &&
+        readFileSync(join(proj, "shell.css"), "utf8") === "b: 1\n",
+      JSON.stringify({ out, shell: readFileSync(join(proj, "shell.css"), "utf8").trim() }));
+
+    bridge.setSessionForTest(null);
+    await bridge.clearSession();
+    execFileSync("git", ["rm", "-q", "struct.css", "shell.css"], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "cleanup attribution"], { cwd: proj });
     p.close();
   }
 }
