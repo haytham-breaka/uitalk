@@ -513,11 +513,21 @@ wss.on("connection", (ws) => {
       }
 
       case "revert": {
-        // Blocks a new approval too (it requires "idle"): its snapshot() and this
-        // revertTo() both rewrite the working tree, and running them concurrently
-        // could interleave a stash-create with a checkout, or race each other.
-        if (approvalPhase === "reverting") {
-          toPanel({ kind: "reverted", ok: false, text: "already undoing the last change — wait for that to finish" });
+        // Only undo from a settled state. While an approval is mid-flight —
+        // "snapshotting" (its git stash create still running) or "editing" — its
+        // snapshot() and this revertTo() would rewrite the working tree at once,
+        // and a revert that slipped through during "snapshotting" would clobber
+        // lastChange the instant that snapshot resolved. A revert is issued at
+        // "idle", so this refuses only the overlap. (The legitimate off-mode case,
+        // idle but not yet committed, is caught by the postCaptured gate below.)
+        if (approvalPhase !== "idle") {
+          toPanel({
+            kind: "reverted",
+            ok: false,
+            text: approvalPhase === "reverting"
+              ? "already undoing the last change — wait for that to finish"
+              : "the agent hasn't finished making this change yet — wait for it to finish, then undo",
+          });
           return;
         }
         void (async () => {
