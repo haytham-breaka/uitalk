@@ -95,10 +95,20 @@ const ENV = {
 };
 
 const readJson = (path) => {
+  let text;
   try {
-    const v = JSON.parse(readFileSync(path, "utf8"));
-    return v && typeof v === "object" ? v : {};
+    text = readFileSync(path, "utf8");
   } catch {
+    return {}; // absent or unreadable: fall back to defaults silently — the normal case
+  }
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" ? v : {};
+  } catch (err) {
+    // Present but not valid JSON — a hand-edit typo. Silently reverting every
+    // setting (or ignoring a key the user clearly put in credentials.json) sends
+    // them hunting in the wrong place, so say so rather than swallow it.
+    console.warn(`[uitalk] ignoring ${path}: not valid JSON (${err.message})`);
     return {};
   }
 };
