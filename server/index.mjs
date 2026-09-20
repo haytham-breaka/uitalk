@@ -1417,6 +1417,12 @@ async function runOpencode() {
     } catch (err) {
       log(`OpenCode event stream ended: ${err.message}`);
       failTurn(`lost the connection to OpenCode: ${err.message}`);
+    } finally {
+      // The stream can also end WITHOUT throwing (a graceful SSE close). Either way
+      // no more idle/error events will arrive, so a turn still in flight would leave
+      // its send() queue step unresolved and wedge every later send/summarize/clear.
+      // failTurn is a no-op when there is no turn, so this is safe on the throw path too.
+      failTurn("the OpenCode event stream ended");
     }
   })();
 

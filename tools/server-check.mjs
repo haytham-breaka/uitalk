@@ -2146,7 +2146,18 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     stream.push({ type: "session.idle", properties: { sessionID: "S" } }); // end turn two, leave state clean
     await until(() => p.sent.filter((f) => f.kind === "turn_end").length >= 2, "both turns to end");
 
-    stream.end();
+    // If the event stream ends WITHOUT a final idle/error (a graceful SSE close),
+    // a turn still in flight must not spin forever — its send() queue step would
+    // never resolve and wedge every later turn. Start a turn, end the stream, and
+    // confirm the turn is ended rather than left open.
+    p.sent.length = 0;
+    bridge.pushToAgent("a turn the stream will abandon");
+    await until(() => calls.prompts.length === 3, "the third prompt to dispatch");
+    stream.end(); // graceful close, no idle/error
+    await until(() => p.sent.some((f) => f.kind === "turn_end"), "the abandoned turn to be ended when the stream closes");
+    check("a turn is ended when the OpenCode stream closes without a final event",
+      p.sent.some((f) => f.kind === "turn_end"), JSON.stringify(p.sent.map((f) => f.kind)));
+
     bridge.setOpencodeForTest(null);
     bridge.setAgentForTest("builtin");
     bridge.setSessionForTest(null);
