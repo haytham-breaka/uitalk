@@ -33,6 +33,7 @@
     clearSelection: () => ({ cleared: 0, previewCleared: false }),
     readSelection: () => ({ selected: 0 }), capture: async () => { throw new Error("the app frame is not ready"); },
     scanRegion: () => ({ elements: [] }), tryStyle: () => {}, tryMarkup: () => {},
+    reconcileTargets: () => {}, // an unready frame has no stamped targets to reconcile
     showOptions: () => {}, resetPreview: () => {}, flip: () => {}, chosenOption: () => null,
     dismissOptions: () => {}, identify: () => ({}), setUiHost: () => {},
     pageContext: () => ({ path: location.pathname, viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio } }),
@@ -522,12 +523,12 @@
       ["string", /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/],
       ["keyword", /!important\b|@[a-zA-Z-]+/],
       ["prop", /[a-zA-Z-]+(?=\s*:)/],
-      ["number", /-?\d+\.?\d*(px|em|rem|%|vh|vw|vmin|vmax|deg|s|ms)?\b/],
+      ["number", /-?\d+\.?\d*(?:px|em|rem|%|vh|vw|vmin|vmax|deg|s|ms)?\b/],
     ],
     js: [
       ["comment", /\/\/[^\n]*|\/\*[\s\S]*?\*\//],
       ["string", /`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/],
-      ["keyword", /\b(const|let|var|function|return|if|else|for|while|import|export|from|default|class|extends|new|this|async|await|try|catch|finally|throw|typeof|instanceof|in|of|switch|case|break|continue|null|undefined|true|false)\b/],
+      ["keyword", /\b(?:const|let|var|function|return|if|else|for|while|import|export|from|default|class|extends|new|this|async|await|try|catch|finally|throw|typeof|instanceof|in|of|switch|case|break|continue|null|undefined|true|false)\b/],
       ["number", /\b\d+\.?\d*\b/],
     ],
     html: [
@@ -539,7 +540,7 @@
     json: [
       ["prop", /"(?:[^"\\]|\\.)*"(?=\s*:)/],
       ["string", /"(?:[^"\\]|\\.)*"/],
-      ["keyword", /\b(true|false|null)\b/],
+      ["keyword", /\b(?:true|false|null)\b/],
       ["number", /-?\d+\.?\d*\b/],
     ],
   };
@@ -556,13 +557,17 @@
     const rules = TOKEN_RULES[lang];
     if (!rules) return escapeHtml(code);
 
+    // Each rule contributes exactly one capture group, so the index of the first
+    // defined group names the matching rule. Rules must therefore keep their own
+    // groups non-capturing (?:...); the `?? rules[0]` is a belt so a stray inner
+    // group degrades to a plain span instead of throwing and freezing the render.
     const combined = new RegExp(rules.map(([, re]) => `(${re.source})`).join("|"), "g");
     let out = "";
     let last = 0;
     let m;
     while ((m = combined.exec(code))) {
       out += escapeHtml(code.slice(last, m.index));
-      const cls = rules[m.slice(1).findIndex((g) => g !== undefined)][0];
+      const cls = (rules[m.slice(1).findIndex((g) => g !== undefined)] ?? rules[0])[0];
       out += `<span class="tok-${cls}">${escapeHtml(m[0])}</span>`;
       last = m.index + m[0].length;
       if (m[0].length === 0) combined.lastIndex++; // never loop on a zero-width match
@@ -1128,7 +1133,12 @@
     ws.onerror = () => {};
 
     ws.onmessage = (ev) => {
-      const f = JSON.parse(ev.data);
+      let f;
+      try {
+        f = JSON.parse(ev.data);
+      } catch {
+        return console.warn("[uitalk] dropped a bridge message that was not JSON"); // don't let one bad frame kill the socket handler
+      }
       switch (f.kind) {
         case "ready":
           // The page runs whatever it loaded. If the bridge has restarted with a
@@ -2131,7 +2141,9 @@
   function describe(el) {
     const tag = el.tagName.toLowerCase();
     if (el.id) return `<${tag}#${el.id}>`;
-    const cls = String(el.className || "").split(/\s+/).filter(Boolean)[0];
+    // classList, not className: on an SVG element className is an SVGAnimatedString
+    // object, so String(className) would render "<rect.[object>".
+    const cls = el.classList?.[0];
     return cls ? `<${tag}.${cls}>` : `<${tag}>`;
   }
 
