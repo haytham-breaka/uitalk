@@ -1699,10 +1699,17 @@
     if (!pending) return;
     const job = pending;
     pending = null;
+    // When a standalone reload is triggered, this document is about to be replaced and
+    // the verification job has been handed to sessionStorage for the next load. The
+    // finally still runs on the way out, so it must NOT verify here: the old document
+    // has the pre-edit markup, so it would falsely report the change "did not survive"
+    // (and even nudge the agent) before the reload lands — and the new document
+    // verifies from RESUME_KEY anyway. Only verify inline when we did not hand off.
+    let handedOff = false;
     try {
       // Give the edit time to reach the browser through the dev server.
       await new Promise((r) => setTimeout(r, 900));
-      if (await reloadForResult(job)) return; // resumed after the reload
+      if (await reloadForResult(job)) { handedOff = true; return; } // resumed after the reload
       const rect = api().rectOf({ ref: job.ref, selector: job.selector }) ?? null;
       const region = rect
         ? { left: rect.left, top: rect.top, right: rect.left + rect.width, bottom: rect.top + rect.height }
@@ -1712,7 +1719,7 @@
     } catch (err) {
       say("note", `could not capture the result: ${err.message}`);
     } finally {
-      verifyCommitted(job);
+      if (!handedOff) verifyCommitted(job); // the replacement document verifies after a standalone reload
     }
   }
 
