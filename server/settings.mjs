@@ -9,6 +9,7 @@
 import { mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { withLockSync } from "./file-lock.mjs";
 
 const HOME = process.env.UITALK_HOME ?? join(homedir(), ".uitalk");
 const GLOBAL_FILE = join(HOME, "settings.json");
@@ -212,17 +213,26 @@ export function credential(provider) {
   return { key: null, from: null };
 }
 
-/** Write one provider's key to the uitalk home, readable only by its owner. */
+/** Write one provider's key to the uitalk home, readable only by its owner.
+ *
+ * This is a read-modify-write of a file shared by every provider, so two processes
+ * saving different providers at once would each read the same old file and each
+ * rename their own version over it — the second wins and the first provider's key
+ * vanishes. The whole read-modify-write runs under a cross-process lock so the two
+ * are serialized and the final file holds both. Kept synchronous (the lock blocks
+ * only during rare, brief contention), so the public API is unchanged. */
 export function saveCredential(provider, key) {
   mkdirSync(HOME, { recursive: true });
-  const next = { ...readJson(CREDENTIALS_FILE), [provider]: String(key).trim() };
-  const tmp = `${CREDENTIALS_FILE}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, CREDENTIALS_FILE);
-  try {
-    chmodSync(CREDENTIALS_FILE, 0o600);
-  } catch {}
-  return CREDENTIALS_FILE;
+  return withLockSync(`${CREDENTIALS_FILE}.lock`, () => {
+    const next = { ...readJson(CREDENTIALS_FILE), [provider]: String(key).trim() };
+    const tmp = `${CREDENTIALS_FILE}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
+    renameSync(tmp, CREDENTIALS_FILE); // atomic: a reader sees the old or the new whole JSON, never a partial
+    try {
+      chmodSync(CREDENTIALS_FILE, 0o600);
+    } catch {}
+    return CREDENTIALS_FILE;
+  });
 }
 
 export const paths = { global: GLOBAL_FILE, project: PROJECT_FILE, credentials: CREDENTIALS_FILE };
