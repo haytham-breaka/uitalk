@@ -350,9 +350,11 @@ function setSessionForTest(s) {
 
 // Indirection so a test can force a controllable delay around the approval
 // snapshot without touching the git-backed implementation itself.
-let snapshotFn = (label) => snapshots.snapshot(PROJECT, label);
+const snapshotWithLog = (label) =>
+  snapshots.snapshot(PROJECT, label, (err) => log(`snapshot failed, undo unavailable for this change: ${err.message}`));
+let snapshotFn = snapshotWithLog;
 function setSnapshotForTest(fn) {
-  snapshotFn = fn ?? ((label) => snapshots.snapshot(PROJECT, label));
+  snapshotFn = fn ?? snapshotWithLog;
 }
 
 /** captureAfter() sends no panel frame of its own, so a test polls this instead
