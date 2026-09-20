@@ -89,8 +89,11 @@ const rpc = (method, params = {}) =>
 await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } });
 
 const listed = await rpc("tools/list");
-check("it advertises the page tools to any MCP client", listed.result.tools.length === 14,
+check("it advertises the page tools to any MCP client", listed.result.tools.length === 15,
   `${listed.result.tools.length} tools`);
+check("note_edit is offered, so an MCP client can make its edit undoable",
+  listed.result.tools.some((t) => t.name === "note_edit"),
+  listed.result.tools.map((t) => t.name).join(", "));
 check("every tool is described well enough to choose from",
   listed.result.tools.every((t) => (t.description ?? "").length > 60));
 check("read-only tools are flagged, so a client can batch them",
@@ -99,6 +102,10 @@ check("a mutating tool is not flagged read-only",
   listed.result.tools.find((t) => t.name === "try_style")?.annotations?.readOnlyHint === false);
 check("schemas are real JSON Schema, not a Zod object",
   listed.result.tools.every((t) => t.inputSchema?.type === "object"));
+
+const noted = await rpc("tools/call", { name: "note_edit", arguments: {} });
+check("note_edit is callable and acknowledges over stdio",
+  /recorded/.test(noted.result.content[0].text), noted.result.content[0].text.slice(0, 60));
 
 const sel = await rpc("tools/call", { name: "read_selection", arguments: {} });
 check("calling a tool reaches the page", asked.includes("readSelection"), asked.join(", "));
