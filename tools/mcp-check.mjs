@@ -154,6 +154,37 @@ check("and it is delivered once, not stapled to every result afterwards",
   !clean.result.content[0].text.startsWith("[uitalk]"),
   clean.result.content[0].text.slice(0, 40));
 
+// A pick the user makes only AFTER await_choice has already timed out must not be
+// handed to a LATER, unrelated question: those options are no longer on screen,
+// so mounting a new set supersedes the earlier one's unclaimed answer. (The
+// preceding new-session cleared the approval lifecycle, so this approval is not
+// refused as mid-change.)
+await rpc("tools/call", { name: "show_options",
+  arguments: { ref: 1, options: [{ label: "A1", declarations: "color: red" }, { label: "A2", declarations: "color: blue" }] } });
+const staleTimeout = await rpc("tools/call", { name: "await_choice", arguments: { timeout: 1000 } });
+check("await_choice for the first question times out before any pick",
+  /did not pick anything/.test(staleTimeout.result.content[0].text), staleTimeout.result.content[0].text.slice(0, 60));
+page.send(JSON.stringify({ kind: "approval", ref: 1, label: "stale-A",
+  declarations: "color: red", element: { selector: "a.one" } }));
+await new Promise((r) => setTimeout(r, 400)); // let the late approval reach and queue in the MCP server
+await rpc("tools/call", { name: "show_options",
+  arguments: { ref: 2, options: [{ label: "B1", declarations: "margin: 0" }, { label: "B2", declarations: "margin: 8px" }] } });
+const forB = await rpc("tools/call", { name: "await_choice", arguments: { timeout: 1000 } });
+check("a stale choice from a timed-out question is not handed to the next question",
+  !/stale-A/.test(forB.result.content[0].text) && /did not pick anything/.test(forB.result.content[0].text),
+  forB.result.content[0].text.slice(0, 80));
+
+// The same, for ask_choice -> await_answer (choice_answer, no approval lifecycle).
+await rpc("tools/call", { name: "ask_choice", arguments: { question: "First?", options: ["yes", "no"] } });
+await rpc("tools/call", { name: "await_answer", arguments: { timeout: 1000 } });
+page.send(JSON.stringify({ kind: "choice_answer", label: "stale-answer" }));
+await new Promise((r) => setTimeout(r, 400));
+await rpc("tools/call", { name: "ask_choice", arguments: { question: "Second?", options: ["a", "b"] } });
+const answerForSecond = await rpc("tools/call", { name: "await_answer", arguments: { timeout: 1000 } });
+check("a stale answer from a timed-out question is not handed to the next question",
+  !/stale-answer/.test(answerForSecond.result.content[0].text) && /did not answer/.test(answerForSecond.result.content[0].text),
+  answerForSecond.result.content[0].text.slice(0, 80));
+
 // Closing stdin is how a stdio MCP server is meant to end; killing it would lose
 // its coverage and skip its teardown.
 mcp.stdin.end();

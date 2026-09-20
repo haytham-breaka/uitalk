@@ -263,6 +263,24 @@ defs.push({
   },
 });
 
+// A newly mounted question supersedes any earlier one whose answer is still
+// sitting unclaimed in the queue: show_options and ask_choice replace what is on
+// screen, so a queued approval/answer left there can only belong to a question
+// the user can no longer see — a pick made after an earlier await_* had already
+// timed out. Dropping it when the next question is asked is what stops await_*
+// from handing that stale response to the wrong request. Only ever runs for MCP:
+// these queues and the await_* tools exist nowhere else.
+const supersedes = (name, queue) => {
+  const def = defs.find((d) => d.name === name);
+  const inner = def.run;
+  def.run = (args) => {
+    queue.length = 0;
+    return inner(args);
+  };
+};
+supersedes("show_options", choices);
+supersedes("ask_choice", answers);
+
 const asJsonSchema = (def) => ({
   type: "object",
   properties: def.schema ?? {},
