@@ -718,7 +718,22 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
 {
   const { createProxy, proxyUpgrade } = await import("../server/proxy.mjs");
 
+  // A streaming SSR response: the head is flushed at once, the body is held until
+  // the test opens the gate. It lets the test prove the tag is injected and sent
+  // before the body streams, rather than the whole page being buffered first.
+  let openGate;
+  const gate = new Promise((r) => (openGate = r));
+
   const app = createServer((req, res) => {
+    if (req.url === "/stream") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.write("<html><head><title>s</title></head><body>");
+      gate.then(() => {
+        res.write("STREAMED-BODY");
+        res.end("</body></html>");
+      });
+      return;
+    }
     if (req.url === "/nohead") {
       res.writeHead(200, { "content-type": "text/html" });
       return res.end("<body>bare</body>");
@@ -751,7 +766,8 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   const target = { host: "127.0.0.1", port: app.address().port };
 
   const injected = [];
-  const proxy = createServer(createProxy({ target, onInject: (u) => injected.push(u), onHtml: () => {} }));
+  const served = new Map();
+  const proxy = createServer(createProxy({ target, onInject: (u) => injected.push(u), onHtml: (u, h) => served.set(u, h) }));
   await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
   const at = (path) => `http://127.0.0.1:${proxy.address().port}${path}`;
 
@@ -761,12 +777,45 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("it goes before </head> when there is one", html.indexOf("__uitalk/client.js") < html.indexOf("</head>"));
   check("a strict CSP is stripped from what we rewrite", !home.headers.get("content-security-policy"),
     home.headers.get("content-security-policy") ?? "removed");
-  check("content-length matches the rewritten body",
-    Number(home.headers.get("content-length")) === Buffer.byteLength(html), home.headers.get("content-length"));
+  // The body is rewritten as it streams, so its length is unknown up front: it
+  // goes out chunked with no (stale) content-length, and the received bytes are
+  // still the whole injected document.
+  check("a rewritten document carries no stale content-length", home.headers.get("content-length") === null,
+    home.headers.get("content-length") ?? "none");
+  check("the streamed body is the complete injected document",
+    html === '<html><head><title>t</title>' + '<script src="/__uitalk/client.js" data-uitalk></script>' + '</head><body>hi</body></html>',
+    html);
   check("the injection is reported", injected.includes("/"));
 
   check("a page with no head is still injected", (await (await fetch(at("/nohead"))).text()).includes("__uitalk/client.js"));
   check("even a bare fragment is injected", (await (await fetch(at("/fragment"))).text()).includes("__uitalk/client.js"));
+
+  check("the served html is captured for locate_source", (served.get("/") ?? "").includes("<title>t"),
+    (served.get("/") ?? "").slice(0, 40));
+
+  // Streaming: the head (with the tag) reaches the client before the body is even
+  // sent upstream — proof the response is not buffered whole before the first byte.
+  {
+    const r = await fetch(at("/stream"));
+    check("a streamed document is chunked, not given a content-length",
+      r.headers.get("content-length") === null, r.headers.get("content-length") ?? "none");
+    const reader = r.body.getReader();
+    const first = Buffer.from((await reader.read()).value).toString("utf8");
+    check("the injected head is flushed before the gated body streams",
+      /__uitalk\/client\.js/.test(first) && first.indexOf("__uitalk/client.js") < first.indexOf("</head>") && !first.includes("STREAMED-BODY"),
+      first);
+    openGate(); // now let upstream send the rest
+    let rest = first;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += Buffer.from(value).toString("utf8");
+    }
+    check("the rest of the body streams through intact after injection",
+      rest.includes("STREAMED-BODY") && rest.endsWith("</body></html>") &&
+        rest.match(/__uitalk\/client\.js/g).length === 1,
+      rest.slice(-60));
+  }
 
   const asset = await fetch(at("/asset.js"));
   check("non-html passes through untouched", (await asset.text()) === "console.log(1)");
