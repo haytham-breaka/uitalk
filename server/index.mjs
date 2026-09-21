@@ -34,21 +34,11 @@ import { isFrame } from "./protocol.mjs";
 import { projectToken } from "./token.mjs";
 import { timingSafeEqual } from "node:crypto";
 
-// The turn/approval lifecycle FSM and the state it gates (phase, lastChange,
-// pendingApprovals, write attribution). The builtin inbox below (backlog/wake/
-// internal/builtinTurnOpen) is transport and stays separate.
-const coord = new TurnCoordinator();
-
-// Off-mode approvals awaiting their note_edit, keyed by a per-approval change id.
-// builtin/adapter serialize approvals (one edits at a time, captured at turn end), so
-// only off mode can have several uncaptured at once — the MCP client owns each edit
-// and reports it later. A single global lastChange cannot tell them apart, so a second
-// approval would overwrite the pre-edit state the first still needs; this map keeps
-// each approval's own snapshot until its note_edit records it. Bounded so a client
-// that never calls note_edit cannot grow it without limit.
-let changeSeq = 0;
-const offPending = new Map();
-const OFF_PENDING_CAP = 64;
+// The single owner of the approval/undo lifecycle: the turn phase, the set of
+// first-class Change objects (identity, owner, state, snapshot), the undo point, and
+// write attribution. The builtin inbox below (backlog/wake/internal/builtinTurnOpen)
+// is transport and stays separate.
+const coord = new TurnCoordinator(); // see turn-coordinator.mjs
 
 // A fixed port would stop the second bridge from ever starting. An explicit
 // UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
@@ -300,6 +290,25 @@ let activePage = null;
 const agents = new Set();
 const pages = new Set();
 
+// One approved change has exactly one owner. Broadcasting an approval to every
+// attached agent let two independent MCP clients each implement the same change — an
+// ownership bug, not just a correlation one. So each agent gets a stable id on hello,
+// one is the ACTIVE agent (the most recent to attach — a reconnecting client resumes
+// that role), and a change is assigned to whoever is active when it is approved.
+// Approvals and question answers are sent to the active agent only, never broadcast;
+// a completion (note_edit) is accepted only from the change's owner.
+let agentSeq = 0;
+let activeAgentId = null;
+
+function activeAgentSocket() {
+  for (const ws of agents) if (ws.agentId === activeAgentId && ws.readyState === ws.OPEN) return ws;
+  return null;
+}
+const toActiveAgent = (frame) => {
+  const ws = activeAgentSocket();
+  if (ws) ws.send(JSON.stringify(frame));
+};
+
 function markActive(ws) {
   if (pages.has(ws)) activePage = ws;
 }
@@ -310,6 +319,8 @@ function currentPage() {
   return open.at(-1) ?? null; // most recently announced page
 }
 
+// Notices (a revert happened, the session was cleared) are informational; every
+// attached agent may hear them. Approvals and answers are routed to the owner instead.
 const toAgents = (frame) => {
   const json = JSON.stringify(frame);
   for (const ws of agents) if (ws.readyState === ws.OPEN) ws.send(json);
@@ -402,7 +413,7 @@ function setAgentForTest(mode) {
 /** Whether the last approved change's post-edit state has been frozen — a test
  * polls this instead of sleeping, since captureAfter() emits no frame. */
 function approvalCapturedForTest() {
-  return Boolean(coord.lastChange?.snap?.postCaptured);
+  return Boolean(coord.current?.snap?.postCaptured);
 }
 
 /** The write-attribution this turn, for tests: the recorded paths and whether that
@@ -536,8 +547,10 @@ wss.on("connection", (ws) => {
       case "focus": {
         if (frame.role === "agent") {
           pages.delete(ws);
+          if (ws.agentId == null) ws.agentId = ++agentSeq;
           agents.add(ws);
-          log(`an external agent attached (${agents.size} connected)`);
+          activeAgentId = ws.agentId; // the most recent agent owns new approvals
+          log(`an external agent attached (${agents.size} connected, active #${activeAgentId})`);
           return;
         }
         // Only these two kinds are genuine "I am the tab the user is looking at"
@@ -577,7 +590,7 @@ wss.on("connection", (ws) => {
       // MCP client blocked in await_answer (which cannot be pushed a message) hears it.
       case "choice_answer":
         record("me", frame.label);
-        toAgents(frame);
+        toActiveAgent(frame); // the answer belongs to the active client's await_answer, not every agent's
         return pushToAgent(frame.label);
 
       case "settings": {
@@ -592,8 +605,8 @@ wss.on("connection", (ws) => {
         // Only undo from a settled state. While an approval is mid-flight —
         // "snapshotting" (its git stash create still running) or "editing" — its
         // snapshot() and this revertTo() would rewrite the working tree at once,
-        // and a revert that slipped through during "snapshotting" would clobber
-        // lastChange the instant that snapshot resolved. A revert is issued at
+        // and a revert that slipped through during "snapshotting" would clobber the
+        // change the instant that snapshot resolved. A revert is issued at
         // "idle", so this refuses only the overlap. (The legitimate off-mode case,
         // idle but not yet committed, is caught by the postCaptured gate below.)
         if (!coord.isIdle) {
@@ -607,23 +620,19 @@ wss.on("connection", (ws) => {
           return;
         }
         void (async () => {
-          if (!coord.lastChange?.snap) {
+          // `current` is the most recently RECORDED change — the undo point. A change
+          // still being edited is not current, so undo declines until it is recorded
+          // (its owner's note_edit, or a builtin/adapter turn end). This is the same
+          // "hasn't finished" case the old postCaptured gate caught.
+          const change = coord.current;
+          if (!change) {
             toPanel({ kind: "reverted", ok: false, text: "there is nothing to go back to" });
             return;
           }
-          // postCaptured is only set once the turn that made this change has
-          // genuinely finished (see noteTurnEnded()). Reverting before then would
-          // race that turn's own writes with git checkout — safer to say so than
-          // to interleave with a file the agent may still be in the middle of.
-          if (!coord.lastChange.snap.postCaptured) {
-            toPanel({
-              kind: "reverted",
-              ok: false,
-              text: "the agent hasn't finished making this change yet — wait for it to finish, then undo",
-            });
+          if (!change.snap) {
+            toPanel({ kind: "reverted", ok: false, text: "this project is not a git repository, so there is nothing to undo" });
             return;
           }
-          const change = coord.lastChange;
           coord.reverting();
           try {
             const out = await snapshots.revertTo(PROJECT, change.snap);
@@ -658,7 +667,7 @@ wss.on("connection", (ws) => {
               `I reverted the last change ("${change.label}") in the working tree. ${summary}. ` +
                 `Do not re-apply it unless I ask.`,
             );
-            coord.lastChange = null;
+            coord.markReverted();
             coord.settle();
           } catch (err) {
             coord.settle();
@@ -706,34 +715,34 @@ wss.on("connection", (ws) => {
         // Resolve which approval this note_edit finishes. An explicit id must resolve
         // to that exact change or fail as unknown/stale — it must NEVER fall through to
         // whichever change happens to be current. Without an id, only an unambiguous
-        // single outstanding change is safe to assume.
-        const resolved = resolveNoteEditTarget(frame.changeId);
+        // single outstanding change is safe to assume. (All in the coordinator.)
+        const resolved = coord.resolve(frame.changeId);
         if (resolved.error) return void ack({ ok: false, undoReady: false, reason: resolved.error });
         const change = resolved.change;
 
+        // Exactly one owner: a completion is accepted only from the agent the change
+        // was assigned to. A different agent (a second MCP client) cannot record — or
+        // silently take over — a change it was never handed.
+        if (change && change.ownerAgentId != null && ws.agentId !== change.ownerAgentId) {
+          return void ack({ ok: false, undoReady: false, reason: "not-owner" });
+        }
+
         // Scope undo to the files the client names for THIS change (project-relative,
         // in-root only). A whole-diff capture (no files) would sweep in the edits of
-        // OTHER approvals still in flight, so it is refused while more than one off-mode
-        // change is outstanding — the client must name its files. It stays available
-        // when this is the only outstanding change (the common, unambiguous case).
+        // OTHER approvals still in flight, so it is refused while more than one change
+        // is outstanding — the client must name its files. It stays available when this
+        // is the only outstanding change (the common, unambiguous case).
         const scope = Array.isArray(frame.files) ? frame.files.map(inRootRelative).filter(Boolean) : [];
-        if (!scope.length && change && offPending.has(change.changeId) && offPending.size > 1) {
+        if (!scope.length && change?.state === "editing" && coord.outstanding().length > 1) {
           return void ack({ ok: false, undoReady: false, reason: "ambiguous-scope" });
         }
 
         // Acknowledge only after the post-edit state is actually recorded, so the MCP
         // client is told the truth about whether undo is ready — not a fire-and-forget
         // "recorded" that may be false. The ack rides the same call_result channel the
-        // page RPCs use, keyed by frame.id.
-        captureChange(change, scope.length ? scope : null).then((status) => {
-          // A recorded change becomes the undo point and leaves the pending set.
-          if (change && (status.reason === "captured" || status.reason === "already")) {
-            coord.lastChange = change;
-            if (change.changeId != null) offPending.delete(change.changeId);
-          }
-          // Name which change was recorded, so the client can confirm it matched the
-          // one it meant (and catch a mis-correlation rather than trust it blindly).
-          ack(change?.changeId != null ? { ...status, changeId: change.changeId } : status);
+        // page RPCs use, keyed by frame.id, and echoes the change id recorded.
+        recordEdit(change, scope.length ? scope : null).then((status) => {
+          ack(change?.id != null ? { ...status, changeId: change.id } : status);
         });
         return;
       }
@@ -773,6 +782,11 @@ wss.on("connection", (ws) => {
     agents.delete(ws);
     pages.delete(ws);
     if (activePage === ws) activePage = null;
+    // If the active agent left, hand the role to another attached agent (its own
+    // reconnect will re-take it on hello), so approvals are not routed into the void.
+    if (ws.agentId != null && ws.agentId === activeAgentId) {
+      activeAgentId = [...agents].map((a) => a.agentId).filter((id) => id != null).pop() ?? null;
+    }
     rejectPending(ws);
     log(`page disconnected (${clients.size} open)`);
   });
@@ -950,34 +964,21 @@ async function captureChange(change, scope) {
   }
 }
 
-// Turn-end capture for builtin/adapter: the one in-flight change, scoped to the
-// agent's own writes only when the WHOLE write set was seen (writeScope() returns
-// null otherwise, so captureAfter falls back to the full diff).
-function captureApprovedEdit() {
-  return captureChange(coord.lastChange, coord.writeScope());
+// Freeze a change's post-edit state and, on success, record it as the undo point.
+// `scope` is the paths to restrict undo to, or null for the full diff.
+async function recordEdit(change, scope) {
+  const status = await captureChange(change, scope);
+  if (change && (status.reason === "captured" || status.reason === "already")) {
+    coord.recordChange(change, scope);
+  }
+  return status;
 }
 
-/**
- * Which approval a note_edit finishes. The whole point of the change id is that a
- * note_edit resolves to exactly one approval or fails — it must never silently land
- * on a different change (the bug when a stale/duplicate id fell through to lastChange).
- *   - an explicit id in the pending set          -> that change
- *   - an explicit id already recorded (its id is the current undo point) -> that
- *     change (a duplicate note_edit is then a harmless no-op)
- *   - an explicit id we don't recognize          -> { error: "unknown-change" }
- *   - no id, at most one off-mode change pending  -> that one (or lastChange for
- *     builtin/adapter, or a legacy single-change client)
- *   - no id, several off-mode changes pending     -> { error: "ambiguous-change" }
- */
-function resolveNoteEditTarget(changeId) {
-  if (changeId != null) {
-    if (offPending.has(changeId)) return { change: offPending.get(changeId) };
-    if (coord.lastChange?.changeId === changeId) return { change: coord.lastChange };
-    return { error: "unknown-change" };
-  }
-  if (offPending.size > 1) return { error: "ambiguous-change" };
-  if (offPending.size === 1) return { change: [...offPending.values()][0] };
-  return { change: coord.lastChange };
+// Turn-end capture for builtin/adapter: the one in-flight change (they serialize, so
+// resolve(null) yields it), scoped to the agent's own writes only when the WHOLE
+// write set was seen (writeScope() returns null otherwise -> full diff).
+function captureApprovedEdit() {
+  return recordEdit(coord.resolve(null).change, coord.writeScope());
 }
 
 async function noteTurnEnded() {
@@ -1004,9 +1005,6 @@ async function noteTurnEnded() {
  * pendingApprovals can be started later, from noteTurnEnded, on identical terms. */
 function beginApproval(frame) {
   coord.snapshotting(); // idle -> snapshotting; also resets this approval's write set
-  // A per-approval id, so a later note_edit can name exactly which change it finished
-  // even when several off-mode approvals are in flight at once.
-  frame.changeId ??= ++changeSeq;
   record("me", `approved: ${frame.label}`);
   // Neither the external-agent notice nor the edit instruction may reach an agent
   // until the pre-edit snapshot exists — otherwise the agent's own write can land
@@ -1036,18 +1034,16 @@ function beginApproval(frame) {
     // "snapshotting" — this approval was abandoned, so drop it rather than force it
     // to "editing" and push an edit into a session that is gone.
     if (coord.phase !== "snapshotting") return;
-    const change = { snap, label: frame.label, changeId: frame.changeId };
-    coord.lastChange = change;
-    // Off mode may leave several changes awaiting their note_edit at once; keep each
-    // one's own snapshot by id so a later approval cannot overwrite what an earlier
-    // note_edit still needs. builtin/adapter serialize, so they never populate this.
-    if (config.agent === "off") {
-      offPending.set(frame.changeId, change);
-      while (offPending.size > OFF_PENDING_CAP) offPending.delete(offPending.keys().next().value);
-    }
+    // Open a first-class change. In off mode it is assigned to the active agent (its
+    // owner); builtin/adapter/opencode have no external owner. The coordinator holds
+    // it (state "editing") until its completion records it — one source of truth, so a
+    // later approval cannot overwrite the state an earlier one still needs.
+    const ownerAgentId = config.agent === "off" ? activeAgentId : null;
+    const change = coord.openChange({ label: frame.label, snap, ownerAgentId });
+    frame.changeId = change.id;
     coord.editing();
-    toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label, changeId: frame.changeId });
-    toAgents(frame); // an external agent cannot be sent a message; it waits for this
+    toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label, changeId: change.id });
+    toActiveAgent(frame); // relayed to the OWNER only, never broadcast to every agent
     pushToAgent(
       `The user approved option "${frame.label}" for element ${frame.ref}.\n\n` +
         `Approved declarations:\n${frame.declarations}\n` +
@@ -1183,8 +1179,7 @@ async function clearSession() {
   if (session) await session.clear().catch((err) => log(`clear failed: ${err.message}`));
   transcript.length = 0;
   resetContextMeter();
-  coord.clear(); // abandon any in-flight approval, held approvals, and its undo point
-  offPending.clear(); // and any off-mode changes still awaiting their note_edit
+  coord.clear(); // abandon every change (in-flight, held, and the undo point)
   // A new session also abandons any in-flight builtin turn and everything queued
   // behind it: unsent prompts in the backlog, internal asks waiting on a turn that
   // will now never end (the held approvals were just cleared above).
@@ -1778,8 +1773,9 @@ function listen(candidates) {
   http.listen(next, "127.0.0.1", ready);
 }
 
-// The approval lifecycle (phase, lastChange, pendingApprovals, write attribution)
-// lives in `coord` (a TurnCoordinator, declared near the top). One approval's
+// The approval lifecycle (phase, the Change set + undo point, pendingApprovals,
+// write attribution) lives in `coord` (a TurnCoordinator, declared near the top). One
+// approval's
 // snapshot-then-edit runs at a time: idle -> snapshotting -> editing -> idle, or
 // idle -> reverting -> idle; a second approval arriving mid-lifecycle is refused or
 // held. The legal transitions and their preconditions are in turn-coordinator.mjs.
