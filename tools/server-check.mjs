@@ -1572,6 +1572,7 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("a process start token is obtained on this platform", typeof token === "string" && token.length > 0,
     JSON.stringify(token));
   check("and it is stable across reads", startToken(process.pid) === token);
+  check("a non-existent pid yields no token", startToken(2147483646) === null);
 
   const pf = join(mkdtempSync(join(sandbox, "pidfile-")), "dev.pid");
   writeOwner(pf, process.pid);
@@ -1579,14 +1580,20 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("the pidfile records the pid together with its start token",
     rec.pid === process.pid && rec.token === token, JSON.stringify(rec));
   writeFileSync(pf, String(process.pid)); // a legacy, pre-ownership bare-number pidfile
-  check("a legacy bare-number pidfile is still read, with an unknown token",
-    readOwner(pf).pid === process.pid && readOwner(pf).token === null);
+  check("a legacy bare-number pidfile is read and marked legacy",
+    readOwner(pf).pid === process.pid && readOwner(pf).token === null && readOwner(pf).legacy === true);
 
   check("ownership holds for the live process with the recorded token", owns({ pid: process.pid, token }));
   check("a reused pid — same number, different start time — is NOT owned",
     owns({ pid: process.pid, token: "Thu Jan  1 00:00:00 1970" }) === false);
   check("a dead pid is not owned", owns({ pid: 2147483646, token }) === false);
-  check("a legacy record with no token falls back to pid existence", owns({ pid: process.pid, token: null }) === true);
+  // A legacy bare-pid record keeps the old best-effort pid-existence behaviour.
+  check("a legacy record (bare pid) still authorizes on pid existence",
+    owns({ pid: process.pid, token: null, legacy: true }) === true);
+  // Fail-safe: a NEW-format record whose identity could not be established (e.g. a
+  // Windows without a usable PowerShell yields a null token) must NOT authorize a kill.
+  check("a new-format record with an unverifiable identity does NOT authorize ownership",
+    owns({ pid: process.pid, token: null }) === false);
 
   // Behavioral: a live but unrelated process (a reused pid) must survive --stop. Mirror
   // stopDev's decision — kill only when owns() is true — and confirm the process lives.
