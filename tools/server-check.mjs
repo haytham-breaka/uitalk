@@ -2821,6 +2821,52 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // Ignored files: undo must not silently claim to cover a change while dropping a
+    // git-ignored file it can't restore. It names the uncoverable (ignored) paths; when
+    // they are all of them, it reports undo is not ready rather than pretend.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setAgentForTest("off");
+    writeFileSync(join(proj, ".gitignore"), "secret.env\n");
+    writeFileSync(join(proj, "ign-tracked.css"), ".t{c:red}\n");
+    execFileSync("git", ["add", "-A"], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "ignored baseline"], { cwd: proj });
+    writeFileSync(join(proj, "secret.env"), "K=old\n"); // git-ignored, present
+    const idOf = (l) => p.sent.find((f) => f.kind === "revertable" && f.label === l)?.changeId;
+    let nseq = 8000;
+    const noteEdit = async (fields) => {
+      const nid = ++nseq;
+      p.sent.length = 0;
+      p.deliver({ kind: "note_edit", id: nid, ...fields });
+      await until(() => p.sent.some((f) => f.kind === "call_result" && f.id === nid), "the note_edit ack");
+      return p.sent.find((f) => f.kind === "call_result" && f.id === nid).result;
+    };
+
+    p.deliver({ kind: "approval", label: "ign A", ref: 1, declarations: "c:blue", element: {} });
+    await until(() => idOf("ign A") != null && bridge.approvalPhaseForTest() === "idle", "approval A");
+    writeFileSync(join(proj, "secret.env"), "K=agent\n");
+    const onlyIgnored = await noteEdit({ changeId: idOf("ign A"), files: ["secret.env"] });
+    check("a note_edit naming only a git-ignored file reports it cannot be undone, not silent success",
+      onlyIgnored.undoReady === false && onlyIgnored.reason === "ignored-only" &&
+        onlyIgnored.uncovered?.includes("secret.env"), JSON.stringify(onlyIgnored));
+
+    p.deliver({ kind: "approval", label: "ign B", ref: 2, declarations: "c:green", element: {} });
+    await until(() => idOf("ign B") != null && bridge.approvalPhaseForTest() === "idle", "approval B");
+    writeFileSync(join(proj, "ign-tracked.css"), ".t{c:blue}\n");
+    writeFileSync(join(proj, "secret.env"), "K=agent2\n");
+    const mixed = await noteEdit({ changeId: idOf("ign B"), files: ["ign-tracked.css", "secret.env"] });
+    check("a change over a tracked AND an ignored file records the covered one, names the ignored as uncovered",
+      mixed.undoReady === true && mixed.uncovered?.includes("secret.env") &&
+        !mixed.uncovered.includes("ign-tracked.css"), JSON.stringify(mixed));
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    execFileSync("git", ["checkout", "--", "."], { cwd: proj });
+    unlinkSync(join(proj, "secret.env")); // git won't touch an ignored file
+    p.close();
+  }
+
+  {
     // An internal ask (compaction/clear) queued behind an open turn must still time
     // out if that turn never ends — otherwise its promise leaks and the compaction
     // that awaits it wedges. Open a turn that never resolves, then queue an ask
