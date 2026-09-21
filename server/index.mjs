@@ -969,7 +969,16 @@ async function captureChange(change, scope) {
 async function recordEdit(change, scope) {
   const status = await captureChange(change, scope);
   if (change && (status.reason === "captured" || status.reason === "already")) {
+    const firstRecord = coord.current?.id !== change.id;
     coord.recordChange(change, scope);
+    // Tell the page this change's edit is now committed, so it runs before/after
+    // verification against THIS change — keyed by the client's approvalId, and driven
+    // by the change lifecycle rather than a model turn. This is the completion signal
+    // for every mode: a builtin/adapter/opencode turn end and an off-mode note_edit
+    // both land here. Only on the first record (not a duplicate note_edit).
+    if (firstRecord) {
+      toPanel({ kind: "change_recorded", changeId: change.id, approvalId: change.approvalId ?? null, label: change.label });
+    }
   }
   return status;
 }
@@ -1039,7 +1048,7 @@ function beginApproval(frame) {
     // it (state "editing") until its completion records it — one source of truth, so a
     // later approval cannot overwrite the state an earlier one still needs.
     const ownerAgentId = config.agent === "off" ? activeAgentId : null;
-    const change = coord.openChange({ label: frame.label, snap, ownerAgentId });
+    const change = coord.openChange({ label: frame.label, snap, ownerAgentId, approvalId: frame.approvalId ?? null });
     frame.changeId = change.id;
     coord.editing();
     toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label, changeId: change.id });
