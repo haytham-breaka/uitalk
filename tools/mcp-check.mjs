@@ -15,9 +15,14 @@ const check = (n, ok, d) => {
 // no tokens. The socket and the router are the parts under test.
 const bridge = spawn("node", ["-e", `
   process.env.UITALK_IMPORT_ONLY = "1";
-  const { wss, clients } = await import("./server/index.mjs");
+  const { wss, clients, agents } = await import("./server/index.mjs");
   const { createServer } = await import("node:http");
-  const http = createServer((req, res) => res.end("ok"));
+  const http = createServer((req, res) => {
+    // Test hook: drop just the agent (MCP) sockets, leaving the bridge up, so the
+    // MCP server sees its socket close and reconnects to the same live bridge.
+    if (req.url === "/__drop_agents") { for (const a of [...agents]) a.close(); res.end("dropped"); return; }
+    res.end("ok");
+  });
   http.on("upgrade", (req, socket, head) => {
     // Match on the pathname, like the real bridge — the MCP client now appends a
     // ?token=… query the exact-string check would (wrongly) reject.
@@ -28,7 +33,7 @@ const bridge = spawn("node", ["-e", `
   // runs the bridge code the suite is measuring.
   process.on("SIGTERM", () => process.exit(0));
   http.listen(0, "127.0.0.1", () => console.log("PORT " + http.address().port));
-`], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, UITALK_IMPORT_ONLY: "1" } });
+`], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, UITALK_IMPORT_ONLY: "1", UITALK_AGENT: "off" } });
 
 const port = await new Promise((resolve, reject) => {
   let buf = "";
@@ -231,6 +236,38 @@ const answerForSecond = await rpc("tools/call", { name: "await_answer", argument
 check("a stale answer from a timed-out question is not handed to the next question",
   !/stale-answer/.test(answerForSecond.result.content[0].text) && /did not answer/.test(answerForSecond.result.content[0].text),
   answerForSecond.result.content[0].text.slice(0, 80));
+
+// A pick that was queued (no await_choice parked to catch it) must not survive a
+// bridge disconnect: after a reconnect it belongs to a session the bridge is no
+// longer showing, so a fresh await_choice must NOT be handed it.
+{
+  // Queue an approval with nothing waiting for it (the MCP server pushes it onto its
+  // choices[] queue). Off mode settles each approval, so the coordinator is idle and
+  // the approval is relayed to the agent; give the pre-edit snapshot time to resolve.
+  page.send(JSON.stringify({ kind: "approval", ref: 1, label: "stale-queued-choice",
+    declarations: "border-radius: 8px", element: { selector: ".x" } }));
+  await new Promise((r) => setTimeout(r, 1500)); // pre-edit snapshot subprocess + relay + queue in the MCP server
+
+  // Drop the agent socket (bridge stays up); the MCP server reconnects on the next call.
+  await fetch(`http://127.0.0.1:${port}/__drop_agents`);
+  await new Promise((r) => setTimeout(r, 300));
+
+  const afterReconnect = await rpc("tools/call", { name: "await_choice", arguments: { timeout: 800 } });
+  check("a queued approval does not survive a bridge disconnect",
+    !/stale-queued-choice/.test(afterReconnect.result.content[0].text),
+    afterReconnect.result.content[0].text.slice(0, 80));
+
+  // The same for a queued ask_choice answer.
+  await rpc("tools/call", { name: "ask_choice", arguments: { question: "Q?", options: ["yes", "no"] } });
+  page.send(JSON.stringify({ kind: "choice_answer", label: "stale-queued-answer" }));
+  await new Promise((r) => setTimeout(r, 300));
+  await fetch(`http://127.0.0.1:${port}/__drop_agents`);
+  await new Promise((r) => setTimeout(r, 300));
+  const answerAfter = await rpc("tools/call", { name: "await_answer", arguments: { timeout: 800 } });
+  check("a queued answer does not survive a bridge disconnect",
+    !/stale-queued-answer/.test(answerAfter.result.content[0].text),
+    answerAfter.result.content[0].text.slice(0, 80));
+}
 
 // A blocking await_choice must not hang for its full timeout when the bridge
 // drops mid-wait: the client's close handler resolves it, as a timeout would.

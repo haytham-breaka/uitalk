@@ -170,6 +170,13 @@ function connect() {
     // now, the way a timeout does.
     for (const wake of waitingForChoice.splice(0)) wake(null);
     for (const wake of waitingForAnswer.splice(0)) wake(null);
+    // Drop queued-but-unclaimed picks too: they belong to the bridge session that
+    // just ended. Kept, a stale approval/answer from before the disconnect would be
+    // handed to the first await_* after a reconnect — an answer to a question that
+    // bridge session is no longer showing. The waiters above are cleared for the same
+    // reason; the queues need the same treatment or the staleness just moves here.
+    choices.length = 0;
+    answers.length = 0;
   });
   s.on("error", () => {});
 
