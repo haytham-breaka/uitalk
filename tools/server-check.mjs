@@ -2867,6 +2867,43 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // Session boundary: a completion (note_edit) from before a New Session must not
+    // satisfy anything after it. clearSession() abandons every change, so the id no
+    // longer resolves — the late note_edit is refused, never applied to a new change.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setAgentForTest("off");
+    writeFileSync(join(proj, "sb.css"), ".s{c:red}\n");
+    execFileSync("git", ["add", "-A"], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "session-boundary baseline"], { cwd: proj });
+    const idOf = (l) => p.sent.find((f) => f.kind === "revertable" && f.label === l)?.changeId;
+    let sseq = 9000;
+    const noteEdit = async (fields) => {
+      const nid = ++sseq;
+      p.sent.length = 0;
+      p.deliver({ kind: "note_edit", id: nid, ...fields });
+      await until(() => p.sent.some((f) => f.kind === "call_result" && f.id === nid), "the note_edit ack");
+      return p.sent.find((f) => f.kind === "call_result" && f.id === nid).result;
+    };
+
+    p.deliver({ kind: "approval", label: "sb A", ref: 1, declarations: "c:blue", element: {} });
+    await until(() => idOf("sb A") != null && bridge.approvalPhaseForTest() === "idle", "approval A");
+    const staleId = idOf("sb A");
+    await bridge.clearSession(); // New Session abandons the in-flight change
+    // Approve a fresh change after the clear; the stale id must NOT be applied to it.
+    p.deliver({ kind: "approval", label: "sb B", ref: 2, declarations: "c:green", element: {} });
+    await until(() => idOf("sb B") != null && bridge.approvalPhaseForTest() === "idle", "approval B");
+    const afterClear = await noteEdit({ changeId: staleId, files: ["sb.css"] });
+    check("a note_edit for a change abandoned by New Session is refused, not applied to a new change",
+      afterClear.ok === false && afterClear.reason === "unknown-change", JSON.stringify(afterClear));
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    execFileSync("git", ["checkout", "--", "."], { cwd: proj });
+    p.close();
+  }
+
+  {
     // An internal ask (compaction/clear) queued behind an open turn must still time
     // out if that turn never ends — otherwise its promise leaks and the compaction
     // that awaits it wedges. Open a turn that never resolves, then queue an ask
