@@ -132,6 +132,13 @@ export class TurnCoordinator {
     this.#currentId = null;
   }
 
+  /** Drop a change from the set without recording it — its edit happened but there is
+   * nothing to undo (e.g. it touched only git-ignored files). It leaves `outstanding`
+   * so it cannot be resolved again, and the undo point is left untouched. */
+  discardChange(change) {
+    if (change && this.#currentId !== change.id) this.#changes.delete(change.id);
+  }
+
   changeById(id) {
     return this.#changes.get(id) ?? null;
   }

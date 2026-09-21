@@ -369,12 +369,26 @@ defs.push({
       "unknown-change": "that changeId is not awaiting a note_edit (already recorded, or never seen) — pass the changeId await_choice returned for this change",
       "ambiguous-change": "more than one approved change is awaiting note_edit — pass the changeId await_choice returned for the one you just committed",
       "ambiguous-scope": "several approved changes are in flight, so undo cannot use the whole diff — pass `files` naming what you changed for this one",
+      "ignored-only": "recorded, but every file you named is git-ignored, so undo cannot restore it — none of it is covered",
     };
-    const note = status.undoReady
-      ? "post-edit state recorded; the user can undo this change"
-      : NOTES[status.reason] ??
-        `undo could not be prepared for this change${status.error ? `: ${status.error}` : ""}`;
-    return text({ ok: status.ok, undoReady: Boolean(status.undoReady), changeId: status.changeId, note });
+    // Uncovered files are git-ignored: they are outside the snapshot, so undo will not
+    // restore them. Surface them rather than let undo silently exclude them.
+    const uncovered = Array.isArray(status.uncovered) ? status.uncovered : [];
+    const ignoredNote = uncovered.length
+      ? ` (note: these files are git-ignored and will NOT be restored by undo: ${uncovered.join(", ")})`
+      : "";
+    const note =
+      (status.undoReady
+        ? "post-edit state recorded; the user can undo this change"
+        : NOTES[status.reason] ??
+          `undo could not be prepared for this change${status.error ? `: ${status.error}` : ""}`) + ignoredNote;
+    return text({
+      ok: status.ok,
+      undoReady: Boolean(status.undoReady),
+      changeId: status.changeId,
+      ...(uncovered.length ? { uncovered } : {}),
+      note,
+    });
   },
 });
 

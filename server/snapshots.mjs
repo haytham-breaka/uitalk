@@ -40,6 +40,23 @@ const lines = (text) => (text ? text.split("\n").map((l) => l.trim()).filter(Boo
 const untracked = (cwd) => git(cwd, ["ls-files", "--others", "--exclude-standard"]).then(lines);
 
 /**
+ * Of the given project-relative paths, the ones git ignores. A snapshot captures
+ * tracked files (via the ref) and untracked-but-not-ignored files (blobbed), and
+ * `git diff` never lists an ignored path — so an ignored file an edit touched is in
+ * none of undo's buckets and cannot be restored. Undo must SAY so rather than
+ * silently drop it, so this lets a caller name the uncoverable paths. Batched;
+ * `check-ignore` exits non-zero when none match, which surfaces as [].
+ */
+export async function ignoredPaths(cwd, files) {
+  if (!files?.length) return [];
+  try {
+    return lines(await git(cwd, ["check-ignore", "--", ...files]));
+  } catch {
+    return []; // exit 1 = nothing ignored (or not a repo) — nothing to warn about
+  }
+}
+
+/**
  * git's blob id for each file's current contents. With write:true the contents
  * are also stored in the object database, so the exact bytes can be recovered
  * later even though nothing in the tree references them — the same unreferenced

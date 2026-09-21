@@ -968,17 +968,35 @@ async function captureChange(change, scope) {
 // `scope` is the paths to restrict undo to, or null for the full diff.
 async function recordEdit(change, scope) {
   const status = await captureChange(change, scope);
-  if (change && (status.reason === "captured" || status.reason === "already")) {
-    const firstRecord = coord.current?.id !== change.id;
-    coord.recordChange(change, scope);
-    // Tell the page this change's edit is now committed, so it runs before/after
-    // verification against THIS change — keyed by the client's approvalId, and driven
-    // by the change lifecycle rather than a model turn. This is the completion signal
-    // for every mode: a builtin/adapter/opencode turn end and an off-mode note_edit
-    // both land here. Only on the first record (not a duplicate note_edit).
-    if (firstRecord) {
-      toPanel({ kind: "change_recorded", changeId: change.id, approvalId: change.approvalId ?? null, label: change.label });
+  const captured = status.reason === "captured" || status.reason === "already";
+  if (!captured) return status;
+
+  // Honesty about attribution: an explicitly named file that git ignores is outside
+  // every snapshot bucket, so undo cannot restore it. Never claim to cover a change
+  // while silently dropping one of its files — name the uncoverable ones. If they are
+  // ALL of them, the change has nothing to undo: report so and drop it without letting
+  // it clobber the real undo point.
+  const uncovered = scope?.length ? await snapshots.ignoredPaths(PROJECT, scope) : [];
+  const nothingCoverable = uncovered.length > 0 && uncovered.length === scope.length;
+  if (uncovered.length) status.uncovered = uncovered;
+
+  const firstRecord = coord.current?.id !== change?.id;
+  if (change) {
+    if (nothingCoverable) {
+      status.ok = false;
+      status.undoReady = false;
+      status.reason = "ignored-only";
+      coord.discardChange(change); // its edit happened, but there is nothing to undo
+    } else {
+      coord.recordChange(change, scope);
     }
+  }
+  // Tell the page this change's edit is committed, so it verifies THIS change (keyed
+  // by the client's approvalId, driven by the change lifecycle — a builtin/adapter/
+  // opencode turn end or an off-mode note_edit both land here). The rendered result is
+  // worth verifying even when the source file is ignored and not undoable.
+  if (change && firstRecord) {
+    toPanel({ kind: "change_recorded", changeId: change.id, approvalId: change.approvalId ?? null, label: change.label });
   }
   return status;
 }
