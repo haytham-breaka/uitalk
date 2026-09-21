@@ -2601,6 +2601,62 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // Two off-mode approvals in flight at once: the first's note_edit must freeze the
+    // FIRST approval's own snapshot (named by change id), not whichever was approved
+    // most recently. A single global lastChange let A's note_edit capture B's snapshot,
+    // so A's change became un-undoable.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setAgentForTest("off");
+    writeFileSync(join(proj, "corr-a.css"), ".a{color:red}\n");
+    writeFileSync(join(proj, "corr-b.css"), ".b{color:red}\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "corr baseline"], { cwd: proj });
+    const idOf = (label) => p.sent.find((f) => f.kind === "revertable" && f.label === label)?.changeId;
+
+    p.deliver({ kind: "approval", label: "corr A", ref: 1, declarations: "color: blue", element: {} });
+    await until(() => idOf("corr A") != null && bridge.approvalPhaseForTest() === "idle", "approval A to settle");
+    const aId = idOf("corr A");
+    writeFileSync(join(proj, "corr-a.css"), ".a{color:blue}\n"); // A's client edits
+
+    p.deliver({ kind: "approval", label: "corr B", ref: 2, declarations: "color: green", element: {} });
+    await until(() => idOf("corr B") != null && bridge.approvalPhaseForTest() === "idle", "approval B to settle");
+    const bId = idOf("corr B");
+    writeFileSync(join(proj, "corr-b.css"), ".b{color:green}\n"); // B's client edits
+
+    check("each off-mode approval gets its own change id", aId != null && bId != null && aId !== bId,
+      `${aId} vs ${bId}`);
+
+    // A's note_edit names A's change id, even though B was approved more recently.
+    p.deliver({ kind: "note_edit", changeId: aId, files: ["corr-a.css"] });
+    await until(() => bridge.approvalCapturedForTest(), "A's note_edit to record");
+
+    p.sent.length = 0;
+    p.deliver({ kind: "revert" });
+    await until(() => p.sent.some((f) => f.kind === "reverted"), "the revert to answer");
+    const rev = p.sent.find((f) => f.kind === "reverted");
+    check("the first approval's note_edit freezes the first approval's own change",
+      rev.ok === true && rev.label === "corr A" && rev.files?.includes("corr-a.css"), JSON.stringify(rev));
+    check("so the first change is undone, not left clobbered by the second's snapshot",
+      readFileSync(join(proj, "corr-a.css"), "utf8") === ".a{color:red}\n",
+      readFileSync(join(proj, "corr-a.css"), "utf8").trim());
+
+    // A stale/duplicate note_edit for a change that is already recorded (its id no
+    // longer pending) must not throw or corrupt undo — it falls back and no-ops.
+    execFileSync("git", ["checkout", "--", "corr-a.css"], { cwd: proj }); // (revert already restored it)
+    p.deliver({ kind: "note_edit", changeId: aId, files: ["corr-a.css"] });
+    await new Promise((r) => setTimeout(r, 150));
+    check("a duplicate note_edit for an already-recorded change is harmless",
+      readFileSync(join(proj, "corr-a.css"), "utf8") === ".a{color:red}\n",
+      readFileSync(join(proj, "corr-a.css"), "utf8").trim());
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    execFileSync("git", ["checkout", "--", "."], { cwd: proj });
+    p.close();
+  }
+
+  {
     // An internal ask (compaction/clear) queued behind an open turn must still time
     // out if that turn never ends — otherwise its promise leaks and the compaction
     // that awaits it wedges. Open a turn that never resolves, then queue an ask
