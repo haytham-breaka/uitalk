@@ -101,8 +101,11 @@ export class TurnCoordinator {
   /** Open a new change in the "editing" state and return it. `snap` is its pre-edit
    * snapshot (may be null when the project is not a git repo); `ownerAgentId` is the
    * external agent it is assigned to (null for builtin/adapter/opencode). */
-  openChange({ label, snap, ownerAgentId = null }) {
-    const change = { id: ++this.#seq, label, snap, ownerAgentId, files: null, state: "editing" };
+  openChange({ label, snap, ownerAgentId = null, approvalId = null }) {
+    // approvalId is the CLIENT's own id for this approval (a page nonce), carried so
+    // the page can key its before/after verification by the same identity the bridge
+    // records the change under. The bridge's own id is `id`.
+    const change = { id: ++this.#seq, label, snap, ownerAgentId, approvalId, files: null, state: "editing" };
     this.#changes.set(change.id, change);
     this.#evict();
     return change;

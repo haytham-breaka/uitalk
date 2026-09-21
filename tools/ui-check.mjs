@@ -109,6 +109,14 @@ const root = host.shadowRoot;
 const tool = (act) => root.querySelector(`[data-act="${act}"]`);
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
+// Verification is driven by the change lifecycle now: the bridge signals a recorded
+// change with `change_recorded` (keyed by the approvalId the page sent), not by a
+// model turn end. This mirrors that signal for the last approval the panel dispatched.
+const recordLastApproval = () => {
+  const appr = [...sent].reverse().find((f) => f.kind === "approval");
+  sockets[0].onmessage({ data: JSON.stringify({ kind: "change_recorded", approvalId: appr?.approvalId }) });
+};
+
 // Dispatch on the element under the pointer, as a browser does, and let it bubble.
 const fire = (type, x, y, target = null) =>
   (target ?? atPoint ?? window.document.body).dispatchEvent(
@@ -788,7 +796,7 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   await tick(); await tick();
   check("approving photographs the element first", grabs.length === 1, `${grabs.length} grabs`);
 
-  sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+  recordLastApproval();
   await new Promise((r) => setTimeout(r, 1400));
   check("and again once the agent has finished", grabs.length === 2, `${grabs.length} grabs`);
   check("the two are shown side by side", !!root.querySelector(".compare"),
@@ -813,7 +821,7 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
     await tick();
     root.querySelector('[data-act="approve"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     await tick(); await tick();
-    sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+    recordLastApproval();
     await new Promise((r) => setTimeout(r, 1400));
     const log = [...root.querySelectorAll(".log .msg")].map((m) => m.textContent).join(" | ");
     check("a change that survived the edit is reported as verified", /looks the same committed/.test(log),
@@ -835,7 +843,7 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
     await tick();
     root.querySelector('[data-act="approve"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     await tick(); await tick();
-    sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+    recordLastApproval();
     await new Promise((r) => setTimeout(r, 1400));
     const log2 = [...root.querySelectorAll(".log .msg.warn")].map((m) => m.textContent).join(" | ");
     check("an edit that did not take effect is caught", /did not survive the edit/.test(log2), log2.slice(-90));
@@ -864,7 +872,7 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
         await tick();
         root.querySelector('[data-act="approve"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
         await tick(); await tick();
-        sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+        recordLastApproval();
         await new Promise((r) => setTimeout(r, 1400));
       };
 
@@ -926,7 +934,7 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   await tick();
   root.querySelector('[data-act="approve"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await tick(); await tick();
-  sock.onmessage({ data: JSON.stringify({ kind: "turn_end" }) });
+  recordLastApproval();
   await new Promise((r) => setTimeout(r, 1400)); // reloadForResult (900ms) + capture
 
   const newLog = [...root.querySelectorAll(".log .msg")].slice(msgsBefore).map((m) => m.textContent).join(" | ");
@@ -973,6 +981,59 @@ check("Ctrl-Z undoes the last selection change", UITalk.picked.length !== before
   check("and consumes the resume key so it does not verify again on the next load",
     resumed.window.sessionStorage.getItem("uitalk.pendingVerify") === null,
     resumed.window.sessionStorage.getItem("uitalk.pendingVerify") ?? "cleared");
+}
+
+// --- two approvals in flight: each is verified against ITS OWN before-state, keyed by
+//     approvalId, and a change_recorded for one never verifies (or consumes) the other.
+{
+  const sock = sockets[0];
+  const realComputed = UITalk.computedOf;
+  const realLive = UITalk.liveReload;
+  UITalk.liveReload = () => "vite"; // HMR present -> verify in place, no reload
+  UITalk.computedOf = () => ({ "border-radius": "999px" }); // every committed value matches its preview
+
+  const approveOne = async () => {
+    UITalk.clearSelection();
+    atPoint = window.document.querySelector(".notify-button");
+    if (!tool("pick").classList.contains("on")) await clickTool("pick");
+    fire("click", 600, 600);
+    await tick();
+    UITalk.showOptions({ ref: 1, options: [
+      { label: "Pill", declarations: "border-radius: 999px" },
+      { label: "Square", declarations: "border-radius: 0" },
+    ]});
+    await tick();
+    root.querySelector('[data-act="approve"]').dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await tick(); await tick();
+    return [...sent].reverse().find((f) => f.kind === "approval").approvalId;
+  };
+
+  const idA = await approveOne();
+  const idB = await approveOne();
+  check("two approvals in flight get distinct approvalIds", idA && idB && idA !== idB, `${idA} vs ${idB}`);
+
+  const verifyCount = () =>
+    [...root.querySelectorAll(".log .msg")].filter((m) => /looks the same committed/.test(m.textContent)).length;
+  const before = verifyCount();
+
+  // Record B first, then A — out of order — each by its own id.
+  sock.onmessage({ data: JSON.stringify({ kind: "change_recorded", approvalId: idB }) });
+  await new Promise((r) => setTimeout(r, 1400));
+  check("change_recorded for B verifies exactly one change (B's own)", verifyCount() - before === 1);
+  sock.onmessage({ data: JSON.stringify({ kind: "change_recorded", approvalId: idA }) });
+  await new Promise((r) => setTimeout(r, 1400));
+  check("change_recorded for A then verifies A independently", verifyCount() - before === 2);
+  // A stale/duplicate signal for an already-verified change does nothing.
+  sock.onmessage({ data: JSON.stringify({ kind: "change_recorded", approvalId: idB }) });
+  await new Promise((r) => setTimeout(r, 300));
+  check("a change_recorded for an already-verified change is a no-op (job consumed)",
+    verifyCount() - before === 2, `${verifyCount() - before} verifications`);
+
+  UITalk.computedOf = realComputed;
+  UITalk.liveReload = realLive;
+  UITalk.resetPreview();
+  UITalk.clearSelection();
+  await tick();
 }
 
 // --- settings render by type, not as a number box for everything
