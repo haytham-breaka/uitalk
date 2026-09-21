@@ -321,8 +321,26 @@ defs.push({
   run: async ({ files } = {}) => {
     await ready();
     const scoped = Array.isArray(files) ? files.filter((f) => typeof f === "string" && f) : undefined;
-    socket.send(JSON.stringify({ kind: "note_edit", files: scoped }));
-    return text({ ok: true, note: "post-edit state recorded; the user can undo this change" });
+    // Request/response, not fire-and-forget: wait for the bridge to actually record the
+    // post-edit state and report whether undo is ready, so this never claims success
+    // when nothing was captured. A disconnect rejects the pending call (the close
+    // handler drains `pending`), so the tool surfaces an error rather than a false ok.
+    const id = ++seq;
+    socket.send(JSON.stringify({ kind: "note_edit", id, files: scoped }));
+    const status = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (pending.delete(id)) reject(new Error("note_edit timed out waiting for the bridge to record the edit"));
+      }, 10000);
+      pending.set(id, { resolve, reject, timer });
+    });
+    const note = status.undoReady
+      ? "post-edit state recorded; the user can undo this change"
+      : status.reason === "not-a-repo"
+        ? "the edit is noted, but this project is not a git repository, so undo is unavailable"
+        : status.reason === "no-change"
+          ? "there was no approved change waiting to be recorded — did you call this after await_choice?"
+          : `undo could not be prepared for this change${status.error ? `: ${status.error}` : ""}`;
+    return text({ ok: status.ok, undoReady: Boolean(status.undoReady), note });
   },
 });
 

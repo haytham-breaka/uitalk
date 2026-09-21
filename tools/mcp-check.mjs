@@ -128,15 +128,32 @@ check("show_options with too few options fails cleanly over the real MCP path",
   badOptions.result?.content?.[0]?.text?.slice(0, 60));
 check("and the malformed show_options never reached the page", asked.length === beforeBad);
 
+// note_edit is request/response now: with no approved change waiting, it reports the
+// truth (undo not ready) instead of a fire-and-forget "recorded".
 const noted = await rpc("tools/call", { name: "note_edit", arguments: {} });
-check("note_edit is callable and acknowledges over stdio",
-  /recorded/.test(noted.result.content[0].text), noted.result.content[0].text.slice(0, 60));
+check("note_edit reports truthfully when there was no approved change to record",
+  /"undoReady": ?false/.test(noted.result.content[0].text) && /no approved change/.test(noted.result.content[0].text),
+  noted.result.content[0].text.replace(/\s+/g, " ").slice(0, 100));
 check("note_edit advertises the optional files list for scoped undo",
   listed.result.tools.find((t) => t.name === "note_edit")?.inputSchema?.properties?.files?.type === "array",
   JSON.stringify(listed.result.tools.find((t) => t.name === "note_edit")?.inputSchema?.properties));
 const notedFiles = await rpc("tools/call", { name: "note_edit", arguments: { files: ["src/Button.css", 42, ""] } });
-check("note_edit accepts a files list (junk entries filtered) and still acknowledges",
-  /recorded/.test(notedFiles.result.content[0].text), notedFiles.result.content[0].text.slice(0, 60));
+check("note_edit accepts a files list (junk entries filtered) and answers over stdio",
+  /"undoReady":/.test(notedFiles.result.content[0].text), notedFiles.result.content[0].text.replace(/\s+/g, " ").slice(0, 60));
+
+// After a real approved change (consumed through await_choice, as a client would),
+// note_edit confirms undo IS ready — the bridge recorded the post-edit state before
+// answering, rather than claiming success fire-and-forget.
+{
+  const awaiting = rpc("tools/call", { name: "await_choice", arguments: { timeout: 5000 } });
+  await new Promise((r) => setTimeout(r, 50));
+  page.send(JSON.stringify({ kind: "approval", label: "ack change", ref: 1,
+    declarations: "color: blue", element: { selector: ".x" } }));
+  await awaiting;
+  const done = await rpc("tools/call", { name: "note_edit", arguments: { files: ["src/x.css"] } });
+  check("note_edit confirms undo is ready once an approved change has been recorded",
+    /"undoReady": ?true/.test(done.result.content[0].text), done.result.content[0].text.replace(/\s+/g, " ").slice(0, 90));
+}
 
 const sel = await rpc("tools/call", { name: "read_selection", arguments: {} });
 check("calling a tool reaches the page", asked.includes("readSelection"), asked.join(", "));

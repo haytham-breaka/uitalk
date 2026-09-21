@@ -690,7 +690,16 @@ wss.on("connection", (ws) => {
         if (Array.isArray(frame.files)) {
           for (const f of frame.files) if (typeof f === "string" && f) noteAgentWrite(f);
         }
-        return void captureApprovedEdit();
+        // Acknowledge only after the post-edit state is actually recorded, so the MCP
+        // client is told the truth about whether undo is ready — not a fire-and-forget
+        // "recorded" that may be false (no change, no repo, or a capture failure). The
+        // ack rides the same call_result channel the page RPCs use, keyed by frame.id.
+        captureApprovedEdit().then((status) => {
+          if (typeof frame.id === "number" && ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ kind: "call_result", id: frame.id, result: status }));
+          }
+        });
+        return;
       }
 
       case "approval": {
@@ -879,16 +888,24 @@ function noteOpencodeTool(tool, input) {
  * latch approvals off (see noteTurnEnded). Undo simply degrades to the whole-file
  * fallback for this change, and the reason is logged rather than lost. */
 async function captureApprovedEdit() {
-  if (coord.lastChange?.snap && !coord.lastChange.snap.postCaptured) {
-    try {
-      // Scope to the agent's own writes only when we saw the WHOLE set: every tool
-      // was a structured write or a known read. If a shell/opaque tool ran, or no
-      // structured write was seen at all (an MCP client's edit is invisible here),
-      // writeScope() returns null and captureAfter falls back to the full diff.
-      coord.lastChange.snap = await snapshots.captureAfter(PROJECT, coord.lastChange.snap, coord.writeScope());
-    } catch (err) {
-      log(`post-edit capture failed, undo falls back to whole-file for this change: ${err.message}`);
-    }
+  const change = coord.lastChange;
+  // No approved change is waiting — nothing to record. (An MCP client that calls
+  // note_edit without a preceding approval, or after a New Session cleared it.)
+  if (!change) return { ok: false, undoReady: false, reason: "no-change" };
+  // There is a change, but no pre-edit snapshot: snapshot() returns null when the
+  // project is not a git repository. The edit stands; it just cannot be undone.
+  if (!change.snap) return { ok: true, undoReady: false, reason: "not-a-repo" };
+  if (change.snap.postCaptured) return { ok: true, undoReady: true, reason: "already" };
+  try {
+    // Scope to the agent's own writes only when we saw the WHOLE set: every tool
+    // was a structured write or a known read. If a shell/opaque tool ran, or no
+    // structured write was seen at all (an MCP client's edit is invisible here),
+    // writeScope() returns null and captureAfter falls back to the full diff.
+    change.snap = await snapshots.captureAfter(PROJECT, change.snap, coord.writeScope());
+    return { ok: true, undoReady: true, reason: "captured" };
+  } catch (err) {
+    log(`post-edit capture failed, undo falls back to whole-file for this change: ${err.message}`);
+    return { ok: false, undoReady: false, reason: "capture-failed", error: err.message };
   }
 }
 
