@@ -18,7 +18,7 @@
 
 import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync,
+  chmodSync, lstatSync, mkdirSync, readFileSync, readlinkSync,
   rmdirSync, symlinkSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -100,16 +100,23 @@ const entryMeta = (path) => {
   }
 };
 
-// A comparable fingerprint of an untracked entry as it is right now: the link target
-// for a symlink, the content hash for a file. Compared against the snapshot's stored
-// meta to decide "did this change, and is what's here now still what the agent left?"
+// A comparable, TYPE-AWARE fingerprint of a filesystem entry as it is right now: the
+// link target for a symlink (read with lstat, so a dangling one still fingerprints and
+// is never followed), the content hash for a regular file, and a bare type marker for a
+// directory or anything else. Two entries only ever compare equal when they are the
+// same type AND the same identity — a regular file and a symlink whose target happens
+// to hold the same bytes never match. null means the path is absent. Used everywhere
+// undo asks "is what's here now still exactly what the agent left?" — tracked, created
+// and pre-existing-untracked alike — so those checks can no longer disagree.
 const currentFingerprint = (path) => {
   try {
     const st = lstatSync(path);
     if (st.isSymbolicLink()) return `L:${readlinkSync(path)}`;
-    return `F:${hashFile(path)}`;
+    if (st.isDirectory()) return "D:";
+    if (st.isFile()) return `F:${hashFile(path)}`;
+    return "O:"; // fifo/socket/device — no content identity we can compare
   } catch {
-    return null;
+    return null; // absent
   }
 };
 
@@ -184,14 +191,18 @@ export async function captureAfter(cwd, snap, touched = null) {
   const only = touched?.length ? new Set(touched) : null;
   const scope = (files) => (only ? files.filter((f) => only.has(f)) : files);
 
+  // Fingerprint what the agent left with the same type-aware measure used for
+  // untracked entries — NOT a plain content hash. A content hash follows a symlink,
+  // so a tracked symlink the user later retargets to a same-content file (or a
+  // dangling one) would read as unchanged and be silently overwritten by undo.
   const changedByAgent = scope(lines(await git(cwd, ["diff", "--name-only", snap.ref, "--"])));
-  const postHashes = {};
-  for (const file of changedByAgent) postHashes[file] = hashFile(join(cwd, file));
+  const postFps = {};
+  for (const file of changedByAgent) postFps[file] = currentFingerprint(join(cwd, file));
 
   const before = new Set(snap.untrackedBefore ?? []);
   const createdByAgent = scope((await untracked(cwd)).filter((f) => !before.has(f)));
-  const createdHashes = {};
-  for (const file of createdByAgent) createdHashes[file] = hashFile(join(cwd, file));
+  const createdFps = {};
+  for (const file of createdByAgent) createdFps[file] = currentFingerprint(join(cwd, file));
 
   // A pre-existing untracked entry the agent changed in place: its bytes edited, a
   // symlink retargeted, or its very type swapped (file <-> symlink). git diff never
@@ -219,7 +230,7 @@ export async function captureAfter(cwd, snap, touched = null) {
   const deletedUntracked = scope((snap.untrackedBefore ?? []).filter((f) => !lexists(join(cwd, f))));
 
   return {
-    ...snap, postCaptured: true, changedByAgent, postHashes, createdByAgent, createdHashes,
+    ...snap, postCaptured: true, changedByAgent, postFps, createdByAgent, createdFps,
     modifiedUntracked, modifiedFps, deletedUntracked,
   };
 }
@@ -261,15 +272,20 @@ export async function revertTo(cwd, snap) {
   const skipped = [];
   const fromRef = []; // tracked files, restorable straight from the snapshot ref
   for (const file of snap.changedByAgent ?? []) {
-    if (hashFile(join(cwd, file)) === snap.postHashes?.[file]) fromRef.push(file);
+    // Type-aware: a tracked symlink the user retargeted (even to a same-content file)
+    // no longer matches, so git restore never overwrites their later change.
+    if (currentFingerprint(join(cwd, file)) === snap.postFps?.[file]) fromRef.push(file);
     else skipped.push(file);
   }
 
   const removed = [];
   for (const file of snap.createdByAgent ?? []) {
     const full = join(cwd, file);
-    if (!existsSync(full)) continue; // already gone; nothing to undo
-    if (hashFile(full) === snap.createdHashes?.[file]) removed.push(file);
+    if (!lexists(full)) continue; // already gone (lexists, so a dangling symlink still counts as present)
+    // Remove only if the entry is still exactly what the agent created — same type and
+    // identity. A dangling symlink the agent made is removed; a symlink the user has
+    // since retargeted, or an entry whose type they changed, is left alone.
+    if (currentFingerprint(full) === snap.createdFps?.[file]) removed.push(file);
     else skipped.push(file);
   }
 

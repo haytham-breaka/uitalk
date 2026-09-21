@@ -1136,6 +1136,87 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
       unlinkSync(join(repo, "f-orig.txt"));
       unlinkSync(join(repo, "f-victim.txt"));
     }
+
+    // (d) the agent CREATES a dangling symlink -> undo removes it. existsSync follows
+    // the link and reports absent, so a content-hash check used to leave it behind.
+    {
+      const snap0 = await snapshots.snapshot(repo, "agent creates a dangling symlink");
+      fsx.symlinkSync("./does-not-exist", join(repo, "c-dangling"));
+      const snap = await snapshots.captureAfter(repo, snap0);
+      check("a created dangling symlink is seen as the agent's to remove",
+        snap.createdByAgent?.includes("c-dangling"), JSON.stringify(snap.createdByAgent));
+      const out = await snapshots.revertTo(repo, snap);
+      let danglingGone = true;
+      try { fsx.lstatSync(join(repo, "c-dangling")); danglingGone = false; } catch {}
+      check("undo removes a created dangling symlink instead of leaving it behind",
+        out.removed.includes("c-dangling") && danglingGone, JSON.stringify(out));
+    }
+
+    // (e) the agent creates a symlink, the user retargets it to a SAME-CONTENT target ->
+    // undo must skip it. Following the link makes both targets hash the same, so a
+    // content check used to delete the user's later retarget.
+    {
+      writeFileSync(join(repo, "c-ta"), "same-bytes\n");
+      writeFileSync(join(repo, "c-tb"), "same-bytes\n"); // identical content
+      const snap0 = await snapshots.snapshot(repo, "agent creates a symlink, user retargets");
+      fsx.symlinkSync("c-ta", join(repo, "c-link"));
+      const snap = await snapshots.captureAfter(repo, snap0);
+      unlinkSync(join(repo, "c-link"));
+      fsx.symlinkSync("c-tb", join(repo, "c-link")); // user retargets to same-content file
+      const out = await snapshots.revertTo(repo, snap);
+      check("a created symlink the user retargeted (same content) is skipped, not removed",
+        out.skipped.includes("c-link") && !out.removed.includes("c-link"), JSON.stringify(out));
+      check("and the user's retarget survives",
+        fsx.lstatSync(join(repo, "c-link")).isSymbolicLink() && fsx.readlinkSync(join(repo, "c-link")) === "c-tb",
+        fsx.readlinkSync(join(repo, "c-link")));
+      unlinkSync(join(repo, "c-link"));
+      unlinkSync(join(repo, "c-ta"));
+      unlinkSync(join(repo, "c-tb"));
+    }
+
+    // (f) the agent creates a regular file, the user replaces it with a SAME-CONTENT
+    // symlink -> undo must skip it (the type changed, even though the bytes match).
+    {
+      writeFileSync(join(repo, "c-real-target"), "payload\n");
+      const snap0 = await snapshots.snapshot(repo, "agent creates a file, user swaps in a symlink");
+      writeFileSync(join(repo, "c-file"), "payload\n"); // agent creates a regular file
+      const snap = await snapshots.captureAfter(repo, snap0);
+      unlinkSync(join(repo, "c-file"));
+      fsx.symlinkSync("c-real-target", join(repo, "c-file")); // user makes it a symlink to same bytes
+      const out = await snapshots.revertTo(repo, snap);
+      check("a created file the user replaced with a symlink is skipped, not removed",
+        out.skipped.includes("c-file") && !out.removed.includes("c-file"), JSON.stringify(out));
+      check("and the user's symlink (and its target) survive",
+        fsx.lstatSync(join(repo, "c-file")).isSymbolicLink() &&
+          readFileSync(join(repo, "c-real-target"), "utf8") === "payload\n", "kept");
+      unlinkSync(join(repo, "c-file"));
+      unlinkSync(join(repo, "c-real-target"));
+    }
+
+    // (g) a TRACKED symlink the agent changed, then the user retargets to a same-content
+    // file -> undo must not overwrite the user's change. The guard follows the link via
+    // git diff + a content hash, so it used to see "unchanged" and git-restore over it.
+    {
+      writeFileSync(join(repo, "g-a"), "shared\n");
+      writeFileSync(join(repo, "g-b"), "shared\n"); // identical content
+      fsx.symlinkSync("g-a", join(repo, "g-link"));
+      git("add", ".");
+      git("commit", "-qm", "tracked symlink baseline");
+      const snap0 = await snapshots.snapshot(repo, "agent retargets a tracked symlink");
+      unlinkSync(join(repo, "g-link"));
+      fsx.symlinkSync("g-b", join(repo, "g-link")); // the agent's change: g-link -> g-b
+      const snap = await snapshots.captureAfter(repo, snap0);
+      check("a retargeted tracked symlink is seen as changed by the agent",
+        snap.changedByAgent?.includes("g-link"), JSON.stringify(snap.changedByAgent));
+      unlinkSync(join(repo, "g-link"));
+      fsx.symlinkSync("g-a", join(repo, "g-link")); // the USER retargets again, back toward g-a (same bytes)
+      const out = await snapshots.revertTo(repo, snap);
+      check("a tracked symlink the user retargeted (same content) is not overwritten by undo",
+        out.skipped.includes("g-link") && !out.reverted.includes("g-link"), JSON.stringify(out));
+      check("and the user's tracked-symlink retarget survives",
+        fsx.readlinkSync(join(repo, "g-link")) === "g-a", fsx.readlinkSync(join(repo, "g-link")));
+      git("checkout", "--", "."); // clean up for later blocks
+    }
   }
 
   // The executable bit on a pre-existing untracked file must survive undo. The blob
@@ -2141,11 +2222,12 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     writeFileSync(join(proj, "revfail.css"), ".x{color:red}\n");
     const hash = createHash("sha256").update(readFileSync(join(proj, "revfail.css"))).digest("hex");
     // "Already captured", but with a ref git cannot resolve and a matching changed
-    // file — so revertTo() reaches its git restore and throws.
+    // file — so revertTo() reaches its git restore and throws. The post-fingerprint is
+    // the type-aware form revertTo now compares against (F:<hash> for a regular file).
     const badSnap = () => ({
       ref: "uitalk-unresolvable-ref", label: "x", at: Date.now(), postCaptured: true,
-      changedByAgent: ["revfail.css"], postHashes: { "revfail.css": hash },
-      createdByAgent: [], createdHashes: {}, modifiedUntracked: [], untrackedBlobs: {},
+      changedByAgent: ["revfail.css"], postFps: { "revfail.css": `F:${hash}` },
+      createdByAgent: [], createdFps: {}, modifiedUntracked: [], untrackedBlobs: {},
     });
     bridge.setSnapshotForTest(badSnap);
     bridge.setSessionForTest({
