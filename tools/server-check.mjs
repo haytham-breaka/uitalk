@@ -1574,6 +1574,28 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("and it is stable across reads", startToken(process.pid) === token);
   check("a non-existent pid yields no token", startToken(2147483646) === null);
 
+  // On Linux the token is the sub-second /proc starttime, prefixed by its source, so
+  // two processes that begin within the same wall-clock SECOND still get distinct
+  // identities — closing the pid-reuse hole that ps -o lstart= (one-second resolution)
+  // leaves. Elsewhere the ps fallback is used; this precision claim is Linux-specific.
+  if (process.platform === "linux") {
+    check("the Linux token is the high-resolution /proc starttime", /^linux:\d+$/.test(token), token);
+    const k1 = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 40));
+    const k2 = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 60));
+    const t1 = startToken(k1.pid);
+    const t2 = startToken(k2.pid);
+    // ps -o lstart= would very likely give these two the same second (the old hole).
+    const psSecond = (pid) => { try { return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)]).toString().trim(); } catch { return null; } };
+    check("two processes started in the same second share a one-second ps token (the old hole)",
+      psSecond(k1.pid) === psSecond(k2.pid), `${psSecond(k1.pid)} vs ${psSecond(k2.pid)}`);
+    check("but their /proc-based identities are distinct, so a reused pid is not confused",
+      t1 && t2 && t1 !== t2, `${t1} vs ${t2}`);
+    try { k1.kill("SIGKILL"); } catch {}
+    try { k2.kill("SIGKILL"); } catch {}
+  }
+
   const pf = join(mkdtempSync(join(sandbox, "pidfile-")), "dev.pid");
   writeOwner(pf, process.pid);
   const rec = readOwner(pf);

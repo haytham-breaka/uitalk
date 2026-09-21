@@ -15,6 +15,26 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
+// Linux: the process start time from /proc/<pid>/stat field 22 (starttime, in clock
+// ticks since boot). This is sub-second (typically 100 ticks/s) and boot-relative, so
+// two processes that share the same pid across a crash-and-reuse essentially never
+// share it — unlike `ps -o lstart=`, whose one-second resolution lets a pid reused
+// within the same wall-clock second look identical. The comm field (field 2) can
+// contain spaces and parens, so parse from the LAST ')': the fields after it start at
+// `state` (field 3), so starttime (field 22) is index 19 of that tail.
+function linuxStartToken(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close === -1) return null;
+    const after = stat.slice(close + 2).trim().split(/\s+/);
+    const starttime = after[19];
+    return /^\d+$/.test(starttime ?? "") ? `linux:${starttime}` : null;
+  } catch {
+    return null;
+  }
+}
+
 const alive = (pid) => {
   try {
     process.kill(pid, 0);
@@ -40,35 +60,44 @@ function winStartToken(pid) {
           `if ($p) { $p.CreationDate.ToFileTimeUtc() }`],
       { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 },
     ).toString().trim();
-    if (out) return out;
+    if (out) return `win:${out}`;
   } catch {}
   try {
     const out = execFileSync("cmd", ["/c", `wmic process where ProcessId=${pid} get CreationDate /value`], {
       stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
     }).toString();
     const m = out.match(/CreationDate=(\d+)/);
-    if (m) return m[1];
+    if (m) return `win:${m[1]}`;
   } catch {}
   return null;
 }
 
-/** A stable per-instance fingerprint of the running process `pid`: its OS-assigned
- * start time. Returns null when this platform cannot supply one. */
-export function startToken(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  if (process.platform === "win32") return winStartToken(pid);
+// macOS/BSD: no /proc, so fall back to `ps -o lstart=` (one-second resolution). The
+// second-precision collision window exists here, but reuse of a specific pid within
+// the same second is already vanishingly unlikely, and there is no dependency-free
+// higher-resolution source without a native module. lstart carries the year, so it
+// also survives reboots.
+function posixStartToken(pid) {
   try {
-    // lstart is the process start time to the second — stable for a given process,
-    // and different for a pid the OS has recycled into a new one. `ps` is on every
-    // POSIX system (Linux, macOS, BSD).
     const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 4000,
     }).toString().trim();
-    return out || null;
+    return out ? `posix:${out}` : null;
   } catch {
     return null;
   }
+}
+
+/** A stable per-instance fingerprint of the running process `pid`: its OS-assigned
+ * start time, prefixed by its source so tokens from different mechanisms can never
+ * compare equal. Returns null when this platform cannot supply one. */
+export function startToken(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "win32") return winStartToken(pid);
+  // Linux has a sub-second, boot-relative source; other POSIX falls back to ps.
+  if (process.platform === "linux") return linuxStartToken(pid) ?? posixStartToken(pid);
+  return posixStartToken(pid);
 }
 
 /** Serialize the ownership record for a freshly launched process into a pidfile. */
