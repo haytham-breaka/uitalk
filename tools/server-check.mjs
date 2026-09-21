@@ -279,6 +279,31 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     JSON.stringify(listedWithGarbage.map((e) => e.pid)));
   check("and the malformed file is pruned", !existsSync(join(registry.registryPath, "garbage.json")));
   registry.remove(process.pid);
+
+  // Liveness is process IDENTITY, not bare pid existence: a crashed bridge whose pid
+  // the OS reused for an unrelated live process must be pruned, not kept forever (which
+  // would block a legitimate replacement). Simulate reuse by rewriting a live entry's
+  // token to one that no longer matches this process.
+  registry.add({ pid: process.pid, port: 8403, appHost: "127.0.0.1", appPort: 5176, project: "/reuse" });
+  const reuseFile = join(registry.registryPath, `${process.pid}.json`);
+  const rec = JSON.parse(readFileSync(reuseFile, "utf8"));
+  check("a registry entry records a process-instance token", typeof rec.token === "string" && rec.token.length > 0,
+    JSON.stringify(rec.token));
+  writeFileSync(reuseFile, JSON.stringify({ ...rec, token: "not-this-process-token" }));
+  check("an entry whose process identity no longer matches (pid reuse) is pruned, though the pid is alive",
+    !registry.list().some((e) => e.pid === process.pid) && !existsSync(reuseFile),
+    JSON.stringify(registry.list().map((e) => e.pid)));
+
+  // A legacy entry with no token falls back to pid existence, so an older install
+  // keeps working across the upgrade.
+  registry.add({ pid: process.pid, port: 8404, appHost: "127.0.0.1", appPort: 5177, project: "/legacy" });
+  const legacyFile = join(registry.registryPath, `${process.pid}.json`);
+  const legacyRec = JSON.parse(readFileSync(legacyFile, "utf8"));
+  delete legacyRec.token;
+  writeFileSync(legacyFile, JSON.stringify(legacyRec));
+  check("a legacy tokenless entry still lists while its pid lives (back-compat)",
+    registry.list().some((e) => e.pid === process.pid));
+  registry.remove(process.pid);
 }
 
 // ------------------------------------------- registry: concurrent registration
@@ -1586,11 +1611,12 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     await new Promise((r) => setTimeout(r, 60));
     const t1 = startToken(k1.pid);
     const t2 = startToken(k2.pid);
-    // ps -o lstart= would very likely give these two the same second (the old hole).
-    const psSecond = (pid) => { try { return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)]).toString().trim(); } catch { return null; } };
-    check("two processes started in the same second share a one-second ps token (the old hole)",
-      psSecond(k1.pid) === psSecond(k2.pid), `${psSecond(k1.pid)} vs ${psSecond(k2.pid)}`);
-    check("but their /proc-based identities are distinct, so a reused pid is not confused",
+    // The invariant: two processes started within the same wall-clock second still get
+    // distinct identities — the pid-reuse hole that ps -o lstart= (one-second
+    // resolution) leaves. The /proc starttime is in clock ticks (sub-second), so the
+    // two differ. (The old ps-second collision was illustrative but timing-dependent,
+    // so it is not asserted here — this is the invariant that actually matters.)
+    check("two processes started ~instantly apart get distinct /proc identities (no pid-reuse confusion)",
       t1 && t2 && t1 !== t2, `${t1} vs ${t2}`);
     try { k1.kill("SIGKILL"); } catch {}
     try { k2.kill("SIGKILL"); } catch {}
