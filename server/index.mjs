@@ -698,33 +698,42 @@ wss.on("connection", (ws) => {
       // those. With no usable list, coord.writes stays empty and captureApprovedEdit
       // falls back to the full diff, exactly as before.
       case "note_edit": {
-        // Which approval is this note_edit finishing? The client echoes the change id
-        // it was given with the approval, so a second approval that arrived meanwhile
-        // cannot make this freeze the wrong change's snapshot. Fall back to the current
-        // lastChange when no id is given (a client that predates the id, or a mode that
-        // only ever has one in flight).
-        const change =
-          frame.changeId != null && offPending.has(frame.changeId)
-            ? offPending.get(frame.changeId)
-            : coord.lastChange;
+        const ack = (result) => {
+          if (typeof frame.id === "number" && ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ kind: "call_result", id: frame.id, result }));
+          }
+        };
+        // Resolve which approval this note_edit finishes. An explicit id must resolve
+        // to that exact change or fail as unknown/stale — it must NEVER fall through to
+        // whichever change happens to be current. Without an id, only an unambiguous
+        // single outstanding change is safe to assume.
+        const resolved = resolveNoteEditTarget(frame.changeId);
+        if (resolved.error) return void ack({ ok: false, undoReady: false, reason: resolved.error });
+        const change = resolved.change;
+
         // Scope undo to the files the client names for THIS change (project-relative,
-        // in-root only), or the full diff when it names none.
-        const scope = Array.isArray(frame.files)
-          ? frame.files.map(inRootRelative).filter(Boolean)
-          : [];
+        // in-root only). A whole-diff capture (no files) would sweep in the edits of
+        // OTHER approvals still in flight, so it is refused while more than one off-mode
+        // change is outstanding — the client must name its files. It stays available
+        // when this is the only outstanding change (the common, unambiguous case).
+        const scope = Array.isArray(frame.files) ? frame.files.map(inRootRelative).filter(Boolean) : [];
+        if (!scope.length && change && offPending.has(change.changeId) && offPending.size > 1) {
+          return void ack({ ok: false, undoReady: false, reason: "ambiguous-scope" });
+        }
+
         // Acknowledge only after the post-edit state is actually recorded, so the MCP
         // client is told the truth about whether undo is ready — not a fire-and-forget
-        // "recorded" that may be false (no change, no repo, or a capture failure). The
-        // ack rides the same call_result channel the page RPCs use, keyed by frame.id.
+        // "recorded" that may be false. The ack rides the same call_result channel the
+        // page RPCs use, keyed by frame.id.
         captureChange(change, scope.length ? scope : null).then((status) => {
           // A recorded change becomes the undo point and leaves the pending set.
           if (change && (status.reason === "captured" || status.reason === "already")) {
             coord.lastChange = change;
             if (change.changeId != null) offPending.delete(change.changeId);
           }
-          if (typeof frame.id === "number" && ws.readyState === ws.OPEN) {
-            ws.send(JSON.stringify({ kind: "call_result", id: frame.id, result: status }));
-          }
+          // Name which change was recorded, so the client can confirm it matched the
+          // one it meant (and catch a mis-correlation rather than trust it blindly).
+          ack(change?.changeId != null ? { ...status, changeId: change.changeId } : status);
         });
         return;
       }
@@ -946,6 +955,29 @@ async function captureChange(change, scope) {
 // null otherwise, so captureAfter falls back to the full diff).
 function captureApprovedEdit() {
   return captureChange(coord.lastChange, coord.writeScope());
+}
+
+/**
+ * Which approval a note_edit finishes. The whole point of the change id is that a
+ * note_edit resolves to exactly one approval or fails — it must never silently land
+ * on a different change (the bug when a stale/duplicate id fell through to lastChange).
+ *   - an explicit id in the pending set          -> that change
+ *   - an explicit id already recorded (its id is the current undo point) -> that
+ *     change (a duplicate note_edit is then a harmless no-op)
+ *   - an explicit id we don't recognize          -> { error: "unknown-change" }
+ *   - no id, at most one off-mode change pending  -> that one (or lastChange for
+ *     builtin/adapter, or a legacy single-change client)
+ *   - no id, several off-mode changes pending     -> { error: "ambiguous-change" }
+ */
+function resolveNoteEditTarget(changeId) {
+  if (changeId != null) {
+    if (offPending.has(changeId)) return { change: offPending.get(changeId) };
+    if (coord.lastChange?.changeId === changeId) return { change: coord.lastChange };
+    return { error: "unknown-change" };
+  }
+  if (offPending.size > 1) return { error: "ambiguous-change" };
+  if (offPending.size === 1) return { change: [...offPending.values()][0] };
+  return { change: coord.lastChange };
 }
 
 async function noteTurnEnded() {
