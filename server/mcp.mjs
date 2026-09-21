@@ -240,7 +240,8 @@ defs.push({
     "return which they picked along with its CSS and the element's identifiers. Call this " +
     "straight after show_options. It blocks until they choose or the timeout passes — your " +
     "client cannot be sent a message, so this is how their answer reaches you. Once you have " +
-    "committed the approved change to source, call note_edit so the user can undo it.",
+    "committed the approved change to source, call note_edit (passing the changeId this returns) " +
+    "so the user can undo it.",
   schema: {
     timeout: { type: "number", description: "Give up after this many milliseconds (default 300000)" },
   },
@@ -322,42 +323,58 @@ defs.push({
   description:
     "Call this once you have committed an approved change (from await_choice) to source. It lets " +
     "uitalk record the post-edit state so the user can undo the change, and tell a later edit of " +
-    "theirs apart from yours. Pass `files` — the project-relative paths you changed for this " +
-    "approval — so undo scopes to exactly those; omit it and undo falls back to the whole diff " +
-    "since the change was approved. Call it after each approved change you write.",
+    "theirs apart from yours. Pass `changeId` — the value await_choice returned for the change you " +
+    "just committed — so it is recorded against exactly that approval, even if you have several in " +
+    "flight; and pass `files` — the project-relative paths you changed — so undo scopes to exactly " +
+    "those. Call it after each approved change you write.",
   schema: {
+    changeId: {
+      type: "number",
+      description: "The changeId await_choice returned for the change you just committed. Give it whenever you have it.",
+    },
     files: {
       type: "array",
       items: { type: "string" },
       description: "The paths you changed for this approved change, project-relative (optional but preferred).",
     },
   },
-  run: async ({ files } = {}) => {
+  run: async ({ changeId, files } = {}) => {
     await ready();
     const scoped = Array.isArray(files) ? files.filter((f) => typeof f === "string" && f) : undefined;
+    // Which approval this finishes: the caller's explicit id when given (the robust
+    // path — completion order need not match approval order); otherwise the single
+    // awaited change, but ONLY when there is exactly one, since guessing among several
+    // could record against the wrong one. With several outstanding and no id, we send
+    // none and let the bridge answer "ambiguous" rather than pick.
+    let cid = typeof changeId === "number" ? changeId : awaitedChanges.length === 1 ? awaitedChanges[0] : undefined;
+    if (cid != null) {
+      const i = awaitedChanges.indexOf(cid);
+      if (i !== -1) awaitedChanges.splice(i, 1); // this change is being resolved now
+    }
     // Request/response, not fire-and-forget: wait for the bridge to actually record the
     // post-edit state and report whether undo is ready, so this never claims success
     // when nothing was captured. A disconnect rejects the pending call (the close
     // handler drains `pending`), so the tool surfaces an error rather than a false ok.
     const id = ++seq;
-    // Name which approval this finishes (oldest awaited first), so a second approval
-    // that arrived meanwhile cannot make the bridge freeze the wrong change's snapshot.
-    const changeId = awaitedChanges.shift();
-    socket.send(JSON.stringify({ kind: "note_edit", id, changeId, files: scoped }));
+    socket.send(JSON.stringify({ kind: "note_edit", id, changeId: cid, files: scoped }));
     const status = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (pending.delete(id)) reject(new Error("note_edit timed out waiting for the bridge to record the edit"));
       }, 10000);
       pending.set(id, { resolve, reject, timer });
     });
+    const NOTES = {
+      "not-a-repo": "the edit is noted, but this project is not a git repository, so undo is unavailable",
+      "no-change": "there was no approved change waiting to be recorded — did you call this after await_choice?",
+      "unknown-change": "that changeId is not awaiting a note_edit (already recorded, or never seen) — pass the changeId await_choice returned for this change",
+      "ambiguous-change": "more than one approved change is awaiting note_edit — pass the changeId await_choice returned for the one you just committed",
+      "ambiguous-scope": "several approved changes are in flight, so undo cannot use the whole diff — pass `files` naming what you changed for this one",
+    };
     const note = status.undoReady
       ? "post-edit state recorded; the user can undo this change"
-      : status.reason === "not-a-repo"
-        ? "the edit is noted, but this project is not a git repository, so undo is unavailable"
-        : status.reason === "no-change"
-          ? "there was no approved change waiting to be recorded — did you call this after await_choice?"
-          : `undo could not be prepared for this change${status.error ? `: ${status.error}` : ""}`;
-    return text({ ok: status.ok, undoReady: Boolean(status.undoReady), note });
+      : NOTES[status.reason] ??
+        `undo could not be prepared for this change${status.error ? `: ${status.error}` : ""}`;
+    return text({ ok: status.ok, undoReady: Boolean(status.undoReady), changeId: status.changeId, note });
   },
 });
 

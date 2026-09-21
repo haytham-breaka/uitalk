@@ -254,6 +254,42 @@ check("a stale answer from a timed-out question is not handed to the next questi
   !/stale-answer/.test(answerForSecond.result.content[0].text) && /did not answer/.test(answerForSecond.result.content[0].text),
   answerForSecond.result.content[0].text.slice(0, 80));
 
+// Correlation no longer depends on FIFO completion: await_choice returns a changeId,
+// and note_edit(changeId) records exactly that approval — even completed out of order.
+{
+  const parseFrame = (res) => { const t = res.result.content[0].text; return JSON.parse(t.slice(t.indexOf("{"))); };
+  const awaitPick = async (label) => {
+    const waiting = rpc("tools/call", { name: "await_choice", arguments: { timeout: 5000 } });
+    await new Promise((r) => setTimeout(r, 50));
+    page.send(JSON.stringify({ kind: "approval", label, ref: 1, declarations: "color: blue", element: { selector: ".x" } }));
+    return parseFrame(await waiting).changeId;
+  };
+  const nfA = await awaitPick("nf-A");
+  const nfB = await awaitPick("nf-B");
+  check("await_choice returns a distinct changeId per approval", nfA != null && nfB != null && nfA !== nfB,
+    `${nfA} vs ${nfB}`);
+
+  // With both A and B outstanding and no changeId, note_edit cannot guess — ambiguous.
+  const guess = await rpc("tools/call", { name: "note_edit", arguments: { files: ["z.css"] } });
+  check("note_edit with no changeId and several outstanding is ambiguous, not a guess",
+    /"undoReady": ?false/.test(guess.result.content[0].text) && /more than one approved change/.test(guess.result.content[0].text),
+    guess.result.content[0].text.replace(/\s+/g, " ").slice(0, 90));
+
+  // Complete B FIRST, then A — the opposite of approval order — by explicit changeId.
+  // The ack echoes which change was recorded, so a FIFO mis-correlation is caught.
+  const doneB = parseFrame(await rpc("tools/call", { name: "note_edit", arguments: { changeId: nfB, files: ["b.css"] } }));
+  check("note_edit(changeId=B) records exactly B, though A was approved first",
+    doneB.undoReady === true && doneB.changeId === nfB, JSON.stringify(doneB));
+  const doneA = parseFrame(await rpc("tools/call", { name: "note_edit", arguments: { changeId: nfA, files: ["a.css"] } }));
+  check("note_edit(changeId=A) then records exactly A",
+    doneA.undoReady === true && doneA.changeId === nfA, JSON.stringify(doneA));
+
+  // A changeId that is not awaiting note_edit (already recorded) is refused as unknown.
+  const dup = await rpc("tools/call", { name: "note_edit", arguments: { changeId: nfB, files: ["b.css"] } });
+  check("a note_edit for an already-recorded changeId is refused, not misapplied",
+    /"undoReady": ?false/.test(dup.result.content[0].text), dup.result.content[0].text.replace(/\s+/g, " ").slice(0, 90));
+}
+
 // A pick that was queued (no await_choice parked to catch it) must not survive a
 // bridge disconnect: after a reconnect it belongs to a session the bridge is no
 // longer showing, so a fresh await_choice must NOT be handed it.
