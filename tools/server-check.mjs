@@ -3167,6 +3167,56 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   check("and every locked process exited cleanly", codes.every((c) => c === 0), JSON.stringify(codes));
 }
 
+// ------------------------- the file lock reclaims a stale lock left on a reused PID
+{
+  const { withLock } = await import("../server/file-lock.mjs");
+  const { startToken } = await import("../server/proc-identity.mjs");
+  const dir = mkdtempSync(join(sandbox, "lock-reuse-"));
+  const lp = () => join(dir, `${Math.random().toString(36).slice(2)}.lock`);
+
+  // A real live process stands in for the one the OS gave the crashed holder's pid.
+  const kid = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], { stdio: "ignore" });
+  await new Promise((r) => setTimeout(r, 150));
+
+  // Crashed holder recorded {pid, token}; that pid is now this unrelated live process,
+  // whose start token differs. PID-only staleness saw it "alive" forever and threw
+  // "could not acquire lock"; identity-aware staleness reclaims it.
+  {
+    const lockPath = lp();
+    writeFileSync(lockPath, JSON.stringify({ pid: kid.pid, token: "token-of-the-crashed-original" }));
+    let ok = false;
+    try { await withLock(lockPath, () => { ok = true; }, { tries: 15, waitMs: 20 }); } catch {}
+    check("a stale lock whose PID was reused by an unrelated process is reclaimed", ok);
+  }
+
+  // The genuine live holder (its own, matching token) must NOT be reclaimed.
+  {
+    const lockPath = lp();
+    writeFileSync(lockPath, JSON.stringify({ pid: kid.pid, token: startToken(kid.pid) }));
+    let ok = false;
+    let threw = false;
+    try { await withLock(lockPath, () => { ok = true; }, { tries: 3, waitMs: 20 }); } catch { threw = true; }
+    check("a lock held by a genuinely live owner is respected, not stolen", !ok && threw);
+  }
+
+  // A dead holder and a malformed record are both reclaimable.
+  {
+    const deadLock = lp();
+    writeFileSync(deadLock, JSON.stringify({ pid: 2147483646, token: "x" }));
+    let okDead = false;
+    try { await withLock(deadLock, () => { okDead = true; }, { tries: 15, waitMs: 20 }); } catch {}
+    check("a stale lock left by a dead holder is reclaimed", okDead);
+
+    const junkLock = lp();
+    writeFileSync(junkLock, "}{ not json at all");
+    let okJunk = false;
+    try { await withLock(junkLock, () => { okJunk = true; }, { tries: 15, waitMs: 20 }); } catch {}
+    check("a malformed lock record is safely reclaimed", okJunk);
+  }
+
+  try { kid.kill("SIGKILL"); } catch {}
+}
+
 rmSync(sandbox, { recursive: true, force: true });
 console.log(fail.length ? `\n${fail.length} failing: ${fail.join(", ")}` : "\nall checks passed");
 process.exit(fail.length ? 1 : 0);
