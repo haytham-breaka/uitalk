@@ -2657,6 +2657,79 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   }
 
   {
+    // The change-id resolver and the whole-diff scope guard: an explicit changeId must
+    // resolve to exactly that approval or be refused (never applied to another), and a
+    // no-files capture is refused while several approvals are outstanding.
+    const proj = process.env.UITALK_PROJECT;
+    const p = makePage();
+    bridge.setAgentForTest("off");
+    writeFileSync(join(proj, "res-a.css"), ".a{c:red}\n");
+    writeFileSync(join(proj, "res-b.css"), ".b{c:red}\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "res baseline"], { cwd: proj });
+    const idOf = (l) => p.sent.find((f) => f.kind === "revertable" && f.label === l)?.changeId;
+    let noteSeq = 5000;
+    const noteEdit = async (fields) => {
+      const nid = ++noteSeq;
+      p.sent.length = 0;
+      p.deliver({ kind: "note_edit", id: nid, ...fields });
+      await until(() => p.sent.some((f) => f.kind === "call_result" && f.id === nid), "the note_edit ack");
+      return p.sent.find((f) => f.kind === "call_result" && f.id === nid).result;
+    };
+
+    p.deliver({ kind: "approval", label: "res A", ref: 1, declarations: "c:blue", element: {} });
+    await until(() => idOf("res A") != null && bridge.approvalPhaseForTest() === "idle", "approval A");
+    const aId = idOf("res A");
+    writeFileSync(join(proj, "res-a.css"), ".a{c:blue}\n");
+    check("recording an approval by its explicit id succeeds",
+      (await noteEdit({ changeId: aId, files: ["res-a.css"] })).undoReady === true);
+    // A duplicate note_edit for the change that is now the recorded undo point is a
+    // harmless no-op (already), not an error and not a capture of something else.
+    check("a duplicate note_edit for the current recorded change is a harmless no-op",
+      (await noteEdit({ changeId: aId, files: ["res-a.css"] })).undoReady === true);
+
+    // With A recorded and B now the current change, a note_edit for the COMPLETED A
+    // must be reported unknown — never silently applied to B.
+    p.deliver({ kind: "approval", label: "res B", ref: 2, declarations: "c:green", element: {} });
+    await until(() => idOf("res B") != null && bridge.approvalPhaseForTest() === "idle", "approval B");
+    const bId = idOf("res B");
+    const stale = await noteEdit({ changeId: aId, files: ["res-a.css"] });
+    check("a stale explicit changeId is refused as unknown, not applied to the current change",
+      stale.ok === false && stale.undoReady === false && stale.reason === "unknown-change", JSON.stringify(stale));
+    const bogus = await noteEdit({ changeId: 987654321, files: ["res-b.css"] });
+    check("an unknown/evicted changeId is refused, not applied to lastChange",
+      bogus.reason === "unknown-change", JSON.stringify(bogus));
+
+    // A single outstanding change may still use the whole-diff fallback (no files).
+    const single = await noteEdit({ changeId: bId });
+    check("with one approval outstanding, a no-files whole-diff capture is still allowed",
+      single.undoReady === true, JSON.stringify(single));
+
+    // Now make two outstanding at once and probe the ambiguity guards.
+    p.deliver({ kind: "approval", label: "res C", ref: 3, declarations: "c:teal", element: {} });
+    await until(() => idOf("res C") != null && bridge.approvalPhaseForTest() === "idle", "approval C");
+    const cId = idOf("res C");
+    p.deliver({ kind: "approval", label: "res D", ref: 4, declarations: "c:navy", element: {} });
+    await until(() => idOf("res D") != null && bridge.approvalPhaseForTest() === "idle", "approval D");
+    const dId = idOf("res D");
+    const noId = await noteEdit({ files: ["res-a.css"] });
+    check("no changeId with several approvals outstanding is ambiguous, not a guess",
+      noId.reason === "ambiguous-change", JSON.stringify(noId));
+    const noFiles = await noteEdit({ changeId: cId });
+    check("a whole-diff capture is refused while several approvals are outstanding",
+      noFiles.reason === "ambiguous-scope", JSON.stringify(noFiles));
+    writeFileSync(join(proj, "res-a.css"), ".a{c:C}\n");
+    const scopedC = await noteEdit({ changeId: cId, files: ["res-a.css"] });
+    check("an explicit changeId + files records correctly under concurrency",
+      scopedC.undoReady === true && dId != null, JSON.stringify(scopedC));
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    execFileSync("git", ["checkout", "--", "."], { cwd: proj });
+    p.close();
+  }
+
+  {
     // An internal ask (compaction/clear) queued behind an open turn must still time
     // out if that turn never ends — otherwise its promise leaks and the compaction
     // that awaits it wedges. Open a turn that never resolves, then queue an ask
