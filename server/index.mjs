@@ -39,6 +39,17 @@ import { timingSafeEqual } from "node:crypto";
 // internal/builtinTurnOpen) is transport and stays separate.
 const coord = new TurnCoordinator();
 
+// Off-mode approvals awaiting their note_edit, keyed by a per-approval change id.
+// builtin/adapter serialize approvals (one edits at a time, captured at turn end), so
+// only off mode can have several uncaptured at once — the MCP client owns each edit
+// and reports it later. A single global lastChange cannot tell them apart, so a second
+// approval would overwrite the pre-edit state the first still needs; this map keeps
+// each approval's own snapshot until its note_edit records it. Bounded so a client
+// that never calls note_edit cannot grow it without limit.
+let changeSeq = 0;
+const offPending = new Map();
+const OFF_PENDING_CAP = 64;
+
 // A fixed port would stop the second bridge from ever starting. An explicit
 // UITALK_PORT is honoured exactly; otherwise the first free port from 8400 wins.
 const FIXED_PORT = process.env.UITALK_PORT ? Number(process.env.UITALK_PORT) : null;
@@ -687,14 +698,30 @@ wss.on("connection", (ws) => {
       // those. With no usable list, coord.writes stays empty and captureApprovedEdit
       // falls back to the full diff, exactly as before.
       case "note_edit": {
-        if (Array.isArray(frame.files)) {
-          for (const f of frame.files) if (typeof f === "string" && f) noteAgentWrite(f);
-        }
+        // Which approval is this note_edit finishing? The client echoes the change id
+        // it was given with the approval, so a second approval that arrived meanwhile
+        // cannot make this freeze the wrong change's snapshot. Fall back to the current
+        // lastChange when no id is given (a client that predates the id, or a mode that
+        // only ever has one in flight).
+        const change =
+          frame.changeId != null && offPending.has(frame.changeId)
+            ? offPending.get(frame.changeId)
+            : coord.lastChange;
+        // Scope undo to the files the client names for THIS change (project-relative,
+        // in-root only), or the full diff when it names none.
+        const scope = Array.isArray(frame.files)
+          ? frame.files.map(inRootRelative).filter(Boolean)
+          : [];
         // Acknowledge only after the post-edit state is actually recorded, so the MCP
         // client is told the truth about whether undo is ready — not a fire-and-forget
         // "recorded" that may be false (no change, no repo, or a capture failure). The
         // ack rides the same call_result channel the page RPCs use, keyed by frame.id.
-        captureApprovedEdit().then((status) => {
+        captureChange(change, scope.length ? scope : null).then((status) => {
+          // A recorded change becomes the undo point and leaves the pending set.
+          if (change && (status.reason === "captured" || status.reason === "already")) {
+            coord.lastChange = change;
+            if (change.changeId != null) offPending.delete(change.changeId);
+          }
           if (typeof frame.id === "number" && ws.readyState === ws.OPEN) {
             ws.send(JSON.stringify({ kind: "call_result", id: frame.id, result: status }));
           }
@@ -846,17 +873,25 @@ const BUILTIN_READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "NotebookRead"
 const OPENCODE_WRITE_TOOLS = new Set(["write", "edit", "patch"]);
 const OPENCODE_READ_TOOLS = new Set(["read", "grep", "glob", "list", "ls"]);
 
+/** A path normalized to a project-relative POSIX path (matching git's diff/ls-files
+ * output), or null when it is empty or resolves outside the project. */
+function inRootRelative(path) {
+  if (typeof path !== "string" || !path) return null;
+  const rel = relative(PROJECT, resolve(PROJECT, path));
+  return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel.split(sep).join("/") : null;
+}
+
 /** Record a file the agent just wrote, normalized to a project-relative POSIX path
  * so it matches git's diff/ls-files output. A path outside the project is ignored
  * (undo never touches it); a write tool that named no readable path marks the turn
  * incomplete — we know a write happened but not where. */
 function noteAgentWrite(path) {
   if (typeof path !== "string" || !path) {
-    coord.markWritesIncomplete();
+    coord.markWritesIncomplete(); // a write happened but we can't tell where
     return;
   }
-  const rel = relative(PROJECT, resolve(PROJECT, path));
-  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) coord.noteWrite(rel.split(sep).join("/"));
+  const rel = inRootRelative(path);
+  if (rel) coord.noteWrite(rel); // an out-of-root path is ignored, never marked incomplete
 }
 
 /** A tool ran that could have mutated files at paths the bridge cannot determine
@@ -887,8 +922,9 @@ function noteOpencodeTool(tool, input) {
  * caller resets the approval phase right after — a throw would drop the reset and
  * latch approvals off (see noteTurnEnded). Undo simply degrades to the whole-file
  * fallback for this change, and the reason is logged rather than lost. */
-async function captureApprovedEdit() {
-  const change = coord.lastChange;
+// Freeze the post-edit state of one approved change and report whether undo is ready.
+// `scope` is the paths to restrict undo to, or null for the full diff.
+async function captureChange(change, scope) {
   // No approved change is waiting — nothing to record. (An MCP client that calls
   // note_edit without a preceding approval, or after a New Session cleared it.)
   if (!change) return { ok: false, undoReady: false, reason: "no-change" };
@@ -897,16 +933,19 @@ async function captureApprovedEdit() {
   if (!change.snap) return { ok: true, undoReady: false, reason: "not-a-repo" };
   if (change.snap.postCaptured) return { ok: true, undoReady: true, reason: "already" };
   try {
-    // Scope to the agent's own writes only when we saw the WHOLE set: every tool
-    // was a structured write or a known read. If a shell/opaque tool ran, or no
-    // structured write was seen at all (an MCP client's edit is invisible here),
-    // writeScope() returns null and captureAfter falls back to the full diff.
-    change.snap = await snapshots.captureAfter(PROJECT, change.snap, coord.writeScope());
+    change.snap = await snapshots.captureAfter(PROJECT, change.snap, scope);
     return { ok: true, undoReady: true, reason: "captured" };
   } catch (err) {
     log(`post-edit capture failed, undo falls back to whole-file for this change: ${err.message}`);
     return { ok: false, undoReady: false, reason: "capture-failed", error: err.message };
   }
+}
+
+// Turn-end capture for builtin/adapter: the one in-flight change, scoped to the
+// agent's own writes only when the WHOLE write set was seen (writeScope() returns
+// null otherwise, so captureAfter falls back to the full diff).
+function captureApprovedEdit() {
+  return captureChange(coord.lastChange, coord.writeScope());
 }
 
 async function noteTurnEnded() {
@@ -933,6 +972,9 @@ async function noteTurnEnded() {
  * pendingApprovals can be started later, from noteTurnEnded, on identical terms. */
 function beginApproval(frame) {
   coord.snapshotting(); // idle -> snapshotting; also resets this approval's write set
+  // A per-approval id, so a later note_edit can name exactly which change it finished
+  // even when several off-mode approvals are in flight at once.
+  frame.changeId ??= ++changeSeq;
   record("me", `approved: ${frame.label}`);
   // Neither the external-agent notice nor the edit instruction may reach an agent
   // until the pre-edit snapshot exists — otherwise the agent's own write can land
@@ -962,9 +1004,17 @@ function beginApproval(frame) {
     // "snapshotting" — this approval was abandoned, so drop it rather than force it
     // to "editing" and push an edit into a session that is gone.
     if (coord.phase !== "snapshotting") return;
-    coord.lastChange = { snap, label: frame.label };
+    const change = { snap, label: frame.label, changeId: frame.changeId };
+    coord.lastChange = change;
+    // Off mode may leave several changes awaiting their note_edit at once; keep each
+    // one's own snapshot by id so a later approval cannot overwrite what an earlier
+    // note_edit still needs. builtin/adapter serialize, so they never populate this.
+    if (config.agent === "off") {
+      offPending.set(frame.changeId, change);
+      while (offPending.size > OFF_PENDING_CAP) offPending.delete(offPending.keys().next().value);
+    }
     coord.editing();
-    toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label });
+    toPanel({ kind: "revertable", available: Boolean(snap), label: frame.label, changeId: frame.changeId });
     toAgents(frame); // an external agent cannot be sent a message; it waits for this
     pushToAgent(
       `The user approved option "${frame.label}" for element ${frame.ref}.\n\n` +
@@ -1102,6 +1152,7 @@ async function clearSession() {
   transcript.length = 0;
   resetContextMeter();
   coord.clear(); // abandon any in-flight approval, held approvals, and its undo point
+  offPending.clear(); // and any off-mode changes still awaiting their note_edit
   // A new session also abandons any in-flight builtin turn and everything queued
   // behind it: unsent prompts in the backlog, internal asks waiting on a turn that
   // will now never end (the held approvals were just cleared above).

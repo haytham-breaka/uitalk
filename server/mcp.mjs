@@ -95,6 +95,12 @@ const choices = [];
 const waitingForChoice = [];
 const answers = [];
 const waitingForAnswer = [];
+// The change ids of approvals returned by await_choice but not yet finished with a
+// note_edit, oldest first. note_edit sends the oldest back so the bridge freezes the
+// snapshot of THAT approval — not whichever one happened to be approved most
+// recently. The client processes approvals in order (await_choice then note_edit per
+// change), so FIFO matches. Threaded by the server, so a client need not carry an id.
+const awaitedChanges = [];
 // Things that happened in the page which this client has to know about but cannot be
 // told: it is a server, nothing can call it. They ride out on the next tool result.
 const NOTICE_CAP = 64; // most recent bridge notices held for the next tool result
@@ -177,6 +183,7 @@ function connect() {
     // reason; the queues need the same treatment or the staleness just moves here.
     choices.length = 0;
     answers.length = 0;
+    awaitedChanges.length = 0; // change ids belong to the session that just ended
   });
   s.on("error", () => {});
 
@@ -240,7 +247,7 @@ defs.push({
   run: async (args) => {
     await ready();
     const queued = choices.shift();
-    if (queued) return text(queued);
+    if (queued) return text(rememberChange(queued));
 
     const waited = await new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -256,10 +263,17 @@ defs.push({
     });
 
     return waited
-      ? text(waited)
+      ? text(rememberChange(waited))
       : text({ chose: null, note: "the user did not pick anything before the timeout" });
   },
 });
+
+// Remember the change id of an approval as it is handed to the client, so the next
+// note_edit can name it. Returns the frame unchanged for convenience.
+function rememberChange(frame) {
+  if (frame && frame.changeId != null) awaitedChanges.push(frame.changeId);
+  return frame;
+}
 
 // The same gap, for ask_choice: a plain multiple-choice question rather than a
 // CSS comparison.
@@ -326,7 +340,10 @@ defs.push({
     // when nothing was captured. A disconnect rejects the pending call (the close
     // handler drains `pending`), so the tool surfaces an error rather than a false ok.
     const id = ++seq;
-    socket.send(JSON.stringify({ kind: "note_edit", id, files: scoped }));
+    // Name which approval this finishes (oldest awaited first), so a second approval
+    // that arrived meanwhile cannot make the bridge freeze the wrong change's snapshot.
+    const changeId = awaitedChanges.shift();
+    socket.send(JSON.stringify({ kind: "note_edit", id, changeId, files: scoped }));
     const status = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (pending.delete(id)) reject(new Error("note_edit timed out waiting for the bridge to record the edit"));
