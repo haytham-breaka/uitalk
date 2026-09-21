@@ -229,12 +229,41 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
   // clear() abandons whatever was in flight and resets the gated state.
   const c = new TurnCoordinator();
   c.snapshotting();
-  c.lastChange = { snap: {}, label: "x" };
+  c.openChange({ label: "x", snap: {} });
   c.pendingApprovals.push({});
   c.noteWrite("a.css");
   c.clear();
-  check("clear() resets phase, lastChange, held approvals and writes",
-    c.isIdle && c.lastChange === null && c.pendingApprovals.length === 0 && c.writes.paths.size === 0 && c.writes.complete);
+  check("clear() resets phase, changes, held approvals and writes",
+    c.isIdle && c.current === null && c.outstanding().length === 0 &&
+      c.pendingApprovals.length === 0 && c.writes.paths.size === 0 && c.writes.complete);
+
+  // The change model: identity, explicit state, one undo point, and resolve()'s
+  // correlation matrix (this is the invariant the whole subsystem rests on).
+  const s = new TurnCoordinator();
+  const A = s.openChange({ label: "A", snap: { a: 1 }, ownerAgentId: 7 });
+  const B = s.openChange({ label: "B", snap: { b: 1 }, ownerAgentId: 7 });
+  check("every change gets a unique stable id", A.id !== B.id && typeof A.id === "number");
+  check("a new change starts editing and is outstanding, not the undo point",
+    A.state === "editing" && s.current === null && s.outstanding().length === 2);
+  check("resolve(id) returns exactly that editing change", s.resolve(A.id).change === A && s.resolve(B.id).change === B);
+  check("resolve() with several editing and no id is ambiguous", s.resolve(null).error === "ambiguous-change");
+  check("resolve() of an unknown id is refused, not coerced", s.resolve(99999).error === "unknown-change");
+
+  s.recordChange(A, ["a.css"]);
+  check("recording a change makes it the undo point and drops it from outstanding",
+    s.current === A && A.state === "recorded" && s.outstanding().length === 1 && s.outstanding()[0] === B);
+  check("resolve() of the recorded undo point is that change (a duplicate is idempotent), not unknown",
+    s.resolve(A.id).change === A);
+  check("with one change still editing, resolve(null) picks it", s.resolve(null).change === B);
+
+  s.recordChange(B, ["b.css"]);
+  check("recording B advances the undo point to B", s.current === B && s.outstanding().length === 0);
+  check("resolve(A) after A is neither editing nor current is now unknown — never coerced onto B",
+    s.resolve(A.id).error === "unknown-change");
+  check("resolve(null) with nothing editing yields the current recorded change", s.resolve(null).change === B);
+
+  s.markReverted();
+  check("reverting clears the undo point", s.current === null && B.state === "reverted");
 
   // Write attribution: scoped only when complete AND non-empty; otherwise full diff.
   const w = new TurnCoordinator();
@@ -2714,22 +2743,21 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     check("a duplicate note_edit for the current recorded change is a harmless no-op",
       (await noteEdit({ changeId: aId, files: ["res-a.css"] })).undoReady === true);
 
-    // With A recorded and B now the current change, a note_edit for the COMPLETED A
-    // must be reported unknown — never silently applied to B.
+    // Record B so the undo point advances past A: A is then neither editing nor the
+    // current undo point, so a late note_edit for the completed A must be refused
+    // unknown — never silently applied to B.
     p.deliver({ kind: "approval", label: "res B", ref: 2, declarations: "c:green", element: {} });
     await until(() => idOf("res B") != null && bridge.approvalPhaseForTest() === "idle", "approval B");
     const bId = idOf("res B");
+    writeFileSync(join(proj, "res-b.css"), ".b{c:blue}\n");
+    check("a single outstanding change may use the whole-diff fallback (no files)",
+      (await noteEdit({ changeId: bId })).undoReady === true); // only B outstanding here
     const stale = await noteEdit({ changeId: aId, files: ["res-a.css"] });
-    check("a stale explicit changeId is refused as unknown, not applied to the current change",
+    check("a completed change's id, once no longer the undo point, is refused as unknown — never applied to another",
       stale.ok === false && stale.undoReady === false && stale.reason === "unknown-change", JSON.stringify(stale));
     const bogus = await noteEdit({ changeId: 987654321, files: ["res-b.css"] });
-    check("an unknown/evicted changeId is refused, not applied to lastChange",
+    check("an unknown/evicted changeId is refused, not applied to another change",
       bogus.reason === "unknown-change", JSON.stringify(bogus));
-
-    // A single outstanding change may still use the whole-diff fallback (no files).
-    const single = await noteEdit({ changeId: bId });
-    check("with one approval outstanding, a no-files whole-diff capture is still allowed",
-      single.undoReady === true, JSON.stringify(single));
 
     // Now make two outstanding at once and probe the ambiguity guards.
     p.deliver({ kind: "approval", label: "res C", ref: 3, declarations: "c:teal", element: {} });
@@ -2753,6 +2781,43 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     await bridge.clearSession();
     execFileSync("git", ["checkout", "--", "."], { cwd: proj });
     p.close();
+  }
+
+  {
+    // Ownership: one approved change has exactly one owner. An approval is delivered
+    // to the ACTIVE agent only (not broadcast to every attached agent), and a second
+    // agent can neither see it nor record it — no two independent writers per change.
+    const proj = process.env.UITALK_PROJECT;
+    bridge.setAgentForTest("off");
+    writeFileSync(join(proj, "own.css"), ".o{c:red}\n");
+    execFileSync("git", ["add", "."], { cwd: proj });
+    execFileSync("git", ["commit", "-qm", "own baseline"], { cwd: proj });
+    const makeAgent = () => { const s = makePage(); s.deliver({ kind: "hello", role: "agent" }); return s; };
+    const a1 = makeAgent();
+    const a2 = makeAgent(); // the most recent agent becomes the active owner
+    const pg = makePage();
+    pg.deliver({ kind: "approval", label: "owned change", ref: 1, declarations: "c:blue", element: {} });
+    await until(() => a2.sent.some((f) => f.kind === "approval" && f.label === "owned change"), "the active agent to receive it");
+    check("an approval reaches exactly the active agent, not every attached agent",
+      a2.sent.some((f) => f.kind === "approval") && !a1.sent.some((f) => f.kind === "approval"));
+    const cid = a2.sent.find((f) => f.kind === "approval").changeId;
+
+    const ackFrom = async (agent, frame) => {
+      agent.sent.length = 0;
+      agent.deliver({ ...frame, id: 7000 });
+      await until(() => agent.sent.some((f) => f.kind === "call_result" && f.id === 7000), "the note_edit ack");
+      return agent.sent.find((f) => f.kind === "call_result" && f.id === 7000).result;
+    };
+    writeFileSync(join(proj, "own.css"), ".o{c:blue}\n");
+    check("a non-owner agent cannot record another agent's change",
+      (await ackFrom(a1, { kind: "note_edit", changeId: cid, files: ["own.css"] })).reason === "not-owner");
+    check("the owning agent records its own change",
+      (await ackFrom(a2, { kind: "note_edit", changeId: cid, files: ["own.css"] })).undoReady === true);
+
+    bridge.setAgentForTest("builtin");
+    await bridge.clearSession();
+    execFileSync("git", ["checkout", "--", "."], { cwd: proj });
+    a1.close(); a2.close(); pg.close();
   }
 
   {
