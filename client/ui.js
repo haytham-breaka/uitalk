@@ -1196,8 +1196,14 @@
         case "status": return;
         case "turn_end":
           streaming = null;
-          void captureAfter();
           if (f.text) say("note", `turn ended: ${f.text}`);
+          return;
+        // A change's edit is committed (a builtin/adapter/opencode turn ended, or an
+        // MCP client called note_edit) — verify THAT change now, by its approvalId.
+        // Verification is driven by the change lifecycle, not the model turn, so it
+        // runs in agent:off mode too, where there is no turn_end.
+        case "change_recorded":
+          void captureAfter(f.approvalId);
           return;
         case "approval_rejected": return say("warn", f.text);
 
@@ -1633,7 +1639,14 @@
   // An approval changes source and the app re-renders. Without a picture of what it
   // looked like first there is nothing to compare against, and "did that work?"
   // becomes a matter of memory.
-  let pending = null;
+  // One verification job per approved change, keyed by the approvalId the page assigns
+  // and the bridge records the change under. A single global slot let a second approval
+  // overwrite the first's before-state; keying by identity keeps several in flight
+  // (off mode) distinct. Bounded so an unfinished job cannot grow it without limit.
+  const pendingByApproval = new Map();
+  const PENDING_CAP = 64;
+  let approvalSeq = 0;
+  const nextApprovalId = () => `ui-${Date.now()}-${++approvalSeq}`;
 
   const declaredProperties = (css = "") =>
     css
@@ -1641,21 +1654,34 @@
       .map((d) => d.split(":")[0].trim())
       .filter((p) => /^[-a-z]+$/.test(p));
 
-  async function captureBefore(choice, verify = {}) {
+  // How long to wait for the "before" screenshot before dispatching the approval
+  // anyway. The capture can block on a screen-share permission prompt or fail
+  // outright; it must never wedge the approval, so a slow/failed capture just means
+  // the change is verified without an image (computed-style drift still runs).
+  const BEFORE_CAPTURE_TIMEOUT = 4000;
+
+  // Record the pre-edit state of a change BEFORE its approval is dispatched, so the
+  // "before" genuinely precedes the edit — never an after-the-fact frame relabelled
+  // "before". Always resolves (bounded), always leaves a job keyed by approvalId, so
+  // the caller can dispatch the approval as soon as this returns.
+  async function captureBefore(choice, approvalId, verify = {}) {
+    const base = { approvalId, label: choice.label, ref: choice.ref, selector: choice.element?.selector, ...verify };
+    if (pendingByApproval.size >= PENDING_CAP) pendingByApproval.delete(pendingByApproval.keys().next().value);
+    pendingByApproval.set(approvalId, base); // a job exists immediately; a shot is added if we get one in time
     if (!native?.supported() || native.declined || config.nativeCapture === false) return;
     try {
       const rect = api().rectOf({ ref: choice.ref, selector: choice.element?.selector });
       if (!rect) return;
       const region = { left: rect.left, top: rect.top,
                        right: rect.left + rect.width, bottom: rect.top + rect.height };
-      if (!(await native.ready())) return;
-      const shot = await grabNative(region, { frames: 1 }, Date.now());
-      pending = { label: choice.label, region, ref: choice.ref,
-                  selector: choice.element?.selector, before: shot.png, ...verify };
+      const shot = await Promise.race([
+        (async () => ((await native.ready()) ? await grabNative(region, { frames: 1 }, Date.now()) : null))(),
+        new Promise((r) => setTimeout(() => r(null), BEFORE_CAPTURE_TIMEOUT)),
+      ]);
+      if (shot) pendingByApproval.set(approvalId, { ...base, region, before: shot.png });
     } catch {
-      // A missing before-shot must not block the approval, but the verification does
-      // not need pixels — keep it.
-      pending = { label: choice.label, ref: choice.ref, selector: choice.element?.selector, ...verify };
+      // A missing before-shot must not block the approval; the job (without pixels)
+      // is already stored, and computed-style verification does not need an image.
     }
   }
 
@@ -1695,10 +1721,19 @@
     return true; // this document is going away
   }
 
-  async function captureAfter() {
-    if (!pending) return;
-    const job = pending;
-    pending = null;
+  async function captureAfter(approvalId) {
+    // Verify the exact change that was just recorded, looked up by its approvalId, so
+    // a second change in flight can never be confused for this one. When no id is
+    // given (a legacy/turn-only path), fall back to the single outstanding job.
+    let job;
+    if (approvalId != null && pendingByApproval.has(approvalId)) {
+      job = pendingByApproval.get(approvalId);
+      pendingByApproval.delete(approvalId);
+    } else if (approvalId == null && pendingByApproval.size === 1) {
+      job = [...pendingByApproval.values()][0];
+      pendingByApproval.clear();
+    }
+    if (!job) return;
     // When a standalone reload is triggered, this document is about to be replaced and
     // the verification job has been handed to sessionStorage for the next load. The
     // finally still runs on the way out, so it must NOT verify here: the old document
@@ -2548,10 +2583,15 @@
       const previewed = api().computedOf({ ref: choice.ref, selector: choice.element?.selector, properties: props });
 
       // Photograph the element as it stands, so the committed result can be judged
-      // against it rather than described.
-      void captureBefore(choice, { props, previewed });
+      // against it rather than described. Await it (bounded) so the "before" is
+      // recorded BEFORE the edit is allowed to start — a fast agent must not modify
+      // source before the before-image exists. The approval carries the page's own id
+      // so the bridge records the change under it and the later completion signal
+      // (change_recorded) verifies exactly this one.
+      const approvalId = nextApprovalId();
+      await captureBefore(choice, approvalId, { props, previewed });
       sayMine(`approved: ${choice.label}`, { shots: [], refs: choice.ref ? [choice.ref] : [] });
-      send({ kind: "approval", ...choice });
+      send({ kind: "approval", approvalId, ...choice });
       api().dismissOptions();
     }
 
