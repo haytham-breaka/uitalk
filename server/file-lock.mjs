@@ -19,6 +19,7 @@
 import { mkdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
+import { startToken } from "./proc-identity.mjs";
 
 const alive = (pid) => {
   try {
@@ -29,16 +30,49 @@ const alive = (pid) => {
   }
 };
 
+// Is the lock genuinely held by a live process right now? The record carries the
+// holder's pid AND its start token, so a pid the OS recycled after the holder
+// crashed is NOT mistaken for the holder still running: the reused process has a
+// different start token, so the lock reads as stale and can be reclaimed. Without
+// the token, a reused pid would look alive forever and wedge the lock. A record we
+// cannot parse is treated as stale; a record with no token (an older-format lock, or
+// a platform that cannot fingerprint) falls back to plain pid existence.
+function heldByLive(lockPath) {
+  let raw;
+  try {
+    raw = readFileSync(lockPath, "utf8").trim();
+  } catch {
+    return false; // vanished under us — not held
+  }
+  let rec = null;
+  if (/^\d+$/.test(raw)) rec = { pid: Number(raw), token: null }; // older bare-pid lock
+  else {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && Number.isInteger(parsed.pid)) rec = parsed;
+    } catch {}
+  }
+  if (!rec || !alive(rec.pid)) return false; // malformed or dead holder -> reclaimable
+  if (rec.token == null) return true; // holder recorded no token -> fall back to pid existence
+  const now = startToken(rec.pid);
+  // Reclaim ONLY on affirmative evidence the pid was reused (a token we can read that
+  // differs). If we cannot read a token right now — a transient `ps` failure under load
+  // — treat the holder as still live, never steal a lock we merely failed to verify.
+  if (now == null) return true;
+  return now === rec.token; // reused pid (token differs) -> not held
+}
+
 // One attempt to take the lock. Returns true if we now hold it, false if a live
 // holder has it (a stale one is cleared here so the next attempt can succeed).
 function tryAcquire(lockPath) {
   const tmp = `${lockPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   try {
     const fd = openSync(tmp, "wx");
-    writeSync(fd, String(process.pid)); // the temp file is fully populated BEFORE it is linked
+    // The temp file is fully populated with the holder's identity BEFORE it is linked.
+    writeSync(fd, JSON.stringify({ pid: process.pid, token: startToken(process.pid) }));
     closeSync(fd);
     try {
-      linkSync(tmp, lockPath); // atomic: lockPath appears already holding a real pid, or not at all
+      linkSync(tmp, lockPath); // atomic: lockPath appears already holding a real record, or not at all
       return true;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
@@ -49,17 +83,13 @@ function tryAcquire(lockPath) {
     } catch {}
   }
 
-  // The lock exists. Read who holds it; a live holder means genuinely busy.
-  let holder = NaN;
-  try {
-    holder = Number(readFileSync(lockPath, "utf8").trim());
-  } catch {}
-  if (holder && alive(holder)) return false;
+  if (heldByLive(lockPath)) return false; // a live holder owns it — genuinely busy
 
-  // The holder is gone (it crashed mid-section). Move the stale lock aside — because
-  // link() cannot overwrite, the file still sitting there proves no live process has
-  // taken it, so this only ever displaces the dead holder. rename is atomic, so two
-  // reclaimers cannot both win; the loser's rename throws and it simply retries.
+  // The holder is gone: it crashed, or its pid was recycled into an unrelated process.
+  // Move the stale lock aside — because link() cannot overwrite, the file still sitting
+  // there proves no live holder has re-taken THIS lock, so this only ever displaces a
+  // stale record. rename is atomic, so two reclaimers cannot both win; the loser's
+  // rename throws and it simply retries the link.
   try {
     const aside = `${lockPath}.stale.${process.pid}.${randomBytes(4).toString("hex")}`;
     renameSync(lockPath, aside);
