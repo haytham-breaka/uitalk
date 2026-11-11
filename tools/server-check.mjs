@@ -1833,6 +1833,30 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     !/"kind": "served-html-search"/.test(viaSource.content[0].text), viaSource.content[0].text);
   sourceCandidates = [];
 
+  // A deployed build carries no metadata and renders personalised text, so the class
+  // name is what is left to find it by — and in JSX it is spelled className.
+  {
+    const { findSourceCandidates } = await import("../server/candidates.mjs");
+    const jsxProj = mkdtempSync(join(sandbox, "jsx-proj-"));
+    mkdirSync(join(jsxProj, "src"));
+    writeFileSync(join(jsxProj, "src", "Dashboard.jsx"),
+      `export const Dashboard = ({ name }) => (\n  <h1 className="hero-title">Welcome back, {name}</h1>\n);\n`);
+    sourceCandidates = (needles) => findSourceCandidates(jsxProj, needles);
+    answer = { confidence: "none", source: null, evidence: [],
+               element: { tag: "h1", classes: ["hero-title"], text: "Welcome back, Sam" }, page: { path: "/" } };
+    const jsx = await run("locate_source", { ref: 1 });
+    check("a JSX className is found by locate_source's project search",
+      /"kind": "project-source-search"/.test(jsx.content[0].text) && /src\/Dashboard\.jsx/.test(jsx.content[0].text),
+      jsx.content[0].text.slice(0, 160));
+    writeFileSync(join(jsxProj, "src", "Dashboard.jsx"),
+      `export const Dashboard = ({ name }) => <h1 className={styles.x + " hero-title"}>Hi {name}</h1>;\n`);
+    const bare = await run("locate_source", { ref: 1 });
+    check("and a class name used outside a plain attribute is still a last-resort lead",
+      /src\/Dashboard\.jsx/.test(bare.content[0].text), bare.content[0].text.slice(0, 160));
+    sourceCandidates = [];
+  }
+
+  answer = { confidence: "none", source: null, evidence: [], element: { testId: "checkout" }, page: { path: "/about" } };
   const fallback = await run("locate_source", { ref: 1 });
   check("with no source match either, it falls back to the served html",
     /"confidence": "candidate"/.test(fallback.content[0].text), fallback.content[0].text.slice(0, 80));
@@ -3539,6 +3563,151 @@ mkdirSync(process.env.UITALK_PROJECT, { recursive: true });
     check("a malformed lock record is safely reclaimed", okJunk);
   }
 
+  try { kid.kill("SIGKILL"); } catch {}
+}
+
+// ------------------------------- deployed sites: the pairing page and the extension
+//
+// A deployed site reaches the bridge through the browser extension, which learns the
+// bridge from a pairing page. That page must only offer a site the user added from
+// their terminal, and the extension's own origin must pass the socket's Origin check
+// while still needing the token.
+{
+  const { normalizeSite, addSite, sitesFor } = await import("../server/sites.mjs");
+  check("an https site is reduced to its origin",
+    normalizeSite("https://staging.example.com/pricing?x=1#y").origin === "https://staging.example.com");
+  check("plain http to a public host is refused",
+    normalizeSite("http://staging.example.com").ok === false, normalizeSite("http://staging.example.com").error);
+  check("plain http to a local or private host is accepted",
+    ["http://localhost:3000", "http://127.0.0.1:8080", "http://192.168.1.20", "http://app.localhost"]
+      .every((u) => normalizeSite(u).ok), "");
+  check("a non-web scheme is refused", normalizeSite("file:///etc/passwd").ok === false);
+  check("garbage is refused, not thrown", normalizeSite("not a url").ok === false);
+
+  const proj = mkdtempSync(join(sandbox, "sites-proj-"));
+  addSite(proj, "https://staging.example.com/a");
+  addSite(proj, "https://staging.example.com/b");
+  addSite(proj, "https://example.com");
+  check("adding a site is idempotent by origin",
+    JSON.stringify(sitesFor(proj)) === JSON.stringify(["https://staging.example.com", "https://example.com"]),
+    JSON.stringify(sitesFor(proj)));
+  check("another project does not see them", sitesFor(mkdtempSync(join(sandbox, "sites-other-"))).length === 0);
+
+  const bridge = await import("../server/index.mjs");
+  const { WebSocket } = await import("ws");
+  await new Promise((resolve) => bridge.http.listen(0, "127.0.0.1", resolve));
+  const port = bridge.http.address().port;
+  const TOKEN = bridge.socketToken;
+  const health = await (await fetch(`http://127.0.0.1:${port}/__uitalk/health`)).json();
+
+  const pair = (site) => fetch(`http://127.0.0.1:${port}/__uitalk/pair?site=${encodeURIComponent(site)}`);
+  const unknown = await pair("https://evil.example");
+  const unknownBody = await unknown.text();
+  check("the pairing page refuses a site the user never added", unknown.status === 403, String(unknown.status));
+  check("and does not carry the token", !unknownBody.includes(TOKEN));
+
+  addSite(health.project, "https://staging.example.com");
+  const ok = await pair("https://staging.example.com/some/page");
+  const body = await ok.text();
+  const offer = JSON.parse(/<script type="application\/json" id="uitalk-pairing">(.*?)<\/script>/s.exec(body)?.[1] ?? "null");
+  check("a site added for this project gets a pairing offer",
+    ok.status === 200 && offer?.site === "https://staging.example.com" && offer.port === port &&
+      offer.token === TOKEN && offer.project === health.project,
+    JSON.stringify({ status: ok.status, offer: offer && { ...offer, token: "…" } }));
+  check("the pairing page is never cached", ok.headers.get("cache-control") === "no-store");
+
+  const tryConnect = ({ origin, token = TOKEN } = {}) => new Promise((resolve) => {
+    const sock = new WebSocket(`ws://127.0.0.1:${port}/__uitalk/socket${token === null ? "" : `?token=${token}`}`,
+      { headers: { Origin: origin } });
+    sock.on("open", () => { resolve({ ok: true }); sock.close(); });
+    sock.on("unexpected-response", (req, res) => resolve({ ok: false, status: res.statusCode }));
+    sock.on("error", () => resolve({ ok: false, status: null }));
+  });
+  const EXT = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+  const ext = await tryConnect({ origin: EXT });
+  check("the extension's service worker, with the token, may open the socket", ext.ok === true, JSON.stringify(ext));
+  const extNoToken = await tryConnect({ origin: EXT, token: null });
+  check("but not without the token", extNoToken.ok === false && extNoToken.status === 403, JSON.stringify(extNoToken));
+  const fakeExt = await tryConnect({ origin: "chrome-extension://not-an-extension-id" });
+  check("a malformed extension origin is refused", fakeExt.ok === false, JSON.stringify(fakeExt));
+  const site = await tryConnect({ origin: "https://staging.example.com" });
+  check("the paired site's own origin still cannot open the socket directly", site.ok === false, JSON.stringify(site));
+
+  const bm = await (await fetch(`http://127.0.0.1:${port}/__uitalk/bookmarklet`)).text();
+  check("the bookmarklet names this bridge, since its page is on the app's origin",
+    bm.includes(`__UITALK_BRIDGE__=${JSON.stringify(`127.0.0.1:${port}`)}`), bm.slice(0, 160));
+  await new Promise((resolve) => bridge.http.close(resolve));
+
+  const header = bridge.buildUserContent({
+    text: "why is this so tall?", selectionCount: 1,
+    page: { deployed: true, url: "https://staging.example.com/pricing", path: "/pricing", viewport: { w: 1280, h: 800, dpr: 2 } },
+  });
+  check("a message from a deployed page names it by its full URL, as deployed",
+    header.startsWith("[deployed page https://staging.example.com/pricing |"), header.split("\n")[0]);
+  const localHeader = bridge.buildUserContent({ text: "x", page: { path: "/pricing", viewport: { w: 1, h: 1, dpr: 1 } } });
+  check("a local page is still named by its path", localHeader.startsWith("[page /pricing |"), localHeader.split("\n")[0]);
+}
+
+// ------------------- the extension folder is installed once and kept current
+{
+  const { installExtension, refreshExtensions, installedBuild } = await import("../server/extension.mjs");
+  const { bundleClient } = await import("../server/client-bundle.mjs");
+  const bridge = await import("../server/index.mjs");
+  const dir = join(sandbox, "ext-install");
+  const r = installExtension(dir);
+  const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  check("installing writes a loadable extension carrying the package version",
+    r.ok && manifest.name === "uitalk" && manifest.version === pkg.version &&
+      ["background.js", "content.js", "pair.js", "grant.html", "client.js"].every((f) => existsSync(join(dir, f))),
+    JSON.stringify(r));
+  check("its client has the same build stamp the bridge serves, so pages do not read as stale",
+    installedBuild(dir) === bridge.readClient().build && r.build === bundleClient().build,
+    `${installedBuild(dir)} vs ${bridge.readClient().build}`);
+  check("and carries no token", !readFileSync(join(dir, "client.js"), "utf8").includes(bridge.socketToken));
+
+  // A stale copy is rewritten; a current one is left alone.
+  writeFileSync(join(dir, "client.js"), 'globalThis.__UITALK_BUILD__ = "00000000";\n');
+  const refreshed = refreshExtensions(bundleClient().build);
+  check("a remembered copy with an old client is rewritten",
+    refreshed.length === 1 && refreshed[0].dir === dir && installedBuild(dir) === bundleClient().build,
+    JSON.stringify(refreshed));
+  check("a current copy is left alone", refreshExtensions(bundleClient().build).length === 0);
+
+  const foreign = join(sandbox, "not-an-extension");
+  mkdirSync(foreign, { recursive: true });
+  writeFileSync(join(foreign, "notes.txt"), "mine");
+  const refused = installExtension(foreign);
+  check("it refuses to write into a folder that is neither empty nor a uitalk extension",
+    refused.ok === false && !existsSync(join(foreign, "manifest.json")), refused.error);
+}
+
+// ---------------- a bridge with no local app serves the sites page, not a proxy
+{
+  const home = mkdtempSync(join(sandbox, "noapp-home-"));
+  const proj = mkdtempSync(join(sandbox, "noapp-proj-"));
+  const fixed = 39000 + Math.floor(Math.random() * 900);
+  const childEnv = { ...process.env, UITALK_HOME: home, UITALK_PROJECT: proj, UITALK_APP_PORT: "0",
+    UITALK_AGENT: "off", UITALK_PORT: String(fixed) };
+  delete childEnv.UITALK_IMPORT_ONLY;
+  const { addSite } = await import("../server/sites.mjs");
+  const prevHome = process.env.UITALK_HOME;
+  process.env.UITALK_HOME = home;
+  addSite(realpathSync(proj), "https://staging.example.com");
+  process.env.UITALK_HOME = prevHome;
+  const kid = spawn(process.execPath, [new URL("../server/index.mjs", import.meta.url).pathname],
+    { env: childEnv, stdio: "ignore" });
+  let health = null;
+  for (let i = 0; i < 40 && !health; i++) {
+    await new Promise((r) => setTimeout(r, 150));
+    try { health = await (await fetch(`http://127.0.0.1:${fixed}/__uitalk/health`)).json(); } catch {}
+  }
+  check("a bridge with no local app starts and says it has none", health?.app === null, JSON.stringify(health));
+  const rootPage = health ? await (await fetch(`http://127.0.0.1:${fixed}/`)).text() : "";
+  check("its root lists the project's sites with pairing links",
+    rootPage.includes("/__uitalk/pair?site=https%3A%2F%2Fstaging.example.com"), rootPage.slice(0, 200));
+  const other = health ? await fetch(`http://127.0.0.1:${fixed}/anything`) : null;
+  check("and proxies nothing", other?.status === 404, String(other?.status));
   try { kid.kill("SIGKILL"); } catch {}
 }
 

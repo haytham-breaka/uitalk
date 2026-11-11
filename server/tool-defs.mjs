@@ -221,7 +221,13 @@ export function toolDefinitions(
               id.href,
               id.src,
               id.classes?.[0] && `class="${id.classes[0]}`,
+              // JSX spells the attribute className, which `class="` never matches.
+              id.classes?.[0] && `className="${id.classes[0]}`,
               id.text,
+              // Last resort, and the usual one on a deployed build: rendered text is
+              // often personalised ("Welcome back, Sam") and so absent from source,
+              // while a class name survives the build. Too short a name matches noise.
+              ...(id.classes ?? []).filter((c) => c.length >= 5).slice(0, 3),
             ].filter(Boolean);
 
             // The project's own source points at a file worth opening; served HTML

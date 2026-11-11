@@ -1927,5 +1927,130 @@ check("Escape with a selection clears it rather than the tool", UITalk.picked.le
     virgin.window.document.getElementById("uitalk-host").shadowRoot.querySelector(".panel").className);
 }
 
+// --- in the browser extension, on a deployed site
+//
+// The extension supplies the connection (its service worker holds the socket and the
+// token), there is no proxy to frame the app in split screen, and a committed edit
+// cannot appear on a deployed page — so it must not be "verified" against it.
+{
+  // jsdom does not implement location.reload; a call surfaces as a "navigation"
+  // jsdomError, which is how a reload attempt is counted here.
+  let reloaded = 0;
+  const siteConsole = new VirtualConsole();
+  siteConsole.on("jsdomError", (e) => {
+    if (/navigation/i.test(e.message)) reloaded++;
+    else console.log("!! page error:", e.message);
+  });
+  const site = new JSDOM(HTML, { url: "https://staging.example.com/pricing?plan=pro", pretendToBeVisual: true,
+    runScripts: "outside-only", virtualConsole: siteConsole });
+  const w = site.window;
+  w.CSSStyleSheet = FakeSheet;
+  w.document.adoptedStyleSheets = [];
+  w.CSS = { escape: (v) => String(v) };
+  w.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  w.Element.prototype.getBoundingClientRect = window.Element.prototype.getBoundingClientRect;
+  w.Element.prototype.scrollIntoView = function () {};
+  let nativeSockets = 0;
+  w.WebSocket = class { constructor() { nativeSockets++; } send() {} close() {} };
+  const extSent = [];
+  const extSockets = [];
+  w.__UITALK_EXTENSION__ = true;
+  w.__UITALK_CONNECT__ = (url) => {
+    const s = { url, readyState: 1, send: (d) => extSent.push(JSON.parse(d)), close() {} };
+    extSockets.push(s);
+    setTimeout(() => s.onopen?.({}), 0);
+    return s;
+  };
+
+  // The panel's root is closed in the extension; keep a handle for the test the way
+  // only code in the panel's own world could.
+  let r = null;
+  const attach = w.Element.prototype.attachShadow;
+  w.Element.prototype.attachShadow = function (init) {
+    const made = attach.call(this, init);
+    if (this.id === "uitalk-host") r = made;
+    return made;
+  };
+  for (const f of ["api.js", "raster.js", "native.js", "shell.js", "ui.js"]) loadClient(w, f);
+  await new Promise((res) => setTimeout(res, 20));
+
+  check("the panel's shadow root is closed, so the site's scripts cannot reach its chat or approve buttons",
+    w.document.getElementById("uitalk-host").shadowRoot === null && r !== null);
+
+  // A site script faking a click while the select tool is on must not pick anything.
+  w.document.elementFromPoint = () => w.document.querySelector(".notify-button");
+  r.querySelector('[data-act="pick"]').dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
+  await tick();
+  const fake = (type) => w.document.querySelector(".notify-button").dispatchEvent(
+    new w.MouseEvent(type, { clientX: 600, clientY: 600, button: 0, bubbles: true, cancelable: true }));
+  for (const t of ["pointerdown", "pointerup", "click"]) fake(t);
+  await tick();
+  check("a click a site script fakes on the page selects nothing", w.UITalk.picked.length === 0,
+    `${w.UITalk.picked.length} picked`);
+  r.querySelector('[data-act="pick"]').dispatchEvent(new w.MouseEvent("click", { bubbles: true })); // tool off
+
+  check("in the extension the panel connects through the extension, not a page WebSocket",
+    extSockets.length === 1 && nativeSockets === 0, `${extSockets.length} extension, ${nativeSockets} native`);
+  check("and announces itself over that connection", extSent.some((f) => f.kind === "hello"),
+    JSON.stringify(extSent.map((f) => f.kind)));
+  check("split screen is not offered on a deployed site", r.querySelector(".meter .split").hidden === true);
+
+  const ctx = w.UITalk.pageContext();
+  check("a non-local page in the extension is marked deployed, with its full URL",
+    ctx.deployed === true && ctx.url === "https://staging.example.com/pricing?plan=pro", JSON.stringify(ctx));
+
+  // Approve a preview, then have the bridge record the change.
+  const btn = w.document.querySelector(".notify-button");
+  w.UITalk.pick(btn);
+  w.UITalk.showOptions({ ref: 1, options: [
+    { label: "Pill", declarations: "border-radius: 999px" },
+    { label: "Square", declarations: "border-radius: 0" },
+  ]});
+  await tick();
+  r.querySelector('[data-act="approve"]').dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
+  await tick(); await tick();
+  const appr = [...extSent].reverse().find((f) => f.kind === "approval");
+  check("the approval tells the bridge the page is deployed", appr?.page?.deployed === true, JSON.stringify(appr?.page));
+  extSockets[0].onmessage({ data: JSON.stringify({ kind: "change_recorded", approvalId: appr?.approvalId }) });
+  // Longer than the 900ms a local change is given to arrive before the page reloads.
+  await new Promise((res) => setTimeout(res, 1300));
+  const log = [...r.querySelectorAll(".log .msg")].map((m) => m.textContent).join("\n");
+  check("a committed change on a deployed page says it will show after the next deploy",
+    /committed to your local checkout — this site will show it after the next deploy/.test(log), log.slice(-200));
+  check("and does not reload the deployed page or call the edit a failure",
+    reloaded === 0 && !/did not survive/.test(log) && !extSent.some((f) => f.kind === "chat" && /did not take effect/.test(f.text)),
+    `reloads ${reloaded}`);
+
+  // The same extension on a local dev server is not "deployed": edits do show there.
+  const local = new JSDOM(HTML, { url: "http://localhost:5173/", runScripts: "outside-only", virtualConsole: vc });
+  local.window.__UITALK_EXTENSION__ = true;
+  local.window.CSSStyleSheet = FakeSheet;
+  local.window.document.adoptedStyleSheets = [];
+  loadClient(local.window, "api.js");
+  check("a localhost page in the extension is not marked deployed",
+    local.window.UITalk.pageContext().deployed === undefined, JSON.stringify(local.window.UITalk.pageContext()));
+}
+
+// --- the bookmarklet names the bridge, since its page is on the app's own origin
+{
+  const bm = new JSDOM(HTML, { url: "http://localhost:5173/", pretendToBeVisual: true,
+    runScripts: "outside-only", virtualConsole: vc });
+  bm.window.CSSStyleSheet = FakeSheet;
+  bm.window.document.adoptedStyleSheets = [];
+  bm.window.CSS = { escape: (v) => String(v) };
+  bm.window.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+  const urls = [];
+  bm.window.WebSocket = class { constructor(u) { urls.push(u); this.readyState = 0; } send() {} close() {} };
+  bm.window.__UITALK_TOKEN__ = "t0ken";
+  bm.window.__UITALK_BRIDGE__ = "127.0.0.1:8401";
+  for (const f of ["api.js", "raster.js", "native.js", "shell.js", "ui.js"]) loadClient(bm.window, f);
+  await new Promise((r) => setTimeout(r, 20));
+  check("a bookmarklet page connects to the bridge it names, not to the app's own origin",
+    urls[0] === "ws://127.0.0.1:8401/__uitalk/socket?token=t0ken", urls[0]);
+  const split = bm.window.document.getElementById("uitalk-host").shadowRoot.querySelector(".meter .split");
+  check("and its split-screen link goes to the bridge too",
+    split.getAttribute("href").startsWith("http://127.0.0.1:8401/__uitalk/shell#/"), split.getAttribute("href"));
+}
+
 console.log(fail.length ? `\n${fail.length} failing: ${fail.join(", ")}` : "\nall checks passed");
 process.exit(fail.length ? 1 : 0);

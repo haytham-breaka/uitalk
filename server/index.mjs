@@ -15,8 +15,7 @@
 // proxy, the tools, selection, capture, undo — is the same in all three.
 
 import { createServer } from "node:http";
-import { readFileSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { WebSocketServer } from "ws";
@@ -32,6 +31,9 @@ import { ensureUitalkMcp } from "./opencode-config.mjs";
 import { TurnCoordinator } from "./turn-coordinator.mjs";
 import { isFrame } from "./protocol.mjs";
 import { projectToken } from "./token.mjs";
+import { bundleClient, clientKey } from "./client-bundle.mjs";
+import { isSiteFor, sitesFor } from "./sites.mjs";
+import { refreshExtensions } from "./extension.mjs";
 import { timingSafeEqual } from "node:crypto";
 
 // The single owner of the approval/undo lifecycle: the turn phase, the set of
@@ -49,6 +51,10 @@ const PROJECT = process.env.UITALK_PROJECT ?? process.cwd();
 const RPC_TIMEOUT = Number(process.env.UITALK_RPC_TIMEOUT ?? 5000);
 const APP_HOST = process.env.UITALK_APP_HOST ?? "127.0.0.1";
 const APP_PORT = Number(process.env.UITALK_APP_PORT ?? 5173);
+// Port 0 means there is no local app to proxy: the bridge was started for a deployed
+// site (`uitalk --url`), which the browser extension reaches instead. The root then
+// serves the pairing page rather than a "no app here" diagnosis.
+const HAS_APP = APP_PORT > 0;
 const SOCKET_PATH = "/__uitalk/socket";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -74,10 +80,9 @@ let config = settings.load(PROJECT);
 // plugin — or editing the client — would appear to do nothing until someone thought
 // to restart the bridge. The build stamp travels with it so a page that loaded an
 // older one says so instead of looking like a live bug.
-const CLIENT_FILES = ["api.js", "raster.js", "native.js", "shell.js", "ui.js"]
-  .map((f) => join(here, "..", "client", f));
 const SERVER_FILES = ["index.mjs", "page-tools.mjs", "tool-defs.mjs", "proxy.mjs",
-                      "settings.mjs", "registry.mjs", "snapshots.mjs", "protocol.mjs", "token.mjs"]
+                      "settings.mjs", "registry.mjs", "snapshots.mjs", "protocol.mjs", "token.mjs",
+                      "sites.mjs", "client-bundle.mjs", "extension.mjs"]
   .map((f) => join(here, f));
 
 const stamp = (files) =>
@@ -86,14 +91,14 @@ const stamp = (files) =>
 let clientCache = { key: "", body: "", build: "" };
 
 function readClient() {
-  const key = stamp(CLIENT_FILES);
+  const key = clientKey();
   if (key === clientCache.key) return clientCache;
-  const source = CLIENT_FILES.map((f) => readFileSync(f, "utf8")).join("\n;\n");
-  const build = createHash("sha1").update(source).digest("hex").slice(0, 8);
+  const { source, build } = bundleClient();
   if (clientCache.build && clientCache.build !== build) {
     log(`client rebuilt: ${clientCache.build} -> ${build} (reload any open page)`);
     toPanel({ kind: "client_updated", build });
   }
+  if (clientCache.build !== build) refreshInstalledExtensions(build);
   // The token is read from the loading <script> tag's data attribute (or a global
   // a bookmarklet set) at load time, when document.currentScript is still valid —
   // it is never baked into this bundle, which is served to anyone and can be
@@ -104,6 +109,15 @@ function readClient() {
     `document.currentScript.dataset.uitalkToken) || globalThis.__UITALK_TOKEN__ || null;\n`;
   clientCache = { key, body: `${prelude}${source}`, build };
   return clientCache;
+}
+
+// An installed extension carries its own copy of the client (see extension.mjs), so
+// it is rewritten whenever the client this bridge serves changes.
+function refreshInstalledExtensions(build) {
+  for (const r of refreshExtensions(build)) {
+    log(r.error ? `could not refresh the extension in ${r.dir}: ${r.error}`
+                : `refreshed the extension in ${r.dir} to build ${r.build}`);
+  }
 }
 
 // The bridge's own code cannot be swapped under a running process, so changes to it
@@ -177,7 +191,7 @@ const http = createServer((req, res) => {
     res.end(
       JSON.stringify({
         ok: true, pid: process.pid, port, clients: clients.size,
-        project: PROJECT, app: `${APP_HOST}:${APP_PORT}`, build: readClient().build,
+        project: PROJECT, app: HAS_APP ? `${APP_HOST}:${APP_PORT}` : null, build: readClient().build,
       }),
     );
     return;
@@ -202,21 +216,111 @@ const http = createServer((req, res) => {
     return;
   }
 
+  const path = req.url.split("?")[0];
+  if (path === "/__uitalk/pair") {
+    const site = new URL(req.url, "http://127.0.0.1").searchParams.get("site") ?? "";
+    servePairPage(res, site);
+    return;
+  }
+  if (!HAS_APP && (path === "/" || path === "/index.html")) {
+    serveSitesPage(res);
+    return;
+  }
+
   if (req.url === "/__uitalk/bookmarklet") {
     res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
     res.end(
       `javascript:(function(){window.__UITALK_TOKEN__=${JSON.stringify(TOKEN)};` +
+        `window.__UITALK_BRIDGE__=${JSON.stringify(`127.0.0.1:${boundPort()}`)};` +
         `var s=document.createElement('script');` +
-        `s.src='http://127.0.0.1:${port}/__uitalk/client.js';document.documentElement.appendChild(s);})()`,
+        `s.src='http://127.0.0.1:${boundPort()}/__uitalk/client.js';document.documentElement.appendChild(s);})()`,
     );
+    return;
+  }
+  if (!HAS_APP) {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("this bridge has no local app to proxy; it serves deployed sites through the uitalk extension");
     return;
   }
   appProxy(req, res);
 });
 
+// ------------------------------------------------------------ extension pairing
+//
+// The extension learns which bridge a deployed site belongs to from this page. Its
+// content script reads the JSON block and asks the user to confirm in the
+// extension's own UI; the page itself does nothing. The token is in it, as it is in
+// every page this bridge serves: those are only readable by a same-origin loopback
+// page, never by the site being paired.
+//
+// Only a site recorded by `uitalk --url` from the user's terminal is offered (see
+// sites.mjs) — otherwise any web page could open this URL and ask to be paired.
+
+// The port this server is actually listening on; `port` is only the one it last tried.
+const boundPort = () => http.address()?.port ?? port;
+
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+// A JSON block inside <script> must not be able to close the tag it sits in.
+const jsonForScript = (v) => JSON.stringify(v).replace(/</g, "\\u003c");
+
+function pageShell(title, body) {
+  return (
+    `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<style>body{font:15px/1.55 system-ui,sans-serif;max-width:620px;margin:48px auto;padding:0 16px;` +
+    `color:#1f2328;background:#fff}code{background:#f3f4f6;padding:1px 5px;border-radius:4px}` +
+    `.muted{color:#59636e}a{color:#1d4ed8}@media (prefers-color-scheme:dark){body{background:#0d1117;` +
+    `color:#e6edf3}code{background:#21262d}.muted{color:#9198a1}a{color:#6ea8fe}}</style></head>` +
+    `<body>${body}</body></html>`
+  );
+}
+
+function servePairPage(res, raw) {
+  let origin = null;
+  try {
+    origin = new URL(raw).origin;
+  } catch {}
+  if (!origin || !isSiteFor(PROJECT, origin)) {
+    res.writeHead(403, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end(pageShell("uitalk — not paired",
+      `<h1>Not a site this project was started for</h1>` +
+      `<p>${esc(raw || "No site was given")} has not been added to <code>${esc(PROJECT)}</code>.</p>` +
+      `<p>To add it, run this in the project:</p><p><code>uitalk --url ${esc(raw || "https://your-site")}</code></p>`));
+    return;
+  }
+  const offer = { v: 1, site: origin, project: PROJECT, port: boundPort(), token: TOKEN, build: readClient().build };
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+  });
+  res.end(pageShell("uitalk — pair " + origin,
+    `<script type="application/json" id="uitalk-pairing">${jsonForScript(offer)}</script>` +
+    `<h1>Pair ${esc(origin)}</h1>` +
+    `<p>with the uitalk session for <code>${esc(PROJECT)}</code>.</p>` +
+    `<p id="uitalk-pair-status" class="muted">Waiting for the uitalk extension…</p>` +
+    `<div id="uitalk-no-extension"><p>If nothing happens, the extension is not installed in this browser. ` +
+    `Install it once with <code>uitalk --extension</code>, load the folder it prints at ` +
+    `<code>chrome://extensions</code> (Developer mode → Load unpacked), then reload this page.</p></div>`));
+}
+
+function serveSitesPage(res) {
+  const sites = sitesFor(PROJECT);
+  const list = sites.length
+    ? `<ul>${sites.map((s) => `<li><a href="/__uitalk/pair?site=${encodeURIComponent(s)}">${esc(s)}</a></li>`).join("")}</ul>`
+    : `<p>No sites yet. Add one from the project with <code>uitalk --url https://staging.example.com</code>.</p>`;
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  res.end(pageShell("uitalk",
+    `<h1>uitalk</h1><p class="muted">Session for <code>${esc(PROJECT)}</code>. ` +
+    `There is no local app behind this one; it works on deployed sites through the browser extension.</p>` +
+    `<h2>Sites</h2>${list}`));
+}
+
 // Our socket is claimed by path; everything else upgrading (HMR) is piped to the app.
 const wss = new WebSocketServer({ noServer: true });
-const forwardUpgrade = proxyUpgrade({ target: { host: APP_HOST, port: APP_PORT } });
+const forwardUpgrade = HAS_APP
+  ? proxyUpgrade({ target: { host: APP_HOST, port: APP_PORT } })
+  : (req, socket) => socket.destroy();
 
 // A browser can be made to open a WebSocket to any local port just by visiting a
 // page that tries it — binding to loopback keeps other machines out, but not a
@@ -227,17 +331,23 @@ const forwardUpgrade = proxyUpgrade({ target: { host: APP_HOST, port: APP_PORT }
 // are only ever reached on loopback (see http.listen below and APP_HOST's default),
 // so every legitimate caller — the proxied app, the split-screen shell, and the
 // bookmarklet pointed at a locally-run dev server — has a loopback origin too.
+//
+// The browser extension's service worker connects with its own chrome-extension://
+// origin. That is not a web page: no site can send it, and an extension that could
+// reach this port could already read the token out of any page this bridge serves.
+// The token still gates it like every other caller.
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1"]);
 
 function originIsTrusted(originHeader) {
   if (!originHeader) return true;
-  let hostname;
+  let url;
   try {
-    hostname = new URL(originHeader).hostname.replace(/^\[|\]$/g, "");
+    url = new URL(originHeader);
   } catch {
     return false;
   }
-  return LOOPBACK_HOSTNAMES.has(hostname);
+  if (url.protocol === "chrome-extension:") return /^[a-p]{32}$/.test(url.hostname);
+  return LOOPBACK_HOSTNAMES.has(url.hostname.replace(/^\[|\]$/g, ""));
 }
 
 const refuse = (socket, why) => {
@@ -793,6 +903,13 @@ wss.on("connection", (ws) => {
   ws.on("error", (err) => log("socket error:", err.message));
 });
 
+// A deployed page is named by its full URL: its path alone would read as a route of
+// the local app, which it is not.
+function describePage(page) {
+  if (page?.deployed && page.url) return `deployed page ${page.url}`;
+  return `page ${page?.path ?? "?"}`;
+}
+
 // A chat frame may carry a screenshot the user volunteered with their message.
 function buildUserContent(frame) {
   const v = frame.page?.viewport;
@@ -804,7 +921,7 @@ function buildUserContent(frame) {
       (screen.zoom < 1 ? ` (shown at ${Math.round(screen.zoom * 100)}%)` : "")
     : `viewport ${v?.w}x${v?.h}`;
   const header =
-    `[page ${frame.page?.path ?? "?"} | ${where} @${v?.dpr ?? 1}x | ` +
+    `[${describePage(frame.page)} | ${where} @${v?.dpr ?? 1}x | ` +
     `${frame.selectionCount ?? 0} element(s) selected]`;
   if (process.env.UITALK_DEBUG) log(`user header: ${header}`);
 
@@ -1077,6 +1194,10 @@ function beginApproval(frame) {
         (frame.also ? `Additional rules:\n${frame.also}\n` : "") +
         `\nElement identity:\n${JSON.stringify(frame.element, null, 2)}\n` +
         `Page: ${frame.page?.path ?? "unknown"}\n\n` +
+        (frame.page?.deployed
+          ? `This was previewed on a deployed site (${frame.page.url}), so the edit goes to the ` +
+            `local checkout and will show there only after the next deploy.\n\n`
+          : "") +
         `Now commit this to source. Find where this element is defined and where its ` +
         `styles live, then make the edit the way the surrounding code would. Match the ` +
         `project's conventions rather than pasting the preview CSS verbatim, and do not ` +
@@ -1291,6 +1412,13 @@ How to work here:
 - After a preview is approved, place the change where the project already keeps that kind of
   thing and match its conventions. Never carry a data-uitalk-* attribute into source; those are
   preview handles only.
+- A message whose header says "deployed page" comes from a live site (staging or production)
+  opened through the uitalk browser extension, not from the local dev server. That site was built
+  from some commit that may not match the local checkout, and its build carries no file-and-line
+  metadata, so locate_source can only offer leads there. Your source edits go to the local
+  checkout and will not appear on that page until the user deploys: do not capture to confirm
+  an edit there, and say in one line that it will show after the next deploy. Previews
+  (try_style, show_options) still work on the page itself, since they only touch the user's tab.
 - Keep replies short. The user is looking at the page, not at text.
 `.trim();
 
@@ -1832,15 +1960,20 @@ async function ready() {
     process.exit(0);
   }
 
-  const twin = registry.servingApp(APP_HOST, APP_PORT);
+  const twin = HAS_APP ? registry.servingApp(APP_HOST, APP_PORT) : null;
   if (twin && twin.pid !== process.pid) {
     log(`note: bridge on :${twin.port} (pid ${twin.pid}) already fronts ${APP_HOST}:${APP_PORT}`);
   }
 
   const others = registry.list().filter((e) => e.pid !== process.pid);
-  log(`proxying 127.0.0.1:${port} -> ${APP_HOST}:${APP_PORT}`);
-  log(`open http://127.0.0.1:${port} and the panel is injected for you`);
-  log(`or http://127.0.0.1:${port}/__uitalk/shell for split screen with device sizes`);
+  if (HAS_APP) {
+    log(`proxying 127.0.0.1:${port} -> ${APP_HOST}:${APP_PORT}`);
+    log(`open http://127.0.0.1:${port} and the panel is injected for you`);
+    log(`or http://127.0.0.1:${port}/__uitalk/shell for split screen with device sizes`);
+  } else {
+    log(`no local app; serving deployed sites through the extension — http://127.0.0.1:${port}`);
+  }
+  for (const site of sitesFor(PROJECT)) log(`site: ${site} — pair at http://127.0.0.1:${port}/__uitalk/pair?site=${encodeURIComponent(site)}`);
   log(`project ${PROJECT}   client build ${readClient().build}`);
   log(`agent: ${config.agent} — ${AGENT_MODES[config.agent] ?? "unknown mode"}`);
   if (config.agent !== "off") {

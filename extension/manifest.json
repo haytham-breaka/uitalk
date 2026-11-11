@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "uitalk",
+  "version": "0.0.0",
+  "description": "Talk to your local uitalk session from deployed sites: pick elements on staging or production and discuss them with the agent working on your checkout.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/__uitalk/pair*", "http://localhost/__uitalk/pair*"],
+      "js": ["pair.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "uitalk", "default_popup": "popup.html" }
+}

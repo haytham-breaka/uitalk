@@ -28,9 +28,9 @@ Changing `agent*` or `opencodeServerUrl` takes effect on the next bridge start. 
 | Env var | Default | Meaning |
 |---|---|---|
 | `UITALK_PROJECT` | `cwd` | Project root the agent reads and edits |
-| `UITALK_APP_PORT` | `5173` | Your dev server's port |
+| `UITALK_APP_PORT` | `5173` | Your dev server's port. `0` runs the bridge with no local app, for deployed sites only (what `uitalk --url` does when no dev server is given) |
 | `UITALK_APP_HOST` | `127.0.0.1` | Your dev server's host — not the bridge's; the bridge itself always binds to `127.0.0.1` |
 | `UITALK_PORT` | *first free from 8400* | Pin the bridge's port. Leave unset to run several at once |
-| `UITALK_HOME` | `~/.uitalk` | Where the instance registry, logs and credentials live |
+| `UITALK_HOME` | `~/.uitalk` | Where the instance registry, logs, credentials, paired sites (`sites/`) and the list of extension folders to keep current (`extension.json`) live |
 | `UITALK_RPC_TIMEOUT` | `5000` | Milliseconds before a page call is abandoned |
 | `UITALK_DEBUG` | unset | `1` logs agent events, `2` dumps them |

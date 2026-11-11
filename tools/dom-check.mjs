@@ -238,6 +238,32 @@ check("reset drops every preview sheet", window.document.adoptedStyleSheets.leng
   card.remove();
 }
 
+// --- try_markup never runs anything: on a deployed site that would be script in
+//     the user's signed-in session, steerable by what the page shows the agent
+{
+  const card = window.document.createElement("div");
+  card.className = "inert-card";
+  window.document.body.appendChild(card);
+  const picked = UITalk.pick(card);
+  const result = UITalk.tryMarkup({ ref: picked.ref, html:
+    `<section class="hero" onclick="steal()"><script>steal()</script>` +
+    `<img src="x" onerror="steal()" alt="pic"><a href=" javascript:steal()">go</a>` +
+    `<a href="/pricing">ok</a><img src="data:image/png;base64,AAAA" alt="inline"><a href="data:text/html,x">d</a><iframe srcdoc="<script>steal()</script>"></iframe>` +
+    `<svg><script>steal()</script><a xlink:href="javascript:steal()"></a></svg><h2>Kept</h2></section>` });
+  const out = window.document.querySelector(`[data-uitalk-ref="${picked.ref}"]`);
+  const html = out?.outerHTML ?? "";
+  check("try_markup strips script, frames and event handlers before inserting",
+    !/script|iframe|onclick|onerror|javascript:/i.test(html), html);
+  check("and keeps the markup that only looks like something",
+    /<h2>Kept<\/h2>/.test(html) && /href="\/pricing"/.test(html) && /alt="pic"/.test(html) && /class="hero"/.test(html) &&
+      /src="data:image\/png/.test(html) && !/data:text/.test(html), html);
+  check("and says what it left out", /<script>/.test(result.removed ?? "") && /onerror/.test(result.removed ?? ""), result.removed);
+  const plain = UITalk.tryMarkup({ ref: picked.ref, html: "<div>plain</div>" });
+  check("ordinary markup reports nothing removed", plain.removed === undefined, JSON.stringify(plain));
+  UITalk.unpick(picked.ref);
+  card.remove();
+}
+
 // --- try_markup parses relative to the target's real position, not a
 // detached <div>, since generic-element parsing silently strips content that
 // is only valid in a specific context (a table row outside a table, ...)

@@ -73,6 +73,25 @@ behind the proxy:
 From that point the panel is their interface; their messages arrive as ordinary user
 messages.
 
+## Deployed sites
+
+When the user wants to work on a site that's already deployed (staging, production, any
+URL that isn't their local dev server), don't proxy it. Use the browser extension:
+
+```bash
+uitalk --url https://staging.example.com
+```
+
+Run it in the project whose code the site was built from. It starts the session if
+needed (no local app required) and prints a pairing link; give the user that link to
+open in Chrome. If the output says the extension isn't installed, run
+`uitalk --extension` first, and tell the user to load the folder it prints at
+`chrome://extensions` (Developer mode → Load unpacked). They do that once.
+
+Messages from such a page say "deployed page" in their header. Edits there go to the
+local checkout and show on the site only after a deploy. Details for the user are in
+`docs/extension.md`.
+
 ## Working in the page
 
 The panel's messages reach you as ordinary user messages. The page tools are:
