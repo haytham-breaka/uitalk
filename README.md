@@ -29,6 +29,7 @@ any MCP-capable editor can answer instead.
 - [Features](#features)
 - [Who answers: agent modes](#who-answers-agent-modes)
 - [Other editors (MCP)](#other-editors-mcp)
+- [Deployed sites (staging, production)](#deployed-sites-staging-production)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
 - [Contributing](#contributing)
@@ -223,6 +224,22 @@ A standalone MCP server exposes all of the page tools over stdio, so Cursor, Cli
 
 The MCP server finds the running bridge through the registry, or takes `UITALK_PORT` if you would rather be explicit. One thing changes shape: MCP is request/response, so your choice of variant arrives through **`await_choice`** rather than as a pushed message — that, OpenCode's differently-shaped config, and what the panel hides in this mode are in [docs/agent-modes.md](docs/agent-modes.md#off-any-mcp-editor).
 
+## Deployed sites (staging, production)
+
+The panel also works on a site that's already deployed, through the uitalk browser
+extension: on the real page, in your own Chrome, signed in as you. What you pick there
+goes to the session for your local checkout, and edits land in that code, never on the
+site.
+
+```bash
+uitalk --extension                          # once: prints a folder to load in chrome://extensions
+uitalk --url https://staging.example.com    # in the project: prints a link that pairs the site
+```
+
+Previews work on the live page. Source edits show up on the site after your next
+deploy. Setup, what differs from a local app, and the security model are in
+[docs/extension.md](docs/extension.md).
+
 ## Architecture
 
 <picture>
@@ -236,7 +253,7 @@ The bridge sits between your browser and your dev server. It proxies every reque
 
 **Localhost only, with no flag to widen that.** The bridge binds to `127.0.0.1` — nothing else, no exceptions, and there is no `--host` option or setting that changes it. That's a real invariant to lean on, not just a default: the proxy also strips the app's CSP and CSP-Report-Only headers from every response so the injected script and its socket aren't blocked, which is fine for a tool that only your own machine can reach, and would not be fine on a network anyone else is on. `UITALK_APP_HOST` configures where your *dev server* lives, not where the bridge itself listens.
 
-Prefer your own URL? `curl http://127.0.0.1:8400/__uitalk/bookmarklet` prints a bookmarklet that loads the same client. It needs re-clicking after each reload, and a strict app CSP can block it.
+Prefer your own URL? `curl http://127.0.0.1:8400/__uitalk/bookmarklet` prints a bookmarklet that loads the same client. It needs re-clicking after each reload, and a strict app CSP can block it. For a deployed site, use the [extension](docs/extension.md) instead.
 
 The file-by-file layout is in [CONTRIBUTING.md](CONTRIBUTING.md#development-setup).
 

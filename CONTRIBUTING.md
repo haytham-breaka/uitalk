@@ -46,6 +46,14 @@ server/
   usage.mjs       how widely a component is reused, for the ask-before-rippling check
   candidates.mjs  project-source search behind locate_source's last fallback
   proxy.mjs       HTML-response injection, CSP strip, websocket passthrough
+  client-bundle.mjs  the client as one script plus its build stamp, shared with the extension
+  sites.mjs       which deployed sites a project may be paired with (written by --url)
+  extension.mjs   installs the extension into a folder and keeps every install current
+extension/        the Chrome extension for deployed sites — see docs/extension.md
+  background.js   service worker: pairing checks, injection, the Port-to-WebSocket relay
+  content.js      runs before the client on a paired site; a WebSocket-shaped Port
+  pair.js         reads a bridge's pairing offer and hands it to the worker
+  grant.*, popup.*  confirmation page (where Chrome asks for the site) and paired-site list
 client/           concatenated and served at /__uitalk/client.js
   api.js          identity, geometry, selection, preview layer
   raster.js       element/region -> PNG via foreignObject, fonts and images embedded
@@ -104,6 +112,7 @@ that would pass either way.
 | `tools/mcp-check.mjs` | the MCP server end to end, over real stdio JSON-RPC |
 | `tools/server-check.mjs` | settings, keys, registry, git snapshots, proxy, tool handlers, the frame router and the OpenCode agent loop |
 | `tools/probe-ws.mjs` | HMR passthrough, including a frame packed into the handshake |
+| `tools/extension-check.mjs` | the extension's pairing checks, injection, relay, port rediscovery and self-update, against a fake `chrome` |
 
 `dom-check` runs the real client against a synthetic DOM. The `fake-page*` and `probe-*`
 harnesses speak the real socket protocol and drive a live bridge as a subprocess, so
@@ -157,6 +166,17 @@ end. Separately verified, by hand:
   path with real cross-engine risk (canvas tainting and `foreignObject` support have
   historically diverged between engines), and it holds up. Script:
   `uitalk-demos/scripts/smoke-firefox.mjs`.
+
+- **The browser extension, in real Chromium** (Playwright, extension loaded unpacked):
+  signing in to an HTTPS "staging" site with a strict production CSP, opening the pairing
+  link, confirming on the extension's page, the panel appearing on the signed-in page and
+  connecting to a bridge with no local app, picking an element through the panel, and an
+  MCP client then reading that element (marked deployed), screenshotting it, and finding
+  its JSX source by class name. From the site's own scripts (main world), the panel's
+  shadow root reads as null, no uitalk global or token is visible, and a click they fake
+  on the page selects nothing, while the user's real click does. The panel was driven
+  with real mouse input located through CDP, the only way into its closed root. Chrome's
+  permission dialog itself was pre-granted, since headless automation can't click it.
 
 **Known not to work here, not in the product:** WebKit could not be installed on this
 machine — `playwright install webkit` downloads it, but launching it needs a GTK4 /

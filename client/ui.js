@@ -20,9 +20,18 @@
   // The bridge handed this page a capability token (on the injecting <script> tag,
   // or set by the bookmarklet); the socket handshake is refused without it.
   const token = globalThis.__UITALK_TOKEN__ ?? null;
+  // A proxied page reaches the bridge at its own origin. A bookmarklet page is on
+  // the app's origin instead, so the bookmarklet names the bridge's host; and the
+  // extension supplies a whole connection of its own (its service worker holds the
+  // socket and the token, so this page never sees either).
+  const bridgeHost = globalThis.__UITALK_BRIDGE__ ?? null;
   const SOCKET =
-    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/__uitalk/socket` +
+    (bridgeHost
+      ? `ws://${bridgeHost}/__uitalk/socket`
+      : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/__uitalk/socket`) +
     (token ? `?token=${encodeURIComponent(token)}` : "");
+  const openSocket = globalThis.__UITALK_CONNECT__ ?? ((url) => new WebSocket(url));
+  const viaExtension = Boolean(globalThis.__UITALK_EXTENSION__);
 
   // In the shell the API lives in the frame, and the frame can be mid-navigation,
   // so every call goes through an accessor with an inert stand-in behind it.
@@ -45,7 +54,12 @@
   const host = document.createElement("div");
   host.id = "uitalk-host";
   host.style.cssText = "all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none";
-  const root = host.attachShadow({ mode: "open" });
+  // On a deployed site the page's own scripts — third-party tags included — share
+  // this DOM. An open root would let them type into the chat and click approve, and
+  // so steer an agent that can read and edit the user's checkout. Closed, and made
+  // in the extension's isolated world (where a page patch to attachShadow cannot
+  // reach), it gives them nothing to hold. A proxied local app is the user's own code.
+  const root = host.attachShadow({ mode: viaExtension ? "closed" : "open" });
   document.documentElement.appendChild(host);
   api().setUiHost?.(host);
 
@@ -307,6 +321,7 @@
       .meter .split { color: #868d98; font-size: 13px; text-decoration: none; line-height: 1;
                       display: inline-flex; align-items: center; }
       .meter .split:hover { color: #fff; }
+      .meter .split[hidden] { display: none; }
       .meter .gear { cursor: pointer; color: #868d98; font-size: 13px; }
       .meter .gear:hover { color: #fff; }
 
@@ -809,7 +824,10 @@
       ui.split.textContent = "⤢";
       ui.split.title = "Leave split screen";
     } else {
-      ui.split.href = `/__uitalk/shell#${location.pathname}${location.search}`;
+      // The shell frames the app through the bridge's proxy, which a deployed site in
+      // the extension does not go through — so there is no split screen to offer.
+      ui.split.hidden = viaExtension;
+      ui.split.href = `${bridgeHost ? `http://${bridgeHost}` : ""}/__uitalk/shell#${location.pathname}${location.search}`;
       ui.split.textContent = "⧉";
       ui.split.title = "Split screen with device sizes";
     }
@@ -1115,7 +1133,7 @@
   let backoff = 500;
 
   function connect() {
-    ws = new WebSocket(SOCKET);
+    ws = openSocket(SOCKET);
 
     ws.onopen = () => {
       backoff = 500;
@@ -1146,7 +1164,9 @@
           if (f.build && globalThis.__UITALK_BUILD__ && f.build !== globalThis.__UITALK_BUILD__) {
             say("warn",
               `this panel is build ${globalThis.__UITALK_BUILD__}, the bridge now serves ${f.build} — ` +
-              `reload the page to pick it up`);
+              (viaExtension
+                ? "the extension is updating itself; reload this page in a moment"
+                : "reload the page to pick it up"));
           }
           config = f.settings ?? {};
           fields = f.fields ?? {};
@@ -1228,8 +1248,9 @@
               : `could not revert: ${f.text}`);
 
         case "client_updated":
-          return say("warn",
-            `the panel has been updated to build ${f.build} — reload the page to pick it up`);
+          return say("warn", viaExtension
+            ? `uitalk has been updated to build ${f.build} — the extension picks it up on its own; reload this page in a moment`
+            : `the panel has been updated to build ${f.build} — reload the page to pick it up`);
 
         case "bridge_stale":
           return say("warn",
@@ -1666,6 +1687,14 @@
   // the caller can dispatch the approval as soon as this returns.
   async function captureBefore(choice, approvalId, verify = {}) {
     const base = { approvalId, label: choice.label, ref: choice.ref, selector: choice.element?.selector, ...verify };
+    // A deployed page cannot show a local edit until it is deployed, so there is
+    // nothing to compare against: record the job (captureAfter names it) and skip the
+    // screen-share prompt a before-shot would cost.
+    if (api().pageContext().deployed) {
+      if (pendingByApproval.size >= PENDING_CAP) pendingByApproval.delete(pendingByApproval.keys().next().value);
+      pendingByApproval.set(approvalId, { ...base, deployed: true });
+      return;
+    }
     if (pendingByApproval.size >= PENDING_CAP) pendingByApproval.delete(pendingByApproval.keys().next().value);
     pendingByApproval.set(approvalId, base); // a job exists immediately; a shot is added if we get one in time
     if (!native?.supported() || native.declined || config.nativeCapture === false) return;
@@ -1734,6 +1763,12 @@
       pendingByApproval.clear();
     }
     if (!job) return;
+    // Reloading a deployed page would only show the old build again, and comparing
+    // against it would report every committed edit as one that "did not survive".
+    if (job.deployed) {
+      say("note", `${job.label}: committed to your local checkout — this site will show it after the next deploy`);
+      return;
+    }
     // When a standalone reload is triggered, this document is about to be replaced and
     // the verification job has been handed to sessionStorage for the next load. The
     // finally still runs on the way out, so it must NOT verify here: the old document
@@ -1917,6 +1952,13 @@
   let attachedTo = null;
 
   function onSource(type, fn, capture) {
+    // These listen on the page itself, which a site's scripts can dispatch events at.
+    // In the extension only the user's own input counts: a script must not be able
+    // to pick elements, change the selection or flip options behind their back.
+    if (viaExtension) {
+      const own = fn;
+      fn = (e) => { if (e.isTrusted) own(e); };
+    }
     pageListeners.push([type, fn, capture]);
     const w = source();
     if (w) w.addEventListener(type, fn, capture);
@@ -2339,7 +2381,7 @@
   }
 
   onSource("keydown", onKey, true);   // keys pressed over the app
-  addEventListener("keydown", onKey, true); // and over the panel
+  addEventListener("keydown", viaExtension ? (e) => { if (e.isTrusted) onKey(e); } : onKey, true); // and over the panel
 
   // ------------------------------------------------------- launcher + drag
 

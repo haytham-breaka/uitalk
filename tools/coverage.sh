@@ -7,7 +7,7 @@ set -e
 cd "$(dirname "$0")/.."
 rm -rf .cov && mkdir -p .cov
 
-for suite in dom-check ui-check raster-check capture-check probe-ws server-check mcp-check agent-check; do
+for suite in dom-check ui-check raster-check capture-check probe-ws server-check mcp-check agent-check extension-check; do
   printf '%-14s' "$suite"
   if NODE_V8_COVERAGE=.cov node "tools/$suite.mjs" > /tmp/uitalk-cov-$suite.out 2>&1; then
     echo "$(grep -c '^  ok' /tmp/uitalk-cov-$suite.out) ok"
@@ -17,6 +17,6 @@ for suite in dom-check ui-check raster-check capture-check probe-ws server-check
 done
 
 npx c8 report --temp-directory=.cov --all \
-  --include='client/**' --include='server/**' \
+  --include='client/**' --include='server/**' --include='extension/**' \
   --reporter=text --reporter=json-summary \
   --check-coverage --lines 85

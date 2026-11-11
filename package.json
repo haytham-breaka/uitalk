@@ -1,6 +1,6 @@
 {
   "name": "uitalk",
-  "version": "0.6.86",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Edit a running web app from inside the page: pick elements, preview changes, compare variants, and commit the approved one to source \u2014 driven by a local coding agent.",
@@ -9,7 +9,7 @@
     "fake-page": "node tools/fake-page.mjs",
     "install-plugin": "node tools/install-plugin.mjs",
     "list": "node server/index.mjs --list",
-    "test": "node tools/dom-check.mjs && node tools/ui-check.mjs && node tools/raster-check.mjs && node tools/capture-check.mjs && node tools/probe-ws.mjs && node tools/server-check.mjs && node tools/mcp-check.mjs && node tools/agent-check.mjs",
+    "test": "node tools/dom-check.mjs && node tools/ui-check.mjs && node tools/raster-check.mjs && node tools/capture-check.mjs && node tools/probe-ws.mjs && node tools/server-check.mjs && node tools/mcp-check.mjs && node tools/agent-check.mjs && node tools/extension-check.mjs",
     "coverage": "tools/coverage.sh"
   },
   "dependencies": {
@@ -47,6 +47,7 @@
     "bin/",
     "client/",
     "server/",
+    "extension/",
     "SKILL.md",
     ".claude-plugin/",
     ".npmrc",
