@@ -11,6 +11,10 @@
 //   uitalk --stop       # stop the one serving this project
 //   uitalk --list       # every bridge running
 //
+// Deployed sites (staging, production), through the browser extension:
+//   uitalk --extension            # install the extension once; prints the folder to load
+//   uitalk --url https://staging.example.com   # pair a site with this project's session
+//
 // Who answers the panel:
 //   uitalk                        # the built-in Claude session (default)
 //   uitalk --no-agent             # nobody: drive the page from an MCP client
@@ -135,6 +139,8 @@ let agent = process.env.UITALK_AGENT || "";
 let provider = process.env.UITALK_AGENT_PROVIDER || "";
 let model = process.env.UITALK_AGENT_MODEL || "";
 let baseUrl = process.env.UITALK_AGENT_BASE_URL || "";
+let site = "";
+let extensionDir = null; // null: not asked; "": the default folder
 
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
@@ -149,6 +155,11 @@ for (let i = 0; i < argv.length; i++) {
     case "--provider": provider = next(); break;
     case "--model": model = next(); break;
     case "--base-url": baseUrl = next(); break;
+    case "--url": site = next() ?? ""; break;
+    case "--extension":
+      mode = "extension";
+      extensionDir = argv[i + 1] && !argv[i + 1].startsWith("--") ? next() : "";
+      break;
     case "--fg": mode = "fg"; break;
     case "--status": mode = "status"; break;
     case "--stop": mode = "stop"; break;
@@ -283,9 +294,74 @@ async function startDev() {
 
 // ------------------------------------------------------------------------ modes
 
+/** Where Chrome on the Windows side can load a folder from, when we run in WSL. */
+function windowsPath(dir) {
+  if (!process.env.WSL_DISTRO_NAME) return null;
+  try {
+    return execFileSync("wslpath", ["-w", dir], { encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Under WSL, Chrome runs on Windows and does not reliably load an unpacked extension
+ * from a \\wsl.localhost path, so the default there is a folder on the Windows side.
+ */
+function windowsExtensionDir() {
+  if (!process.env.WSL_DISTRO_NAME) return null;
+  try {
+    const local = execFileSync("cmd.exe", ["/c", "echo %LOCALAPPDATA%"], { cwd: "/mnt/c", encoding: "utf8", timeout: 10000 }).trim();
+    if (!/^[A-Za-z]:\\/.test(local)) return null;
+    return join(execFileSync("wslpath", ["-u", local], { encoding: "utf8" }).trim(), "uitalk", "extension");
+  } catch {
+    return null;
+  }
+}
+
+if (mode === "extension") {
+  const { installExtension, defaultExtensionDir } = await import(join(ROOT, "server", "extension.mjs"));
+  const r = installExtension(extensionDir ? resolvePath(extensionDir) : (windowsExtensionDir() ?? defaultExtensionDir()));
+  if (!r.ok) {
+    console.error(`[uitalk] ${r.error}`);
+    process.exit(1);
+  }
+  const win = windowsPath(r.dir);
+  console.log(`[uitalk] extension (build ${r.build}) is in ${r.dir}`);
+  if (win) console.log(`[uitalk] from Windows Chrome: ${win}`);
+  console.log("[uitalk] load it once: chrome://extensions → Developer mode → Load unpacked → that folder.");
+  console.log("[uitalk] every bridge keeps this folder up to date from now on; there is nothing to rebuild.");
+  process.exit(0);
+}
+
+let siteOrigin = null;
+if (site) {
+  const { addSite } = await import(join(ROOT, "server", "sites.mjs"));
+  const added = addSite(project, site);
+  if (!added.ok) {
+    console.error(`[uitalk] --url: ${added.error}`);
+    process.exit(2);
+  }
+  siteOrigin = added.origin;
+}
+
+async function printPairing(port) {
+  if (!siteOrigin) return;
+  const { installedDirs } = await import(join(ROOT, "server", "extension.mjs"));
+  console.log(`[uitalk] pair ${siteOrigin}: open http://127.0.0.1:${port}/__uitalk/pair?site=${encodeURIComponent(siteOrigin)}`);
+  console.log("[uitalk] in the Chrome that has the uitalk extension; it asks you to confirm, then opens the site.");
+  if (!installedDirs().length) {
+    console.log("[uitalk] the extension is not installed yet: run `uitalk --extension` first.");
+  }
+}
+
 if (mode === "status") {
   const info = running();
   if (info) {
+    if (!info.appPort) {
+      console.log(`[uitalk] running: pid ${info.pid} at http://127.0.0.1:${info.port} (no local app; deployed sites only)`);
+      process.exit(0);
+    }
     console.log(`[uitalk] running: pid ${info.pid} at http://127.0.0.1:${info.port} -> :${info.appPort}`);
     const devPid = devRunning();
     if (devPid) {
@@ -322,7 +398,8 @@ if (mode === "stop") {
   const info = running();
   if (info) {
     console.log(`[uitalk] already running at http://127.0.0.1:${info.port} (pid ${info.pid})`);
-    console.log(`[uitalk] split screen: http://127.0.0.1:${info.port}/__uitalk/shell`);
+    if (info.appPort) console.log(`[uitalk] split screen: http://127.0.0.1:${info.port}/__uitalk/shell`);
+    await printPairing(info.port);
     process.exit(0);
   }
 }
@@ -331,7 +408,9 @@ if (devCmd) {
   if (!(await startDev())) process.exit(1);
 }
 
-if (!appPort) {
+// With --url alone there is no local app to look for: an open common port would be
+// some other project's dev server, not this one.
+if (!appPort && !siteOrigin) {
   for (const candidate of CANDIDATES) {
     if (await portOpen(candidate)) {
       appPort = String(candidate);
@@ -340,6 +419,10 @@ if (!appPort) {
     }
   }
 }
+
+// A deployed site needs no local app: the bridge runs without one, and the
+// extension brings the panel to the site instead.
+if (!appPort && siteOrigin) appPort = "0";
 
 if (!appPort) {
   console.error(
@@ -384,8 +467,13 @@ if (mode === "fg") {
   }
 
   if (found) {
-    console.log(`[uitalk] http://127.0.0.1:${found.port}  (pid ${found.pid}, proxying :${found.appPort})`);
-    console.log(`[uitalk] split screen: http://127.0.0.1:${found.port}/__uitalk/shell`);
+    if (found.appPort) {
+      console.log(`[uitalk] http://127.0.0.1:${found.port}  (pid ${found.pid}, proxying :${found.appPort})`);
+      console.log(`[uitalk] split screen: http://127.0.0.1:${found.port}/__uitalk/shell`);
+    } else {
+      console.log(`[uitalk] session running (pid ${found.pid}) with no local app`);
+    }
+    await printPairing(found.port);
     console.log(`[uitalk] log: ${logPath}`);
     process.exit(0);
   }

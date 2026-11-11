@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>uitalk — confirm pairing</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <main>
+    <h1>Pair a site with uitalk</h1>
+    <div id="offer" hidden>
+      <p>Show the uitalk panel on</p>
+      <p class="site" id="site"></p>
+      <p>and send what you pick there to the uitalk session for</p>
+      <p><code id="project"></code></p>
+      <p class="muted">Chrome will ask to let uitalk read and change this site. The panel only previews changes in
+        your own tab; edits go to your local checkout, never to the site.</p>
+      <p><button id="allow">Allow and open the site</button> <button id="cancel" class="quiet">Cancel</button></p>
+    </div>
+    <p id="status" class="muted"></p>
+  </main>
+  <script src="grant.js"></script>
+</body>
+</html>
