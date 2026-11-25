@@ -13,7 +13,7 @@
     "coverage": "tools/coverage.sh"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "ws": "^8.18.0",
     "zod": "^4.0.0"
   },
